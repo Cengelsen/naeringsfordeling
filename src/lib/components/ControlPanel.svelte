@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Kommune, LoadingState, Organisasjonsform } from '../types'
+  import type { Kommune, DotsLoadState, LoadingState, Organisasjonsform } from '../types'
   import {
     mapSettings,
     resetSettings,
@@ -7,18 +7,21 @@
     setVisualization,
     toggleOrgType,
   } from '../stores/settings.svelte'
+  import { MIN_DOTS_ZOOM } from '../services/api'
   import { fylkeFromKommune, fylkeName } from '../utils/geo'
+
   import type { ColorScheme, VisualizationMode } from '../types'
 
   interface Props {
     orgForms: Organisasjonsform[]
     kommuner: Kommune[]
     loading: LoadingState
+    dotsState: DotsLoadState
     totalCount: number
     onRefresh: () => void
   }
 
-  let { orgForms, kommuner, loading, totalCount, onRefresh }: Props = $props()
+  let { orgForms, kommuner, loading, dotsState, totalCount, onRefresh }: Props = $props()
 
   let orgSearch = $state('')
   let showAllOrgForms = $state(false)
@@ -43,18 +46,26 @@
   })
 
   const selectedOrgCount = $derived(mapSettings.orgTypes.length)
+  const isDotsView = $derived(mapSettings.visualization === 'dots')
+
+  const filteredKommuner = $derived.by(() => {
+    if (!mapSettings.selectedFylke) return kommuner
+    return kommuner.filter(
+      (k) => fylkeFromKommune(k.nummer) === mapSettings.selectedFylke,
+    )
+  })
 </script>
 
 <aside class="panel">
   <header class="panel-header">
     <h1>Næringsfordeling</h1>
-    <p class="subtitle">Organisasjoner i Norge · BRREG + OpenStreetMap</p>
+    <p class="subtitle">Organisasjoner i Norge · SQLite + OpenStreetMap</p>
   </header>
 
   <section class="section stats">
     <div class="stat">
       <span class="stat-value">{totalCount.toLocaleString('nb-NO')}</span>
-      <span class="stat-label">Organisasjoner</span>
+      <span class="stat-label">{isDotsView ? 'Prikker' : 'Organisasjoner'}</span>
     </div>
     <div class="stat">
       <span class="stat-value">{kommuner.length}</span>
@@ -70,7 +81,7 @@
           style:width="{loading.total ? (loading.progress / loading.total) * 100 : 0}%"
         ></div>
       </div>
-      <p>Henter data fra BRREG… {loading.progress}/{loading.total}</p>
+      <p>Henter data fra database…</p>
     </div>
   {:else if loading.error}
     <div class="error">{loading.error}</div>
@@ -78,8 +89,8 @@
 
   <section class="section">
     <h2>Visualisering</h2>
-    <div class="segmented">
-      {#each [['choropleth', 'Kart'], ['bubbles', 'Bobler']] as const as [mode, label] (mode)}
+    <div class="segmented three">
+      {#each [['choropleth', 'Kart'], ['bubbles', 'Bobler'], ['dots', 'Adresser']] as const as [mode, label] (mode)}
         <button
           type="button"
           class:active={mapSettings.visualization === mode}
@@ -90,11 +101,32 @@
       {/each}
     </div>
 
+    {#if isDotsView}
+      <p class="hint">
+        Zoom inn (nivå {MIN_DOTS_ZOOM}+) eller velg fylke/kommune. Hver prikk er én geokodet
+        organisasjon fra SQLite-databasen.
+      </p>
+      {#if dotsState.loading}
+        <p class="hint loading-hint">
+          {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Geokoder adresser…'}
+          {dotsState.message ?? ''}
+        </p>
+      {:else if dotsState.organizations > 0}
+        <p class="hint">
+          {dotsState.organizations.toLocaleString('nb-NO')} prikker i kartet
+          {#if dotsState.skipped > 0}
+            · {dotsState.skipped.toLocaleString('nb-NO')} uten adressetreff
+          {/if}
+        </p>
+      {/if}
+    {/if}
+
     <label class="field">
       <span>Fargepalett</span>
       <select
         value={mapSettings.colorScheme}
         onchange={(e) => setColorScheme(e.currentTarget.value as ColorScheme)}
+        disabled={isDotsView}
       >
         <option value="blues">Blå</option>
         <option value="oranges">Oransje</option>
@@ -107,6 +139,16 @@
       <input type="checkbox" bind:checked={mapSettings.showLegend} />
       Vis forklaring
     </label>
+  </section>
+
+  <section class="section">
+    <h2>Kommune</h2>
+    <select bind:value={mapSettings.selectedKommune}>
+      <option value="">Alle / kartutsnitt</option>
+      {#each filteredKommuner as kommune (kommune.nummer)}
+        <option value={kommune.nummer}>{kommune.navn}</option>
+      {/each}
+    </select>
   </section>
 
   <section class="section">
@@ -285,6 +327,14 @@
     grid-template-columns: 1fr 1fr;
     gap: 0.5rem;
     margin-bottom: 0.75rem;
+  }
+
+  .segmented.three {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .loading-hint {
+    color: #7dd3fc;
   }
 
   .segmented button,

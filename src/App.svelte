@@ -4,17 +4,27 @@
   import MapView from './lib/components/MapView.svelte'
   import { mapSettings } from './lib/stores/settings.svelte'
   import {
+    checkApiHealth,
     fetchKommuner,
     fetchMunicipalityCounts,
     fetchOrganisasjonsformer,
-  } from './lib/services/brreg'
-  import type { Kommune, LoadingState, MunicipalityCount, Organisasjonsform } from './lib/types'
+  } from './lib/services/api'
+  import type { Kommune, DotsLoadState, LoadingState, MunicipalityCount, Organisasjonsform } from './lib/types'
   import { fylkeFromKommune } from './lib/utils/geo'
 
   let orgForms = $state<Organisasjonsform[]>([])
   let kommuner = $state<Kommune[]>([])
   let geojson = $state<FeatureCollection | null>(null)
   let counts = $state<MunicipalityCount[]>([])
+  let dotsState = $state<DotsLoadState>({
+    loading: false,
+    phase: 'idle',
+    organizations: 0,
+    geocoded: 0,
+    skipped: 0,
+    kommuner: 0,
+    message: null,
+  })
   let loading = $state<LoadingState>({
     loading: true,
     progress: 0,
@@ -34,31 +44,28 @@
     return counts.filter((c) => visible.has(c.kommunenummer))
   })
 
-  const totalCount = $derived(visibleCounts.reduce((sum, c) => sum + c.count, 0))
+  const totalCount = $derived(
+    mapSettings.visualization === 'dots'
+      ? dotsState.organizations
+      : visibleCounts.reduce((sum, c) => sum + c.count, 0),
+  )
 
-  async function loadCounts(forceRefresh = false) {
+  async function loadCounts() {
     loading = {
       loading: true,
       progress: 0,
-      total: kommuner.length,
+      total: 1,
       error: null,
     }
 
     try {
-      counts = await fetchMunicipalityCounts(
-        kommuner.map((k) => k.nummer),
-        mapSettings,
-        (progress, total) => {
-          loading = { ...loading, progress, total }
-        },
-        forceRefresh,
-      )
-      loading = { loading: false, progress: kommuner.length, total: kommuner.length, error: null }
+      counts = await fetchMunicipalityCounts(mapSettings)
+      loading = { loading: false, progress: 1, total: 1, error: null }
     } catch (err) {
       loading = {
         loading: false,
         progress: 0,
-        total: kommuner.length,
+        total: 0,
         error: err instanceof Error ? err.message : 'Kunne ikke hente data',
       }
     }
@@ -78,20 +85,23 @@
   async function init() {
     loading = { loading: true, progress: 0, total: 3, error: null }
     try {
-      const [forms, kommuneList, geoResponse] = await Promise.all([
+      await checkApiHealth()
+
+      const geoResponse = await fetch('/data/kommuner.geojson').then((r) => {
+        if (!r.ok) throw new Error('Kunne ikke laste kartdata')
+        return r.json() as Promise<FeatureCollection>
+      })
+
+      geojson = geoResponse
+
+      const [forms, kommuneList] = await Promise.all([
         fetchOrganisasjonsformer(),
-        fetchKommuner(),
-        fetch('/data/kommuner.geojson').then((r) => {
-          if (!r.ok) throw new Error('Kunne ikke laste kartdata')
-          return r.json() as Promise<FeatureCollection>
-        }),
+        fetchKommuner(geoResponse),
       ])
 
       orgForms = forms
       kommuner = kommuneList
-      geojson = geoResponse
       filterKey = currentFilterKey()
-      loading = { loading: true, progress: 1, total: kommuneList.length, error: null }
       await loadCounts()
     } catch (err) {
       loading = {
@@ -120,12 +130,21 @@
     {orgForms}
     {kommuner}
     {loading}
+    {dotsState}
     {totalCount}
-    onRefresh={() => loadCounts(true)}
+    onRefresh={loadCounts}
   />
   <div class="map-area">
     {#if geojson}
-      <MapView {geojson} counts={visibleCounts} settings={mapSettings} />
+      <MapView
+        {geojson}
+        counts={visibleCounts}
+        settings={mapSettings}
+        {orgForms}
+        onDotsStateChange={(state) => {
+          dotsState = state
+        }}
+      />
     {:else if loading.error}
       <div class="map-placeholder">
         <p>{loading.error}</p>
@@ -171,6 +190,8 @@
     height: 100%;
     background: #1e293b;
     color: #94a3b8;
+    padding: 1rem;
+    text-align: center;
   }
 
   @media (max-width: 900px) {

@@ -7,19 +7,33 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "build-db": "tsx scripts/build-db.ts",
+    "sync": "tsx scripts/sync.ts",
+    "sync:full": "tsx scripts/sync.ts --full",
+    "sync:dev": "tsx scripts/sync.ts --dev --geocode-limit=5000",
+    "sync:geocode": "tsx scripts/sync.ts --geocode-only",
+    "server": "tsx server/index.ts",
+    "download-db": "bash scripts/download-db.sh"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tsconfig/svelte": "^5.0.8",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/leaflet": "^1.9.21",
     "@types/node": "^24.13.2",
+    "@types/stream-json": "^1.7.8",
+    "better-sqlite3": "^12.11.1",
+    "stream-json": "^3.5.0",
     "svelte": "^5.56.4",
     "svelte-check": "^4.7.1",
+    "tsx": "^4.23.1",
     "typescript": "~6.0.2",
     "vite": "^8.1.1"
   },
   "dependencies": {
+    "@hono/node-server": "^2.0.8",
+    "hono": "^4.12.30",
     "leaflet": "^1.9.4"
   }
 }

@@ -8,6 +8,15 @@ export interface Kommune {
   navn: string
 }
 
+export interface BrregAddress {
+  adresse?: string[]
+  postnummer?: string
+  poststed?: string
+  kommune?: string
+  kommunenummer?: string
+  landkode?: string
+}
+
 export interface MapFilters {
   orgTypes: string[]
   excludeKonkurs: boolean
@@ -15,7 +24,7 @@ export interface MapFilters {
   vatRegisteredOnly: boolean
 }
 
-export type VisualizationMode = 'choropleth' | 'bubbles'
+export type VisualizationMode = 'choropleth' | 'bubbles' | 'dots'
 export type ColorScheme = 'blues' | 'oranges' | 'greens' | 'purples'
 
 export interface MapSettings extends MapFilters {
@@ -23,6 +32,7 @@ export interface MapSettings extends MapFilters {
   colorScheme: ColorScheme
   showLegend: boolean
   selectedFylke: string
+  selectedKommune: string
 }
 
 export interface MunicipalityCount {
@@ -37,8 +47,38 @@ export interface LoadingState {
   error: string | null
 }
 
+export interface DotsLoadState {
+  loading: boolean
+  phase: 'idle' | 'fetching' | 'geocoding'
+  organizations: number
+  geocoded: number
+  skipped: number
+  kommuner: number
+  message: string | null
+}
+
+export interface Organization {
+  orgnr: string
+  navn: string
+  orgType: string
+  orgTypeLabel: string
+  addressText: string
+  postnummer: string
+  kommunenummer: string
+  lat: number
+  lng: number
+}
+
 export interface KommuneFeatureProperties {
   kommunenummer: string
   kommunenavn: string
   name?: string
+}
+
+export interface BrregEntity {
+  organisasjonsnummer: string
+  navn: string
+  organisasjonsform?: { kode: string; beskrivelse: string }
+  forretningsadresse?: BrregAddress
+  postadresse?: BrregAddress
 }

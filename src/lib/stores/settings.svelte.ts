@@ -9,6 +9,7 @@ export const defaultSettings: MapSettings = {
   colorScheme: 'blues',
   showLegend: true,
   selectedFylke: '',
+  selectedKommune: '',
 }
 
 export const mapSettings = $state<MapSettings>({ ...defaultSettings })

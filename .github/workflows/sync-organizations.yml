@@ -1,0 +1,103 @@
+name: Sync organization database
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      full_import:
+        description: Run full BRREG import (rebuild from scratch)
+        type: boolean
+        default: false
+      geocode_only:
+        description: Only geocode pending addresses (skip BRREG sync)
+        type: boolean
+        default: false
+      geocode_limit:
+        description: Max unique addresses to geocode per batch
+        type: string
+        default: '5000'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Download existing database
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          if gh release view database >/dev/null 2>&1; then
+            gh release download database --pattern 'organizations.db' --dir data --clobber
+            echo "Loaded existing database from release"
+            echo "has_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No existing database release found – will start initial build"
+            echo "has_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync database
+        env:
+          HAS_RELEASE: ${{ steps.download.outputs.has_release }}
+          FULL_IMPORT: ${{ github.event.inputs.full_import || 'false' }}
+          GEOCODE_ONLY: ${{ github.event.inputs.geocode_only || 'false' }}
+          GEOCODE_LIMIT: ${{ github.event.inputs.geocode_limit || '5000' }}
+          SYNC_GEOCODE_CONCURRENCY: '3'
+          GEOCODE_DELAY_MS: '200'
+        run: |
+          set -euo pipefail
+
+          if [ "$GEOCODE_ONLY" = "true" ]; then
+            echo "Modus: kun geokoding"
+            export SYNC_GEOCODE_LIMIT="$GEOCODE_LIMIT"
+            export BUILD_DB_MAX_ROUNDS=5
+            yarn sync:geocode --geocode-limit="$GEOCODE_LIMIT"
+          elif [ "$FULL_IMPORT" = "true" ]; then
+            echo "Modus: full import (manuell)"
+            export SYNC_GEOCODE_LIMIT=50000
+            export BUILD_DB_MAX_ROUNDS=10000
+            yarn build-db --fresh
+          elif [ "$HAS_RELEASE" = "false" ]; then
+            echo "Modus: første bygg – full BRREG-import + geokode så langt som mulig"
+            export SYNC_GEOCODE_LIMIT=50000
+            export BUILD_DB_MAX_ROUNDS=10000
+            yarn build-db --fresh
+          else
+            echo "Modus: inkrementell BRREG-sync + geokode nye/endrede adresser"
+            export SYNC_GEOCODE_LIMIT=5000
+            export BUILD_DB_MAX_ROUNDS=5
+            yarn build-db
+          fi
+
+      - name: Publish database release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: database
+          name: Organization database
+          body: |
+            Organization database sync.
+
+            Run: ${{ github.run_id }}
+            Time: ${{ github.run_started_at }}
+            Mode: ${{ steps.download.outputs.has_release == 'false' && 'initial build' || 'incremental sync' }}
+          files: data/organizations.db
+          make_latest: true
+          overwrite_files: true
