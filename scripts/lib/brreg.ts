@@ -2,6 +2,12 @@ import type { BrregEntity, BrregUpdate } from './types.js'
 import { LIMITS, fetchWithRetry, sleep } from './rate-limit.js'
 
 const API_BASE = 'https://data.brreg.no/enhetsregisteret/api'
+const UPDATE_PAGE_SIZE = 1000
+const BRREG_MAX_OFFSET = 10_000
+
+function maxAccessiblePage(size: number): number {
+  return Math.floor(BRREG_MAX_OFFSET / size) - 1
+}
 
 async function brregFetch<T>(path: string): Promise<T> {
   const response = await fetchWithRetry(`${API_BASE}${path}`, {
@@ -60,6 +66,8 @@ export async function fetchKommuneEntities(
 }
 
 export async function fetchLatestUpdateId(): Promise<number> {
+  const pageLimit = maxAccessiblePage(UPDATE_PAGE_SIZE)
+
   for (let daysAgo = 0; daysAgo < 7; daysAgo += 1) {
     const date = new Date()
     date.setUTCHours(0, 0, 0, 0)
@@ -69,18 +77,25 @@ export async function fetchLatestUpdateId(): Promise<number> {
     const head = await brregFetch<{
       _embedded?: { oppdaterteEnheter: BrregUpdate[] }
       page: { totalPages: number }
-    }>(`/oppdateringer/enheter?dato=${encodeURIComponent(dato)}&size=1000`)
+    }>(`/oppdateringer/enheter?dato=${encodeURIComponent(dato)}&size=${UPDATE_PAGE_SIZE}`)
 
     if (head.page.totalPages === 0) continue
 
-    const lastPage = head.page.totalPages - 1
+    const targetPage = Math.min(head.page.totalPages - 1, pageLimit)
     const tail = await brregFetch<{
       _embedded?: { oppdaterteEnheter: BrregUpdate[] }
-    }>(`/oppdateringer/enheter?dato=${encodeURIComponent(dato)}&size=1000&page=${lastPage}`)
+    }>(`/oppdateringer/enheter?dato=${encodeURIComponent(dato)}&size=${UPDATE_PAGE_SIZE}&page=${targetPage}`)
 
     const batch = tail._embedded?.oppdaterteEnheter ?? []
     const latest = batch.at(-1)
-    if (latest) return latest.oppdateringsid
+    if (!latest) continue
+
+    if (head.page.totalPages - 1 > pageLimit) {
+      const { maxId } = await fetchUpdatesSince(latest.oppdateringsid)
+      return maxId
+    }
+
+    return latest.oppdateringsid
   }
 
   return 0
@@ -91,15 +106,17 @@ export async function fetchUpdatesSince(
   onBatch?: (updates: BrregUpdate[]) => void,
 ): Promise<{ updates: BrregUpdate[]; maxId: number }> {
   const updates: BrregUpdate[] = []
+  let cursor = oppdateringsid
   let maxId = oppdateringsid
   let page = 0
   let totalPages = 1
+  const pageLimit = maxAccessiblePage(UPDATE_PAGE_SIZE)
 
-  while (page < totalPages) {
+  while (true) {
     const data = await brregFetch<{
       _embedded?: { oppdaterteEnheter: BrregUpdate[] }
       page: { totalPages: number; number: number }
-    }>(`/oppdateringer/enheter?oppdateringsid=${oppdateringsid}&size=1000&page=${page}`)
+    }>(`/oppdateringer/enheter?oppdateringsid=${cursor}&size=${UPDATE_PAGE_SIZE}&page=${page}`)
 
     const batch = data._embedded?.oppdaterteEnheter ?? []
     if (batch.length === 0) break
@@ -112,10 +129,20 @@ export async function fetchUpdatesSince(
     }
 
     totalPages = data.page.totalPages
-    page += 1
 
-    if (batch.length < 1000) break
+    if (batch.length < UPDATE_PAGE_SIZE) break
+
+    if (page >= pageLimit && page < totalPages - 1) {
+      cursor = batch[batch.length - 1].oppdateringsid
+      page = 0
+      totalPages = 1
+      await sleep(LIMITS.brregPageDelayMs)
+      continue
+    }
+
+    page += 1
     if (page < totalPages) await sleep(LIMITS.brregPageDelayMs)
+    else break
   }
 
   return { updates, maxId }

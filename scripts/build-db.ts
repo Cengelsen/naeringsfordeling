@@ -17,6 +17,7 @@ function parseArgs(argv: string[]) {
         process.env.BUILD_DB_MAX_ROUNDS ??
         10000,
     ),
+    maxGeocodeAddresses: Number(process.env.BUILD_DB_MAX_GEOCODE_ADDRESSES ?? '') || undefined,
   }
 }
 
@@ -40,6 +41,7 @@ async function main() {
     skipGeocode: args.skipGeocode,
     geocodeLimit: args.geocodeLimit,
     maxGeocodeRounds: args.maxGeocodeRounds,
+    maxGeocodeAddresses: args.maxGeocodeAddresses,
   })
 
   db.close()

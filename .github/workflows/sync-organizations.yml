@@ -62,28 +62,28 @@ jobs:
           GEOCODE_LIMIT: ${{ github.event.inputs.geocode_limit || '5000' }}
           SYNC_GEOCODE_CONCURRENCY: '3'
           GEOCODE_DELAY_MS: '200'
+          BUILD_DB_MAX_GEOCODE_ADDRESSES: '30000'
         run: |
           set -euo pipefail
 
           if [ "$GEOCODE_ONLY" = "true" ]; then
             echo "Modus: kun geokoding"
             export SYNC_GEOCODE_LIMIT="$GEOCODE_LIMIT"
-            export BUILD_DB_MAX_ROUNDS=5
             yarn sync:geocode --geocode-limit="$GEOCODE_LIMIT"
           elif [ "$FULL_IMPORT" = "true" ]; then
             echo "Modus: full import (manuell)"
-            export SYNC_GEOCODE_LIMIT=50000
-            export BUILD_DB_MAX_ROUNDS=10000
+            export SYNC_GEOCODE_LIMIT=5000
+            export BUILD_DB_MAX_ROUNDS=6
             yarn build-db --fresh
           elif [ "$HAS_RELEASE" = "false" ]; then
-            echo "Modus: første bygg – full BRREG-import + geokode så langt som mulig"
-            export SYNC_GEOCODE_LIMIT=50000
-            export BUILD_DB_MAX_ROUNDS=10000
+            echo "Modus: første bygg – full BRREG-import + geokode inntil kvote"
+            export SYNC_GEOCODE_LIMIT=5000
+            export BUILD_DB_MAX_ROUNDS=6
             yarn build-db --fresh
           else
             echo "Modus: inkrementell BRREG-sync + geokode nye/endrede adresser"
             export SYNC_GEOCODE_LIMIT=5000
-            export BUILD_DB_MAX_ROUNDS=5
+            export BUILD_DB_MAX_ROUNDS=6
             yarn build-db
           fi
 
