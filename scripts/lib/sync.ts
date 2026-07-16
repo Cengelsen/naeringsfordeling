@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { LIMITS, sleep } from './rate-limit.js'
-import { downloadBulkEntities, fetchEntity, fetchKommuneEntities, fetchLatestUpdateId, fetchUpdatesSince } from './brreg.js'
+import { downloadBulkEntities, fetchEntity, fetchKommuneEntities, fetchKommunerForFylke, fetchLatestUpdateId, fetchUpdatesSince } from './brreg.js'
 import { geocodeAddress, runPool } from './geocode.js'
 import {
   applyCachedCoordinates,
@@ -20,17 +20,41 @@ const LAST_FULL_SYNC_KEY = 'last_full_sync_at'
 export interface SyncOptions {
   full?: boolean
   dev?: boolean
+  /** Two-digit fylkeskode for dev import, e.g. "03" for Oslo. */
+  devFylke?: string
   geocodeOnly?: boolean
   geocodeLimit?: number
   geocodeConcurrency?: number
   /** Max unique addresses to geocode in one run (e.g. CI time budget). */
   maxGeocodeAddresses?: number
+  /** Geocode every pending address (no quota); intended with --dev --fylke. */
+  geocodeAll?: boolean
+  maxGeocodeRounds?: number
   /** Baseline org counts at start of a multi-round geocode run. */
   geocodeBaseline?: { geocoded: number; pending_geocode: number }
 }
 
 /** Small kommuner for fast local development database. */
-const DEV_KOMMUNER = ['1111', '1112', '1144']
+export const DEV_KOMMUNER = ['1111', '1112', '1144']
+export const DEV_GEOCODE_MAX = 2000
+
+async function resolveDevKommuner(devFylke?: string): Promise<string[]> {
+  if (!devFylke) return DEV_KOMMUNER
+
+  const kommuner = await fetchKommunerForFylke(devFylke)
+  if (kommuner.length === 0) {
+    throw new Error(
+      `Ingen kommuner funnet for fylke «${devFylke}». Bruk tosifret fylkeskode, f.eks. --fylke=03 for Oslo.`,
+    )
+  }
+
+  return kommuner
+}
+
+export function devImportLabel(devFylke?: string, kommuneCount?: number): string {
+  if (!devFylke) return `3 standardkommuner (${DEV_KOMMUNER.join(', ')})`
+  return `fylke ${devFylke}${kommuneCount != null ? ` (${kommuneCount} kommuner)` : ''}`
+}
 
 function logGeocodeProgress(
   processed: number,
@@ -197,11 +221,12 @@ export async function runIncrementalSync(db: Database.Database) {
   return updates.length
 }
 
-export async function runDevImport(db: Database.Database) {
-  console.log(`Dev-import for kommuner: ${DEV_KOMMUNER.join(', ')}`)
+export async function runDevImport(db: Database.Database, options: Pick<SyncOptions, 'devFylke'> = {}) {
+  const kommuner = await resolveDevKommuner(options.devFylke)
+  console.log(`Dev-import for ${devImportLabel(options.devFylke, kommuner.length)}`)
   let imported = 0
 
-  for (const kommunenummer of DEV_KOMMUNER) {
+  for (const kommunenummer of kommuner) {
     const count = await fetchKommuneEntities(kommunenummer, (entity) => {
       upsertEntity(db, entity, Boolean(entity.slettedato))
     })
@@ -218,7 +243,29 @@ export async function runDevImport(db: Database.Database) {
   return imported
 }
 
+export function devGeocodeOptions(geocodeAll: boolean): Pick<
+  SyncOptions,
+  'geocodeAll' | 'maxGeocodeAddresses' | 'maxGeocodeRounds' | 'geocodeLimit'
+> {
+  if (geocodeAll) {
+    return {
+      geocodeAll: true,
+      maxGeocodeAddresses: undefined,
+      maxGeocodeRounds: 10_000,
+      geocodeLimit: LIMITS.geocodeBatchSize,
+    }
+  }
+
+  return {
+    geocodeAll: false,
+    maxGeocodeAddresses: DEV_GEOCODE_MAX,
+    maxGeocodeRounds: 1,
+    geocodeLimit: DEV_GEOCODE_MAX,
+  }
+}
+
 function resolveMaxGeocodeAddresses(options: SyncOptions): number | undefined {
+  if (options.geocodeAll) return undefined
   if (options.maxGeocodeAddresses != null) return options.maxGeocodeAddresses
   const fromEnv = Number(process.env.BUILD_DB_MAX_GEOCODE_ADDRESSES ?? '')
   return fromEnv > 0 ? fromEnv : undefined
@@ -231,19 +278,106 @@ function geocodeLimitForRun(options: SyncOptions, addressesThisRun: number): num
   return Math.max(0, Math.min(batchSize, maxAddresses - addressesThisRun))
 }
 
+async function runGeocodeLoop(db: Database.Database, options: SyncOptions) {
+  const geocodeStart = getStats(db)
+  const maxGeocodeAddresses = resolveMaxGeocodeAddresses(options)
+  console.log(
+    `${geocodeStart.pending_geocode.toLocaleString('nb-NO')} organisasjoner venter geokoding`,
+  )
+  if (options.geocodeAll) {
+    console.log('Geokoder alle adresser (ingen kvote).')
+  } else if (maxGeocodeAddresses != null) {
+    console.log(`Geokodingskvote: ${maxGeocodeAddresses.toLocaleString('nb-NO')} adresser.`)
+  }
+
+  const maxRounds = options.maxGeocodeRounds ?? Number(process.env.BUILD_DB_MAX_ROUNDS ?? 10000)
+  let round = 0
+  let addressesThisRun = 0
+
+  while (round < maxRounds) {
+    const pending = getStats(db).pending_geocode
+    const batchKeys = pendingAddressKeys(db, 1)
+
+    if (maxGeocodeAddresses != null && addressesThisRun >= maxGeocodeAddresses) {
+      console.log(
+        `Geokodingsgrense nådd (${maxGeocodeAddresses.toLocaleString('nb-NO')} adresser per kjøring, ${pending.toLocaleString('nb-NO')} organisasjoner gjenstår).`,
+      )
+      break
+    }
+
+    if (pending === 0) {
+      console.log('Alle adresser er geokodet.')
+      break
+    }
+
+    if (batchKeys.length === 0) {
+      console.log(
+        `${pending.toLocaleString('nb-NO')} organisasjoner gjenstår, men ingen nye adresser kan geokodes (feilet/ugyldig).`,
+      )
+      break
+    }
+
+    const batchLimit = geocodeLimitForRun(options, addressesThisRun)
+    if (batchLimit === 0) {
+      console.log(
+        `Geokodingsgrense nådd (${maxGeocodeAddresses?.toLocaleString('nb-NO')} adresser per kjøring).`,
+      )
+      break
+    }
+
+    round += 1
+    const doneOrgs = geocodeStart.pending_geocode - pending
+    console.log(
+      `\nGeokodingsrunde ${round}: ${pending.toLocaleString('nb-NO')} organisasjoner gjenstår (${doneOrgs.toLocaleString('nb-NO')} ferdig totalt)`,
+    )
+
+    const { processed } = await geocodePending(db, {
+      ...options,
+      geocodeLimit: batchLimit,
+      geocodeBaseline: geocodeStart,
+    })
+    addressesThisRun += processed
+
+    const remaining = getStats(db).pending_geocode
+    if (remaining >= pending) {
+      console.warn('Ingen fremgang denne runden – stopper for å unngå uendelig løkke.')
+      break
+    }
+
+    if (remaining > 0) {
+      await sleep(LIMITS.geocodeBatchPauseMs)
+    }
+  }
+}
+
 export async function runSync(db: Database.Database, options: SyncOptions = {}) {
   const statsBefore = getStats(db)
 
   if (options.geocodeOnly) {
-    const limit = geocodeLimitForRun(options, 0)
-    if (limit === 0) {
-      console.log('Geokodingsgrense nådd (0 adresser igjen av kvoten).')
+    if (options.geocodeAll) {
+      console.log('\nGeokoder adresser via Kartverket…')
+      await runGeocodeLoop(db, options)
     } else {
-      await geocodePending(db, { ...options, geocodeLimit: limit })
+      const limit = geocodeLimitForRun(options, 0)
+      if (limit === 0) {
+        console.log('Geokodingsgrense nådd (0 adresser igjen av kvoten).')
+      } else {
+        await geocodePending(db, { ...options, geocodeLimit: limit })
+      }
     }
   } else if (options.dev) {
-    await runDevImport(db)
-    await geocodePending(db, options)
+    await runDevImport(db, options)
+    console.log('\nGeokoder adresser via Kartverket…')
+    if (options.geocodeAll) {
+      await runGeocodeLoop(db, options)
+    } else {
+      const limit = geocodeLimitForRun(options, 0)
+      if (limit === 0) {
+        console.log('Geokodingsgrense nådd (0 adresser igjen av kvoten).')
+      } else {
+        await geocodePending(db, { ...options, geocodeLimit: limit })
+      }
+    }
   } else if (options.full || statsBefore.total === 0) {
     await runFullImport(db)
     await geocodePending(db, options)
@@ -268,7 +402,6 @@ export async function runSync(db: Database.Database, options: SyncOptions = {}) 
 export interface BuildDbOptions extends SyncOptions {
   fresh?: boolean
   skipGeocode?: boolean
-  maxGeocodeRounds?: number
 }
 
 export async function runBuildDatabase(db: Database.Database, options: BuildDbOptions = {}) {
@@ -281,11 +414,16 @@ export async function runBuildDatabase(db: Database.Database, options: BuildDbOp
   console.log(`  Geokoding: ${LIMITS.geocodeConcurrency} parallelle, ${LIMITS.geocodeDelayMs}ms mellomrom`)
   const maxGeocodeAddresses = resolveMaxGeocodeAddresses(options)
   console.log(`  Geokoding batch: ${options.geocodeLimit ?? LIMITS.geocodeBatchSize} adresser`)
-  if (maxGeocodeAddresses != null) {
+  if (options.geocodeAll) {
+    console.log('  Geokoding kvote: alle adresser')
+  } else if (maxGeocodeAddresses != null) {
     console.log(`  Geokoding kvote: ${maxGeocodeAddresses.toLocaleString('nb-NO')} adresser per kjøring`)
   }
 
-  if (needsFullImport) {
+  if (options.dev) {
+    console.log(`\nSteg 1/2: Dev-import fra BRREG (${devImportLabel(options.devFylke)})…`)
+    await runDevImport(db, options)
+  } else if (needsFullImport) {
     console.log('\nSteg 1/2: Full import fra BRREG bulk (én nedlasting)…')
     await runFullImport(db)
   } else {
@@ -297,68 +435,7 @@ export async function runBuildDatabase(db: Database.Database, options: BuildDbOp
     console.log('\nHopper over geokoding (--skip-geocode).')
   } else {
     console.log('\nSteg 2/2: Geokoder adresser via Kartverket…')
-    const geocodeStart = getStats(db)
-    console.log(
-      `${geocodeStart.pending_geocode.toLocaleString('nb-NO')} organisasjoner venter geokoding`,
-    )
-    const maxRounds = options.maxGeocodeRounds ?? Number(process.env.BUILD_DB_MAX_ROUNDS ?? 10000)
-    let round = 0
-    let addressesThisRun = 0
-
-    while (round < maxRounds) {
-      const pending = getStats(db).pending_geocode
-      const batchKeys = pendingAddressKeys(db, 1)
-
-      if (maxGeocodeAddresses != null && addressesThisRun >= maxGeocodeAddresses) {
-        console.log(
-          `Geokodingsgrense nådd (${maxGeocodeAddresses.toLocaleString('nb-NO')} adresser per kjøring, ${pending.toLocaleString('nb-NO')} organisasjoner gjenstår).`,
-        )
-        break
-      }
-
-      if (pending === 0) {
-        console.log('Alle adresser er geokodet.')
-        break
-      }
-
-      if (batchKeys.length === 0) {
-        console.log(
-          `${pending.toLocaleString('nb-NO')} organisasjoner gjenstår, men ingen nye adresser kan geokodes (feilet/ugyldig).`,
-        )
-        break
-      }
-
-      const batchLimit = geocodeLimitForRun(options, addressesThisRun)
-      if (batchLimit === 0) {
-        console.log(
-          `Geokodingsgrense nådd (${maxGeocodeAddresses?.toLocaleString('nb-NO')} adresser per kjøring).`,
-        )
-        break
-      }
-
-      round += 1
-      const doneOrgs = geocodeStart.pending_geocode - pending
-      console.log(
-        `\nGeokodingsrunde ${round}: ${pending.toLocaleString('nb-NO')} organisasjoner gjenstår (${doneOrgs.toLocaleString('nb-NO')} ferdig totalt)`,
-      )
-
-      const { processed } = await geocodePending(db, {
-        ...options,
-        geocodeLimit: batchLimit,
-        geocodeBaseline: geocodeStart,
-      })
-      addressesThisRun += processed
-
-      const remaining = getStats(db).pending_geocode
-      if (remaining >= pending) {
-        console.warn('Ingen fremgang denne runden – stopper for å unngå uendelig løkke.')
-        break
-      }
-
-      if (remaining > 0) {
-        await sleep(LIMITS.geocodeBatchPauseMs)
-      }
-    }
+    await runGeocodeLoop(db, options)
   }
 
   setSyncState(db, LAST_SYNC_AT_KEY, new Date().toISOString())

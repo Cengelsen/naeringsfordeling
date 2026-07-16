@@ -33,6 +33,8 @@ export interface MapSettings extends MapFilters {
   showLegend: boolean
   selectedFylke: string
   selectedKommune: string
+  /** Map zoom at which individual address dots replace clusters */
+  dotsDetailMinZoom: number
 }
 
 export interface MunicipalityCount {
@@ -65,6 +67,14 @@ export interface Organization {
   addressText: string
   postnummer: string
   kommunenummer: string
+  lat: number
+  lng: number
+}
+
+/** Compact point payload for map rendering */
+export interface OrganizationPoint {
+  orgnr: string
+  orgType: string
   lat: number
   lng: number
 }

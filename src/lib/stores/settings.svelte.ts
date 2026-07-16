@@ -10,6 +10,7 @@ export const defaultSettings: MapSettings = {
   showLegend: true,
   selectedFylke: '',
   selectedKommune: '',
+  dotsDetailMinZoom: 12,
 }
 
 export const mapSettings = $state<MapSettings>({ ...defaultSettings })

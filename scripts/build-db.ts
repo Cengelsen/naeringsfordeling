@@ -2,27 +2,56 @@
 import { existsSync } from 'node:fs'
 import { openDatabase, DEFAULT_DB_PATH, removeDatabaseFiles } from './lib/db.js'
 import { LIMITS } from './lib/rate-limit.js'
-import { runBuildDatabase } from './lib/sync.js'
+import { DEV_GEOCODE_MAX, devGeocodeOptions, devImportLabel, runBuildDatabase } from './lib/sync.js'
+
+function parseStringArg(argv: string[], name: string, envKey: string): string | undefined {
+  const prefix = `--${name}=`
+  const fromArg = argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length)
+  return fromArg || process.env[envKey] || undefined
+}
 
 function parseArgs(argv: string[]) {
+  const dev = argv.includes('--dev')
+  const geocodeAll = argv.includes('--geocode-all')
+  const devGeocode = dev ? devGeocodeOptions(geocodeAll) : null
+
   return {
     fresh: argv.includes('--fresh'),
+    dev,
+    devFylke: parseStringArg(argv, 'fylke', 'SYNC_DEV_FYLKE'),
+    geocodeAll,
     skipGeocode: argv.includes('--skip-geocode'),
     geocodeLimit: Number(
       argv.find((arg) => arg.startsWith('--geocode-limit='))?.split('=')[1] ??
+        devGeocode?.geocodeLimit ??
         LIMITS.geocodeBatchSize,
     ),
     maxGeocodeRounds: Number(
       argv.find((arg) => arg.startsWith('--max-rounds='))?.split('=')[1] ??
         process.env.BUILD_DB_MAX_ROUNDS ??
-        10000,
+        devGeocode?.maxGeocodeRounds ??
+        10_000,
     ),
-    maxGeocodeAddresses: Number(process.env.BUILD_DB_MAX_GEOCODE_ADDRESSES ?? '') || undefined,
+    maxGeocodeAddresses: geocodeAll
+      ? undefined
+      : Number(process.env.BUILD_DB_MAX_GEOCODE_ADDRESSES ?? '') ||
+        devGeocode?.maxGeocodeAddresses ||
+        undefined,
+  }
+}
+
+function validateArgs(args: ReturnType<typeof parseArgs>) {
+  if (args.geocodeAll && !args.dev) {
+    throw new Error('--geocode-all krever --dev')
+  }
+  if (args.geocodeAll && !args.devFylke) {
+    throw new Error('--geocode-all krever --fylke=XX (tosifret fylkeskode)')
   }
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
+  validateArgs(args)
   const dbPath = process.env.DATABASE_PATH ?? DEFAULT_DB_PATH
 
   if (args.fresh) {
@@ -34,10 +63,18 @@ async function main() {
 
   console.log(`Bygger SQLite-database: ${dbPath}`)
   console.log('Kilder: BRREG bulk/oppdateringer + Kartverket Adresse-API')
-  console.log('Modus:', args.fresh || !existsSync(dbPath) ? 'full import' : 'oppdater + geokode rest')
+  const modus = args.dev
+    ? `dev-import (${devImportLabel(args.devFylke)}${args.geocodeAll ? ', geokoder alle adresser' : `, geokoder ${DEV_GEOCODE_MAX}`})`
+    : args.fresh || !existsSync(dbPath)
+      ? 'full import'
+      : 'oppdater + geokode rest'
+  console.log('Modus:', modus)
 
   await runBuildDatabase(db, {
     fresh: args.fresh,
+    dev: args.dev,
+    devFylke: args.devFylke,
+    geocodeAll: args.geocodeAll,
     skipGeocode: args.skipGeocode,
     geocodeLimit: args.geocodeLimit,
     maxGeocodeRounds: args.maxGeocodeRounds,

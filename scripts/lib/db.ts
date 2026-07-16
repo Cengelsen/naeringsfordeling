@@ -71,6 +71,10 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_org_pending_geocode
       ON organizations(updated_at)
       WHERE deleted = 0 AND lat IS NULL AND address_key IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_org_coords
+      ON organizations(lat, lng)
+      WHERE deleted = 0 AND lat IS NOT NULL;
   `)
 }
 

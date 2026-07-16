@@ -103,8 +103,8 @@
 
     {#if isDotsView}
       <p class="hint">
-        Zoom inn (nivå {MIN_DOTS_ZOOM}+) eller velg fylke/kommune. Hver prikk er én geokodet
-        organisasjon fra SQLite-databasen.
+        Zoom inn (nivå {MIN_DOTS_ZOOM}+) eller velg fylke/kommune. Prikker grupperes automatisk
+        til du zoomer inn på gate-nivå.
       </p>
       {#if dotsState.loading}
         <p class="hint loading-hint">

@@ -1,0 +1,330 @@
+import type { FeatureCollection, Point } from 'geojson'
+import L from 'leaflet'
+import maplibregl from 'maplibre-gl'
+import type { GeoJSONSource } from 'maplibre-gl'
+import '@maplibre/maplibre-gl-leaflet'
+import type { OrganizationPoint } from '../types'
+import { orgTypeColorExpression } from '../utils/orgTypeColors'
+import { jitterCoordinates } from './jitter'
+
+const SOURCE_ID = 'org-dots'
+const CLUSTER_LAYER_ID = 'org-clusters'
+const CLUSTER_COUNT_LAYER_ID = 'org-cluster-count'
+const POINT_LAYER_ID = 'org-points'
+const CLICK_LAYERS = [POINT_LAYER_ID, CLUSTER_LAYER_ID]
+const CLICK_TOLERANCE_PX = 10
+
+function pointRadiusExpression(detailMinZoom: number): maplibregl.ExpressionSpecification {
+  const mlDetailZoom = Math.max(0, detailMinZoom - 1)
+  return [
+    'interpolate',
+    ['linear'],
+    ['zoom'],
+    mlDetailZoom,
+    4,
+    mlDetailZoom + 3,
+    6,
+    mlDetailZoom + 6,
+    8,
+  ]
+}
+
+const EMPTY_COLLECTION: FeatureCollection<Point> = {
+  type: 'FeatureCollection',
+  features: [],
+}
+
+const TRANSPARENT_STYLE: maplibregl.StyleSpecification = {
+  version: 8,
+  sources: {},
+  layers: [
+    {
+      id: 'background',
+      type: 'background',
+      paint: {
+        'background-color': 'rgba(0,0,0,0)',
+      },
+    },
+  ],
+}
+
+export interface MaplibreDotsLayerOptions {
+  dotsDetailMinZoom: number
+  onPointClick: (orgnr: string, latlng: L.LatLng) => void
+}
+
+export interface MaplibreDotsController {
+  setPoints(points: OrganizationPoint[]): void
+  setStale(stale: boolean): void
+  bringToFront(): void
+  remove(): void
+}
+
+function pointsToGeoJson(points: OrganizationPoint[]): FeatureCollection<Point> {
+  const grouped = new Map<string, number>()
+
+  const features = points.map((point) => {
+    const locationKey = `${point.lat.toFixed(5)}:${point.lng.toFixed(5)}`
+    const index = grouped.get(locationKey) ?? 0
+    grouped.set(locationKey, index + 1)
+    const totalAtPoint = grouped.get(locationKey) ?? 1
+    const [lat, lng] = jitterCoordinates(point.lat, point.lng, index, totalAtPoint)
+
+    return {
+      type: 'Feature' as const,
+      geometry: {
+        type: 'Point' as const,
+        coordinates: [lng, lat],
+      },
+      properties: {
+        orgnr: point.orgnr,
+        orgType: point.orgType,
+      },
+    }
+  })
+
+  return {
+    type: 'FeatureCollection',
+    features,
+  }
+}
+
+export function createMaplibreDotsLayer(
+  map: L.Map,
+  options: MaplibreDotsLayerOptions,
+): MaplibreDotsController {
+  let ready = false
+  let initialized = false
+  let stale = false
+  let currentTypes: string[] = []
+  let pendingPoints: OrganizationPoint[] | null = null
+
+  const glLayer = L.maplibreGL({
+    style: TRANSPARENT_STYLE,
+    interactive: false,
+    attributionControl: false,
+    // markerPane (z-index 600) sits above overlayPane (400) where kommune polygons render
+    pane: 'markerPane',
+  } as Parameters<typeof L.maplibreGL>[0]).addTo(map)
+
+  const container = glLayer.getContainer()
+  container.style.zIndex = '650'
+  container.style.pointerEvents = 'none'
+
+  const mlMap = glLayer.getMaplibreMap()
+  mlMap.dragPan.disable()
+  mlMap.scrollZoom.disable()
+  mlMap.boxZoom.disable()
+  mlMap.doubleClickZoom.disable()
+  mlMap.touchZoomRotate.disable()
+  mlMap.keyboard.disable()
+
+  const clusterMaxZoom = Math.max(0, options.dotsDetailMinZoom - 1)
+
+  function applyPointColors(types: string[]) {
+    if (!mlMap.getLayer(POINT_LAYER_ID)) return
+    mlMap.setPaintProperty(
+      POINT_LAYER_ID,
+      'circle-color',
+      types.length > 0 ? orgTypeColorExpression(types) : '#64748b',
+    )
+  }
+
+  function applyOpacity() {
+    const pointOpacity = stale ? 0.45 : 0.88
+    const clusterOpacity = stale ? 0.55 : 0.92
+    const labelOpacity = stale ? 0.65 : 1
+
+    if (mlMap.getLayer(POINT_LAYER_ID)) {
+      mlMap.setPaintProperty(POINT_LAYER_ID, 'circle-opacity', pointOpacity)
+    }
+    if (mlMap.getLayer(CLUSTER_LAYER_ID)) {
+      mlMap.setPaintProperty(CLUSTER_LAYER_ID, 'circle-opacity', clusterOpacity)
+    }
+    if (mlMap.getLayer(CLUSTER_COUNT_LAYER_ID)) {
+      mlMap.setPaintProperty(CLUSTER_COUNT_LAYER_ID, 'text-opacity', labelOpacity)
+    }
+  }
+
+  function updateSource(points: OrganizationPoint[]) {
+    currentTypes = [...new Set(points.map((point) => point.orgType))].sort()
+    const source = mlMap.getSource(SOURCE_ID) as GeoJSONSource | undefined
+    if (source) {
+      source.setData(pointsToGeoJson(points))
+      applyPointColors(currentTypes)
+      applyOpacity()
+    }
+  }
+
+  function initLayers() {
+    if (initialized) return
+    initialized = true
+
+    mlMap.addSource(SOURCE_ID, {
+      type: 'geojson',
+      data: EMPTY_COLLECTION,
+      cluster: true,
+      clusterMaxZoom,
+      clusterRadius: 50,
+    })
+
+    mlMap.addLayer({
+      id: CLUSTER_LAYER_ID,
+      type: 'circle',
+      source: SOURCE_ID,
+      filter: ['has', 'point_count'],
+      paint: {
+        'circle-color': [
+          'step',
+          ['get', 'point_count'],
+          '#38bdf8',
+          25,
+          '#0ea5e9',
+          100,
+          '#0284c7',
+          500,
+          '#0369a1',
+        ],
+        'circle-radius': ['step', ['get', 'point_count'], 16, 25, 20, 100, 26, 500, 32],
+        'circle-stroke-width': 1,
+        'circle-stroke-color': '#0f172a',
+        'circle-opacity': 0.92,
+      },
+    })
+
+    mlMap.addLayer({
+      id: CLUSTER_COUNT_LAYER_ID,
+      type: 'symbol',
+      source: SOURCE_ID,
+      filter: ['has', 'point_count'],
+      layout: {
+        'text-field': ['get', 'point_count_abbreviated'],
+        'text-size': 12,
+      },
+      paint: {
+        'text-color': '#f8fafc',
+      },
+    })
+
+    mlMap.addLayer({
+      id: POINT_LAYER_ID,
+      type: 'circle',
+      source: SOURCE_ID,
+      filter: ['!', ['has', 'point_count']],
+      paint: {
+        'circle-color':
+          currentTypes.length > 0 ? orgTypeColorExpression(currentTypes) : '#64748b',
+        'circle-radius': pointRadiusExpression(options.dotsDetailMinZoom),
+        'circle-stroke-width': [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          Math.max(0, options.dotsDetailMinZoom - 1),
+          0.5,
+          Math.max(0, options.dotsDetailMinZoom + 4),
+          1,
+        ],
+        'circle-stroke-color': '#0f172a',
+        'circle-opacity': 0.88,
+      },
+    })
+
+    ready = true
+    if (pendingPoints) {
+      updateSource(pendingPoints)
+      pendingPoints = null
+    }
+  }
+
+  mlMap.on('load', initLayers)
+  mlMap.once('styledata', initLayers)
+
+  async function handleClusterFeature(feature: maplibregl.MapGeoJSONFeature) {
+    const clusterId = feature.properties?.cluster_id
+    if (clusterId == null) return
+
+    const source = mlMap.getSource(SOURCE_ID) as GeoJSONSource
+    const expansionZoom = await source.getClusterExpansionZoom(clusterId)
+    const [lng, lat] = (feature.geometry as Point).coordinates
+
+    map.setView([lat, lng], Math.min(expansionZoom + 1, map.getMaxZoom()), {
+      animate: true,
+    })
+  }
+
+  function handlePointFeature(feature: maplibregl.MapGeoJSONFeature) {
+    const orgnr = feature.properties?.orgnr as string | undefined
+    if (!orgnr) return
+
+    const [lng, lat] = (feature.geometry as Point).coordinates
+    options.onPointClick(orgnr, L.latLng(lat, lng))
+  }
+
+  function featuresAtClick(latlng: L.LatLng): maplibregl.MapGeoJSONFeature[] {
+    const point = mlMap.project([latlng.lng, latlng.lat])
+    return mlMap.queryRenderedFeatures(
+      [
+        [point.x - CLICK_TOLERANCE_PX, point.y - CLICK_TOLERANCE_PX],
+        [point.x + CLICK_TOLERANCE_PX, point.y + CLICK_TOLERANCE_PX],
+      ],
+      { layers: CLICK_LAYERS },
+    )
+  }
+
+  function handleLeafletClick(event: L.LeafletMouseEvent) {
+    if (!ready) return
+
+    const features = featuresAtClick(event.latlng)
+    if (features.length === 0) return
+
+    L.DomEvent.stopPropagation(event)
+
+    const pointFeature = features.find((feature) => feature.layer.id === POINT_LAYER_ID)
+    if (pointFeature) {
+      handlePointFeature(pointFeature)
+      return
+    }
+
+    const clusterFeature = features.find((feature) => feature.layer.id === CLUSTER_LAYER_ID)
+    if (clusterFeature) {
+      void handleClusterFeature(clusterFeature)
+    }
+  }
+
+  function handleLeafletMouseMove(event: L.LeafletMouseEvent) {
+    if (!ready) {
+      map.getContainer().style.cursor = ''
+      return
+    }
+
+    const hasFeature = featuresAtClick(event.latlng).length > 0
+    map.getContainer().style.cursor = hasFeature ? 'pointer' : ''
+  }
+
+  map.on('click', handleLeafletClick)
+  map.on('mousemove', handleLeafletMouseMove)
+
+  return {
+    setPoints(points) {
+      if (!ready) {
+        pendingPoints = points
+        return
+      }
+      updateSource(points)
+    },
+    setStale(nextStale) {
+      stale = nextStale
+      if (ready) applyOpacity()
+    },
+    bringToFront() {
+      const pane = glLayer.getPane()
+      if (pane) pane.appendChild(container)
+    },
+    remove() {
+      map.off('click', handleLeafletClick)
+      map.off('mousemove', handleLeafletMouseMove)
+      map.getContainer().style.cursor = ''
+      glLayer.remove()
+    },
+  }
+}

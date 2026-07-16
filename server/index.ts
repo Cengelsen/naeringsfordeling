@@ -3,8 +3,13 @@ import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { existsSync } from 'node:fs'
 import { openDatabase, DEFAULT_DB_PATH, getStats } from '../scripts/lib/db.js'
-import { jitterCoordinates } from '../scripts/lib/geocode.js'
-import { appendAreaFilters, buildFilterQuery, parseFilters } from './filters.js'
+import {
+  appendAreaFilters,
+  appendBboxFilter,
+  buildFilterQuery,
+  limitForZoom,
+  parseFilters,
+} from './filters.js'
 
 const dbPath = process.env.DATABASE_PATH ?? DEFAULT_DB_PATH
 
@@ -18,6 +23,13 @@ const db = openDatabase(dbPath)
 const app = new Hono()
 
 app.use('/*', cors())
+
+function organizationQuery(filters: ReturnType<typeof parseFilters>, geocodedOnly = true) {
+  const { conditions, params } = buildFilterQuery(filters, geocodedOnly)
+  appendAreaFilters(filters, conditions, params)
+  appendBboxFilter(filters.bbox, conditions, params)
+  return { conditions, params }
+}
 
 app.get('/api/health', (c) => {
   const stats = getStats(db)
@@ -78,11 +90,91 @@ app.get('/api/municipality-counts', (c) => {
   })
 })
 
+app.get('/api/organizations/points', (c) => {
+  const filters = parseFilters(c.req)
+  const explicitLimit = Number(c.req.query('limit') ?? '')
+  const limit = limitForZoom(
+    filters.zoom,
+    Number.isFinite(explicitLimit) ? explicitLimit : undefined,
+  )
+  const { conditions, params } = organizationQuery(filters)
+
+  const rows = db
+    .prepare(
+      `SELECT orgnr, org_type, lat, lng
+       FROM organizations
+       WHERE ${conditions.join(' AND ')}
+       LIMIT ?`,
+    )
+    .all(...params, limit) as Array<{
+    orgnr: string
+    org_type: string
+    lat: number
+    lng: number
+  }>
+
+  return c.json({
+    points: rows.map((row) => ({
+      orgnr: row.orgnr,
+      orgType: row.org_type,
+      lat: row.lat,
+      lng: row.lng,
+    })),
+    count: rows.length,
+    truncated: rows.length >= limit,
+  })
+})
+
+app.get('/api/organizations/:orgnr', (c) => {
+  const orgnr = c.req.param('orgnr')
+  const row = db
+    .prepare(
+      `SELECT orgnr, navn, org_type, org_type_label, address_text, postnummer,
+              kommunenummer, lat, lng
+       FROM organizations
+       WHERE deleted = 0 AND orgnr = ?`,
+    )
+    .get(orgnr) as
+    | {
+        orgnr: string
+        navn: string
+        org_type: string
+        org_type_label: string
+        address_text: string
+        postnummer: string
+        kommunenummer: string
+        lat: number | null
+        lng: number | null
+      }
+    | undefined
+
+  if (!row) {
+    return c.json({ error: 'Organisasjon ikke funnet' }, 404)
+  }
+
+  return c.json({
+    organization: {
+      orgnr: row.orgnr,
+      navn: row.navn,
+      orgType: row.org_type,
+      orgTypeLabel: row.org_type_label,
+      addressText: row.address_text,
+      postnummer: row.postnummer,
+      kommunenummer: row.kommunenummer,
+      lat: row.lat,
+      lng: row.lng,
+    },
+  })
+})
+
 app.get('/api/organizations', (c) => {
   const filters = parseFilters(c.req)
-  const limit = Math.min(Number(c.req.query('limit') ?? 20000), 50000)
-  const { conditions, params } = buildFilterQuery(filters, true)
-  appendAreaFilters(filters, conditions, params)
+  const explicitLimit = Number(c.req.query('limit') ?? '')
+  const limit = limitForZoom(
+    filters.zoom,
+    Number.isFinite(explicitLimit) ? explicitLimit : undefined,
+  )
+  const { conditions, params } = organizationQuery(filters)
 
   const rows = db
     .prepare(
@@ -104,26 +196,17 @@ app.get('/api/organizations', (c) => {
     lng: number
   }>
 
-  const grouped = new Map<string, number>()
-  const organizations = rows.map((row) => {
-    const locationKey = `${row.lat.toFixed(5)}:${row.lng.toFixed(5)}`
-    const index = grouped.get(locationKey) ?? 0
-    grouped.set(locationKey, index + 1)
-    const totalAtPoint = grouped.get(locationKey) ?? 1
-    const [lat, lng] = jitterCoordinates(row.lat, row.lng, index, totalAtPoint)
-
-    return {
-      orgnr: row.orgnr,
-      navn: row.navn,
-      orgType: row.org_type,
-      orgTypeLabel: row.org_type_label,
-      addressText: row.address_text,
-      postnummer: row.postnummer,
-      kommunenummer: row.kommunenummer,
-      lat,
-      lng,
-    }
-  })
+  const organizations = rows.map((row) => ({
+    orgnr: row.orgnr,
+    navn: row.navn,
+    orgType: row.org_type,
+    orgTypeLabel: row.org_type_label,
+    addressText: row.address_text,
+    postnummer: row.postnummer,
+    kommunenummer: row.kommunenummer,
+    lat: row.lat,
+    lng: row.lng,
+  }))
 
   return c.json({
     organizations,

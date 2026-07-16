@@ -9,9 +9,10 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "build-db": "tsx scripts/build-db.ts",
+    "build-db:dev": "tsx scripts/build-db.ts --dev --fresh",
     "sync": "tsx scripts/sync.ts",
     "sync:full": "tsx scripts/sync.ts --full",
-    "sync:dev": "tsx scripts/sync.ts --dev --geocode-limit=5000",
+    "sync:dev": "tsx scripts/sync.ts --dev --geocode-limit=2000",
     "sync:geocode": "tsx scripts/sync.ts --geocode-only",
     "server": "tsx server/index.ts",
     "download-db": "bash scripts/download-db.sh"
@@ -33,7 +34,9 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.0.8",
+    "@maplibre/maplibre-gl-leaflet": "^0.1.3",
     "hono": "^4.12.30",
-    "leaflet": "^1.9.4"
+    "leaflet": "^1.9.4",
+    "maplibre-gl": "^5.24.0"
   }
 }

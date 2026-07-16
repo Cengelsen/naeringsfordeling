@@ -7,12 +7,30 @@
     MapSettings,
     MunicipalityCount,
     Organization,
+    OrganizationPoint,
     Organisasjonsform,
   } from '../types'
   import { colorForValue } from '../utils/colors'
-  import { centroid, fylkeFromKommune, kommuneFeatures, type KommuneFeature } from '../utils/geo'
+  import {
+    centroid,
+    fylkeFromKommune,
+    geoBoundsIntersects,
+    kommuneBoundsIndex,
+    kommuneFeatures,
+    type GeoBounds,
+    type KommuneFeature,
+  } from '../utils/geo'
   import { colorForOrgType } from '../utils/orgTypeColors'
-  import { fetchOrganizations, MIN_DOTS_ZOOM } from '../services/api'
+  import {
+    fetchOrganizationDetail,
+    fetchOrganizationPoints,
+    MIN_DOTS_ZOOM,
+  } from '../services/api'
+  import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
+  import {
+    createMaplibreDotsLayer,
+    type MaplibreDotsController,
+  } from '../map/maplibreDotsLayer'
   import Legend from './Legend.svelte'
   import OrgTypeLegend from './OrgTypeLegend.svelte'
 
@@ -30,8 +48,8 @@
   let map: L.Map | null = null
   let geoLayer: L.GeoJSON | null = null
   let bubbleLayer: L.LayerGroup | null = null
-  let dotsLayer: L.LayerGroup | null = null
-  let organizations = $state<Organization[]>([])
+  let dotsController: MaplibreDotsController | null = null
+  let points = $state<OrganizationPoint[]>([])
   let dotsState = $state<DotsLoadState>({
     loading: false,
     phase: 'idle',
@@ -44,17 +62,18 @@
 
   let loadToken = 0
   let boundsTimer: ReturnType<typeof setTimeout> | undefined
+  let kommuneBoundsByNummer = new Map<string, GeoBounds>()
 
   const countMap = $derived(new Map(counts.map((c) => [c.kommunenummer, c.count])))
   const maxCount = $derived(Math.max(...counts.map((c) => c.count), 1))
   const totalVisible = $derived(
     settings.visualization === 'dots'
-      ? organizations.length
+      ? points.length
       : counts.reduce((sum, c) => sum + c.count, 0),
   )
 
   const orgTypeLegendItems = $derived.by(() => {
-    const types = [...new Set(organizations.map((org) => org.orgType))].sort()
+    const types = [...new Set(points.map((point) => point.orgType))].sort()
     return types.map((kode) => {
       const meta = orgForms.find((f) => f.kode === kode)
       return {
@@ -75,9 +94,72 @@
     return true
   }
 
+  function mapGeoBounds(bounds: L.LatLngBounds): GeoBounds {
+    return {
+      minLat: bounds.getSouth(),
+      maxLat: bounds.getNorth(),
+      minLng: bounds.getWest(),
+      maxLng: bounds.getEast(),
+    }
+  }
+
+  function mapBbox(bounds: L.LatLngBounds): [number, number, number, number] {
+    return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]
+  }
+
+  function filtersKey(): string {
+    return [
+      settings.selectedFylke,
+      settings.selectedKommune,
+      [...settings.orgTypes].sort().join(','),
+      settings.excludeKonkurs,
+      settings.excludeUnderAvvikling,
+      settings.vatRegisteredOnly,
+    ].join('|')
+  }
+
+  function orgPopupHtml(org: Organization): string {
+    return `<strong>${org.navn}</strong><br/>
+         ${org.orgTypeLabel} (${org.orgType})<br/>
+         Org.nr ${org.orgnr}<br/>
+         ${org.addressText}, ${org.postnummer}`
+  }
+
+  async function showOrganizationPopup(orgnr: string, latlng: L.LatLng) {
+    if (!map) return
+
+    const popup = L.popup({ maxWidth: 320 })
+      .setLatLng(latlng)
+      .setContent('Henter…')
+      .openOn(map)
+
+    try {
+      const org = await fetchOrganizationDetail(orgnr)
+      popup.setContent(orgPopupHtml(org))
+    } catch (err) {
+      popup.setContent(err instanceof Error ? err.message : 'Kunne ikke hente organisasjon')
+    }
+  }
+
+  function ensureDotsController() {
+    if (!map || dotsController) return
+
+    dotsController = createMaplibreDotsLayer(map, {
+      dotsDetailMinZoom: settings.dotsDetailMinZoom,
+      onPointClick: showOrganizationPopup,
+    })
+  }
+
+  function removeDotsController() {
+    dotsController?.remove()
+    dotsController = null
+    points = []
+    dotsCache.clear()
+  }
+
   function kommunerInBounds(): string[] {
     if (!map || !geojson) return []
-    const bounds = map.getBounds()
+    const bounds = mapGeoBounds(map.getBounds())
     const zoom = map.getZoom()
 
     if (settings.selectedKommune) return [settings.selectedKommune]
@@ -87,11 +169,10 @@
       const kommunenummer = feature.properties.kommunenummer
       if (!isVisible(kommunenummer)) continue
 
-      const layer = L.geoJSON(feature)
-      if (bounds.intersects(layer.getBounds())) {
+      const featureBounds = kommuneBoundsByNummer.get(kommunenummer)
+      if (featureBounds && geoBoundsIntersects(bounds, featureBounds)) {
         matches.push(kommunenummer)
       }
-      layer.remove()
     }
 
     if (settings.selectedFylke && matches.length === 0) {
@@ -112,17 +193,79 @@
     onDotsStateChange?.(dotsState)
   }
 
+  function applyPoints(nextPoints: OrganizationPoint[], truncated: boolean, kommuner: number) {
+    points = nextPoints
+    dotsController?.setPoints(nextPoints)
+    dotsController?.setStale(false)
+    dotsController?.bringToFront()
+    updateDotsState({
+      loading: false,
+      phase: 'idle',
+      organizations: nextPoints.length,
+      geocoded: nextPoints.length,
+      skipped: 0,
+      kommuner,
+      message: truncated
+        ? 'Viser maks antall organisasjoner for utsnittet – zoom inn eller velg kommune'
+        : null,
+    })
+  }
+
+  async function prefetchExpanded(
+    bbox: [number, number, number, number],
+    targetKommuner: string[],
+    zoom: number,
+  ) {
+    const expanded = expandBbox(bbox, 0.35)
+    const key = dotsCacheKey({
+      bbox: expanded,
+      kommunenumre: targetKommuner,
+      filters: filtersKey(),
+      zoom,
+    })
+
+    if (dotsCache.getMemory(key)) return
+
+    const schedule = typeof requestIdleCallback === 'function'
+      ? requestIdleCallback
+      : (cb: () => void) => setTimeout(cb, 300)
+
+    schedule(async () => {
+      try {
+        const result = await fetchOrganizationPoints(settings, {
+          bbox: expanded,
+          kommunenumre: targetKommuner,
+          selectedFylke: settings.selectedFylke,
+          zoom,
+        })
+        await dotsCache.set(key, {
+          points: result.points,
+          truncated: result.truncated,
+          savedAt: Date.now(),
+        })
+      } catch {
+        // Prefetch failures are non-critical
+      }
+    })
+  }
+
   async function loadDots() {
     if (!map || settings.visualization !== 'dots') return
 
+    ensureDotsController()
+
     const targetKommuner = kommunerInBounds()
+    const zoom = map.getZoom()
+    const bounds = map.getBounds()
+    const bbox = mapBbox(bounds)
 
     if (
       targetKommuner.length === 0 &&
       !settings.selectedKommune &&
       !settings.selectedFylke
     ) {
-      organizations = []
+      points = []
+      dotsController?.setPoints([])
       updateDotsState({
         loading: false,
         phase: 'idle',
@@ -132,11 +275,25 @@
         kommuner: 0,
         message: `Zoom inn (nivå ${MIN_DOTS_ZOOM}+) for adressevisning`,
       })
-      renderDots()
+      return
+    }
+
+    const cacheKey = dotsCacheKey({
+      bbox,
+      kommunenumre: targetKommuner,
+      filters: filtersKey(),
+      zoom,
+    })
+
+    const cached = await dotsCache.get(cacheKey)
+    if (cached) {
+      applyPoints(cached.points, cached.truncated, targetKommuner.length)
+      prefetchExpanded(bbox, targetKommuner, zoom)
       return
     }
 
     const token = ++loadToken
+    dotsController?.setStale(true)
     updateDotsState({
       loading: true,
       phase: 'fetching',
@@ -145,49 +302,55 @@
     })
 
     try {
-      const result = await fetchOrganizations(
-        targetKommuner,
-        settings,
-        settings.selectedFylke,
-      )
+      const result = await fetchOrganizationPoints(settings, {
+        bbox: settings.selectedKommune || settings.selectedFylke ? undefined : bbox,
+        kommunenumre: targetKommuner,
+        selectedFylke: settings.selectedFylke,
+        zoom,
+      })
 
       if (token !== loadToken) return
 
-      organizations = result.organizations
-      updateDotsState({
-        loading: false,
-        phase: 'idle',
-        organizations: result.organizations.length,
-        geocoded: result.organizations.length,
-        skipped: 0,
-        kommuner: targetKommuner.length,
-        message: result.truncated
-          ? 'Viser maks antall organisasjoner for utsnittet – zoom inn eller velg kommune'
-          : null,
+      await dotsCache.set(cacheKey, {
+        points: result.points,
+        truncated: result.truncated,
+        savedAt: Date.now(),
       })
-      renderDots()
+
+      applyPoints(result.points, result.truncated, targetKommuner.length)
+      prefetchExpanded(bbox, targetKommuner, zoom)
     } catch (err) {
       if (token !== loadToken) return
-      organizations = []
+      dotsController?.setStale(false)
       updateDotsState({
         loading: false,
         phase: 'idle',
-        organizations: 0,
-        geocoded: 0,
+        organizations: points.length,
+        geocoded: points.length,
         skipped: 0,
         kommuner: targetKommuner.length,
         message: err instanceof Error ? err.message : 'Kunne ikke laste organisasjoner',
       })
-      renderDots()
     }
   }
 
-  function scheduleDotsReload() {
+  const DOTS_MOVE_RELOAD_DELAY_MS = 400
+  const DOTS_FILTER_RELOAD_DELAY_MS = 300
+
+  function scheduleDotsReload(delay = DOTS_FILTER_RELOAD_DELAY_MS) {
     if (settings.visualization !== 'dots') return
     clearTimeout(boundsTimer)
     boundsTimer = setTimeout(() => {
       loadDots()
-    }, 400)
+    }, delay)
+  }
+
+  function scheduleDotsReloadOnMove() {
+    scheduleDotsReload(DOTS_MOVE_RELOAD_DELAY_MS)
+  }
+
+  function scheduleDotsReloadOnZoom() {
+    scheduleDotsReload(0)
   }
 
   function styleFeature(feature?: KommuneFeature) {
@@ -237,13 +400,12 @@
   function clearAggregateLayers() {
     bubbleLayer?.remove()
     bubbleLayer = null
-    dotsLayer?.remove()
-    dotsLayer = null
   }
 
   function renderChoropleth() {
     if (!map || !geojson) return
     clearAggregateLayers()
+    removeDotsController()
 
     if (geoLayer) geoLayer.remove()
 
@@ -262,8 +424,7 @@
     if (!map || !geojson) return
     geoLayer?.remove()
     geoLayer = null
-    dotsLayer?.remove()
-    dotsLayer = null
+    removeDotsController()
 
     if (bubbleLayer) bubbleLayer.remove()
 
@@ -293,35 +454,6 @@
     }
   }
 
-  function renderDots() {
-    if (!map) return
-    bubbleLayer?.remove()
-    bubbleLayer = null
-
-    if (dotsLayer) dotsLayer.remove()
-    dotsLayer = L.layerGroup().addTo(map)
-
-    const types = [...new Set(organizations.map((org) => org.orgType))]
-
-    for (const org of organizations) {
-      const marker = L.circleMarker([org.lat, org.lng], {
-        radius: 4,
-        fillColor: colorForOrgType(org.orgType, types),
-        color: '#0f172a',
-        weight: 0.5,
-        fillOpacity: 0.85,
-      })
-
-      marker.bindPopup(
-        `<strong>${org.navn}</strong><br/>
-         ${org.orgTypeLabel} (${org.orgType})<br/>
-         Org.nr ${org.orgnr}<br/>
-         ${org.addressText}, ${org.postnummer}`,
-      )
-      marker.addTo(dotsLayer)
-    }
-  }
-
   function renderBaseKommuner() {
     if (!map || !geojson) return
 
@@ -341,20 +473,22 @@
     if (!map) return
 
     if (settings.visualization === 'choropleth') {
-      organizations = []
+      removeDotsController()
       renderChoropleth()
       return
     }
 
     if (settings.visualization === 'bubbles') {
-      organizations = []
+      removeDotsController()
       renderBubbles()
       return
     }
 
     renderBaseKommuner()
     if (geoLayer) geoLayer.bringToBack()
-    scheduleDotsReload()
+    ensureDotsController()
+    dotsController?.bringToFront()
+    scheduleDotsReload(0)
   }
 
   onMount(() => {
@@ -363,6 +497,11 @@
       preferCanvas: true,
       minZoom: 4,
       maxZoom: 18,
+      maxBounds: [
+        [90, -Infinity],
+        [-90, Infinity],
+      ],
+      maxBoundsViscosity: 1,
     }).setView([65.0, 12.0], 5)
 
     L.control.zoom({ position: 'topright' }).addTo(map)
@@ -373,18 +512,24 @@
       maxZoom: 19,
     }).addTo(map)
 
-    map.on('moveend', scheduleDotsReload)
-    map.on('zoomend', scheduleDotsReload)
+    map.on('moveend', scheduleDotsReloadOnMove)
+    map.on('zoomend', scheduleDotsReloadOnZoom)
 
     updateVisualization()
 
     return () => {
       clearTimeout(boundsTimer)
-      map?.off('moveend', scheduleDotsReload)
-      map?.off('zoomend', scheduleDotsReload)
+      map?.off('moveend', scheduleDotsReloadOnMove)
+      map?.off('zoomend', scheduleDotsReloadOnZoom)
+      removeDotsController()
       map?.remove()
       map = null
     }
+  })
+
+  $effect(() => {
+    geojson
+    kommuneBoundsByNummer = geojson ? kommuneBoundsIndex(geojson) : new Map()
   })
 
   $effect(() => {
@@ -392,13 +537,21 @@
     settings.colorScheme
     settings.selectedFylke
     settings.selectedKommune
+    counts
+    geojson
+    updateVisualization()
+  })
+
+  $effect(() => {
+    if (settings.visualization !== 'dots') return
+
     settings.orgTypes
     settings.excludeKonkurs
     settings.excludeUnderAvvikling
     settings.vatRegisteredOnly
-    counts
-    geojson
-    updateVisualization()
+
+    dotsCache.clear()
+    scheduleDotsReload()
   })
 </script>
 
@@ -415,16 +568,16 @@
     </div>
   {/if}
 
-  {#if settings.visualization === 'dots' && (dotsState.loading || dotsState.message)}
+  {#if settings.visualization === 'dots' && dotsState.loading}
+    <div class="dots-status loading">
+      <strong>
+        {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Oppdaterer kart…'}
+      </strong>
+      <span>{dotsState.message ?? ''}</span>
+    </div>
+  {:else if settings.visualization === 'dots' && dotsState.message}
     <div class="dots-status">
-      {#if dotsState.loading}
-        <strong>
-          {dotsState.phase === 'fetching' ? 'Henter fra BRREG…' : 'Geokoder adresser…'}
-        </strong>
-        <span>{dotsState.message ?? ''}</span>
-      {:else if dotsState.message}
-        <span>{dotsState.message}</span>
-      {/if}
+      <span>{dotsState.message}</span>
     </div>
   {/if}
 
@@ -476,6 +629,11 @@
     font-size: 0.82rem;
     max-width: min(90vw, 420px);
     text-align: center;
+    pointer-events: none;
+  }
+
+  .dots-status.loading {
+    background: rgba(15, 23, 42, 0.78);
   }
 
   .dots-status strong {
@@ -496,5 +654,14 @@
 
   :global(.leaflet-container) {
     font-family: inherit;
+  }
+
+  :global(.maplibregl-canvas) {
+    outline: none;
+  }
+
+  :global(.leaflet-marker-pane .leaflet-gl-layer) {
+    z-index: 650 !important;
+    pointer-events: none;
   }
 </style>

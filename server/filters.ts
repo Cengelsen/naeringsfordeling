@@ -28,11 +28,26 @@ export function buildFilterQuery(filters: MapFilters, geocodedOnly = false) {
 export interface ApiFilters extends MapFilters {
   kommunenummer?: string
   fylke?: string
+  /** minLng, minLat, maxLng, maxLat */
+  bbox?: [number, number, number, number]
+  zoom?: number
 }
 
 export function parseFilters(req: {
   query: (key: string) => string | undefined
 }): ApiFilters {
+  const bboxRaw = req.query('bbox')
+  let bbox: ApiFilters['bbox']
+  if (bboxRaw) {
+    const parts = bboxRaw.split(',').map((value) => Number(value.trim()))
+    if (parts.length === 4 && parts.every((value) => Number.isFinite(value))) {
+      bbox = parts as [number, number, number, number]
+    }
+  }
+
+  const zoomRaw = Number(req.query('zoom') ?? '')
+  const zoom = Number.isFinite(zoomRaw) ? zoomRaw : undefined
+
   return {
     orgTypes: req.query('orgTypes')?.split(',').filter(Boolean) ?? [],
     excludeKonkurs: req.query('excludeKonkurs') !== 'false',
@@ -40,7 +55,20 @@ export function parseFilters(req: {
     vatRegisteredOnly: req.query('vatRegisteredOnly') === 'true',
     kommunenummer: req.query('kommunenummer'),
     fylke: req.query('fylke'),
+    bbox,
+    zoom,
   }
+}
+
+export function limitForZoom(zoom?: number, explicitLimit?: number): number {
+  if (explicitLimit != null) {
+    return Math.min(Math.max(1, explicitLimit), 50000)
+  }
+
+  if (zoom == null || zoom < 10) return 5000
+  if (zoom < 12) return 15000
+  if (zoom < 14) return 30000
+  return 50000
 }
 
 export function appendAreaFilters(filters: ApiFilters, conditions: string[], params: Array<string | number>) {
@@ -59,4 +87,16 @@ export function appendAreaFilters(filters: ApiFilters, conditions: string[], par
     conditions.push('substr(kommunenummer, 1, 2) = ?')
     params.push(filters.fylke)
   }
+}
+
+export function appendBboxFilter(
+  bbox: [number, number, number, number] | undefined,
+  conditions: string[],
+  params: Array<string | number>,
+) {
+  if (!bbox) return
+
+  const [minLng, minLat, maxLng, maxLat] = bbox
+  conditions.push('lat >= ?', 'lat <= ?', 'lng >= ?', 'lng <= ?')
+  params.push(minLat, maxLat, minLng, maxLng)
 }

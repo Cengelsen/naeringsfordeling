@@ -1,3 +1,6 @@
+import type { ExpressionSpecification } from 'maplibre-gl'
+import type { OrganizationPoint } from '../types'
+
 const BASE_COLORS = [
   '#3b82f6',
   '#ef4444',
@@ -47,6 +50,19 @@ export function colorForOrgType(kode: string, allTypes: string[]): string {
   let hash = 0
   for (const char of kode) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
   return BASE_COLORS[hash % BASE_COLORS.length]
+}
+
+/** MapLibre `circle-color` expression keyed on the `orgType` property */
+export function orgTypeColorExpression(allTypes: string[]): ExpressionSpecification {
+  const uniqueTypes = [...new Set(allTypes)].sort()
+  const expression: unknown[] = ['match', ['get', 'orgType']]
+
+  for (const kode of uniqueTypes) {
+    expression.push(kode, colorForOrgType(kode, uniqueTypes))
+  }
+
+  expression.push('#64748b')
+  return expression as ExpressionSpecification
 }
 
 export function orgTypeLabels(

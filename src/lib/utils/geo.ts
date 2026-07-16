@@ -63,3 +63,79 @@ export function centroid(feature: KommuneFeature): [number, number] {
 export function kommuneFeatures(geojson: FeatureCollection): KommuneFeature[] {
   return geojson.features as KommuneFeature[]
 }
+
+export interface GeoBounds {
+  minLat: number
+  maxLat: number
+  minLng: number
+  maxLng: number
+}
+
+export function geoBoundsIntersects(a: GeoBounds, b: GeoBounds): boolean {
+  return !(
+    a.maxLat < b.minLat ||
+    a.minLat > b.maxLat ||
+    a.maxLng < b.minLng ||
+    a.minLng > b.maxLng
+  )
+}
+
+function extendBounds(bounds: GeoBounds, lat: number, lng: number) {
+  bounds.minLat = Math.min(bounds.minLat, lat)
+  bounds.maxLat = Math.max(bounds.maxLat, lat)
+  bounds.minLng = Math.min(bounds.minLng, lng)
+  bounds.maxLng = Math.max(bounds.maxLng, lng)
+}
+
+function ringBounds(ring: number[][]): GeoBounds | null {
+  if (ring.length === 0) return null
+
+  const bounds: GeoBounds = {
+    minLat: ring[0][1],
+    maxLat: ring[0][1],
+    minLng: ring[0][0],
+    maxLng: ring[0][0],
+  }
+
+  for (const [lng, lat] of ring) {
+    extendBounds(bounds, lat, lng)
+  }
+
+  return bounds
+}
+
+export function featureGeoBounds(feature: KommuneFeature): GeoBounds | null {
+  const geometry = feature.geometry
+
+  if (geometry.type === 'Polygon') {
+    return ringBounds(geometry.coordinates[0])
+  }
+
+  if (geometry.type === 'MultiPolygon') {
+    let merged: GeoBounds | null = null
+    for (const polygon of geometry.coordinates) {
+      const part = ringBounds(polygon[0])
+      if (!part) continue
+      if (!merged) {
+        merged = { ...part }
+        continue
+      }
+      extendBounds(merged, part.minLat, part.minLng)
+      extendBounds(merged, part.maxLat, part.maxLng)
+    }
+    return merged
+  }
+
+  return null
+}
+
+export function kommuneBoundsIndex(geojson: FeatureCollection): Map<string, GeoBounds> {
+  const index = new Map<string, GeoBounds>()
+  for (const feature of kommuneFeatures(geojson)) {
+    const bounds = featureGeoBounds(feature)
+    if (bounds) {
+      index.set(feature.properties.kommunenummer, bounds)
+    }
+  }
+  return index
+}
