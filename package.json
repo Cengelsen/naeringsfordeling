@@ -15,6 +15,7 @@
     "sync:dev": "tsx scripts/sync.ts --dev --geocode-limit=2000",
     "sync:geocode": "tsx scripts/sync.ts --geocode-only",
     "server": "tsx server/index.ts",
+    "export-points": "tsx scripts/export-point-tiles.ts",
     "download-db": "bash scripts/download-db.sh"
   },
   "devDependencies": {

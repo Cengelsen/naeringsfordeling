@@ -24,9 +24,11 @@
   import {
     fetchOrganizationDetail,
     fetchOrganizationPoints,
+    MAX_VIEWPORT_DOTS,
     MIN_DOTS_ZOOM,
   } from '../services/api'
   import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
+  import { filterPointsByOrgTypes } from '../map/points'
   import {
     createMaplibreDotsLayer,
     type MaplibreDotsController,
@@ -50,6 +52,7 @@
   let bubbleLayer: L.LayerGroup | null = null
   let dotsController: MaplibreDotsController | null = null
   let points = $state<OrganizationPoint[]>([])
+  let allPoints = $state<OrganizationPoint[]>([])
   let dotsState = $state<DotsLoadState>({
     loading: false,
     phase: 'idle',
@@ -68,12 +71,12 @@
   const maxCount = $derived(Math.max(...counts.map((c) => c.count), 1))
   const totalVisible = $derived(
     settings.visualization === 'dots'
-      ? points.length
+      ? filterPointsByOrgTypes(allPoints, settings.orgTypes).length
       : counts.reduce((sum, c) => sum + c.count, 0),
   )
 
   const orgTypeLegendItems = $derived.by(() => {
-    const types = [...new Set(points.map((point) => point.orgType))].sort()
+    const types = [...new Set(allPoints.map((point) => point.orgType))].sort()
     return types.map((kode) => {
       const meta = orgForms.find((f) => f.kode === kode)
       return {
@@ -107,14 +110,14 @@
     return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]
   }
 
-  function filtersKey(): string {
+  function dataFiltersKey(): string {
     return [
       settings.selectedFylke,
       settings.selectedKommune,
-      [...settings.orgTypes].sort().join(','),
       settings.excludeKonkurs,
       settings.excludeUnderAvvikling,
       settings.vatRegisteredOnly,
+      settings.dotsClustering,
     ].join('|')
   }
 
@@ -146,6 +149,7 @@
 
     dotsController = createMaplibreDotsLayer(map, {
       dotsDetailMinZoom: settings.dotsDetailMinZoom,
+      dotsClustering: settings.dotsClustering !== false,
       onPointClick: showOrganizationPopup,
     })
   }
@@ -154,6 +158,7 @@
     dotsController?.remove()
     dotsController = null
     points = []
+    allPoints = []
     dotsCache.clear()
   }
 
@@ -194,20 +199,31 @@
   }
 
   function applyPoints(nextPoints: OrganizationPoint[], truncated: boolean, kommuner: number) {
+    allPoints = nextPoints
     points = nextPoints
     dotsController?.setPoints(nextPoints)
+    dotsController?.setVisibleOrgTypes(settings.orgTypes)
     dotsController?.setStale(false)
     dotsController?.bringToFront()
+    const visibleCount = filterPointsByOrgTypes(nextPoints, settings.orgTypes).length
     updateDotsState({
       loading: false,
       phase: 'idle',
-      organizations: nextPoints.length,
-      geocoded: nextPoints.length,
+      organizations: visibleCount,
+      geocoded: visibleCount,
       skipped: 0,
       kommuner,
       message: truncated
         ? 'Viser maks antall organisasjoner for utsnittet – zoom inn eller velg kommune'
         : null,
+    })
+  }
+
+  function applyOrgTypeVisibility() {
+    dotsController?.setVisibleOrgTypes(settings.orgTypes)
+    updateDotsState({
+      organizations: filterPointsByOrgTypes(allPoints, settings.orgTypes).length,
+      geocoded: filterPointsByOrgTypes(allPoints, settings.orgTypes).length,
     })
   }
 
@@ -220,8 +236,9 @@
     const key = dotsCacheKey({
       bbox: expanded,
       kommunenumre: targetKommuner,
-      filters: filtersKey(),
+      filters: dataFiltersKey(),
       zoom,
+      clustering: settings.dotsClustering !== false,
     })
 
     if (dotsCache.getMemory(key)) return
@@ -236,7 +253,8 @@
           bbox: expanded,
           kommunenumre: targetKommuner,
           selectedFylke: settings.selectedFylke,
-          zoom,
+          zoom: settings.dotsClustering !== false ? zoom : undefined,
+          limit: settings.dotsClustering !== false ? undefined : MAX_VIEWPORT_DOTS,
         })
         await dotsCache.set(key, {
           points: result.points,
@@ -259,12 +277,17 @@
     const bounds = map.getBounds()
     const bbox = mapBbox(bounds)
 
+    const clustering = settings.dotsClustering !== false
+    const useViewportBbox = !clustering
+
     if (
+      clustering &&
       targetKommuner.length === 0 &&
       !settings.selectedKommune &&
       !settings.selectedFylke
     ) {
       points = []
+      allPoints = []
       dotsController?.setPoints([])
       updateDotsState({
         loading: false,
@@ -281,8 +304,9 @@
     const cacheKey = dotsCacheKey({
       bbox,
       kommunenumre: targetKommuner,
-      filters: filtersKey(),
+      filters: dataFiltersKey(),
       zoom,
+      clustering: settings.dotsClustering !== false,
     })
 
     const cached = await dotsCache.get(cacheKey)
@@ -303,10 +327,11 @@
 
     try {
       const result = await fetchOrganizationPoints(settings, {
-        bbox: settings.selectedKommune || settings.selectedFylke ? undefined : bbox,
+        bbox: useViewportBbox || !(settings.selectedKommune || settings.selectedFylke) ? bbox : undefined,
         kommunenumre: targetKommuner,
         selectedFylke: settings.selectedFylke,
-        zoom,
+        zoom: useViewportBbox ? undefined : zoom,
+        limit: useViewportBbox ? MAX_VIEWPORT_DOTS : undefined,
       })
 
       if (token !== loadToken) return
@@ -545,13 +570,22 @@
   $effect(() => {
     if (settings.visualization !== 'dots') return
 
-    settings.orgTypes
     settings.excludeKonkurs
     settings.excludeUnderAvvikling
     settings.vatRegisteredOnly
+    settings.dotsClustering
+    settings.selectedFylke
+    settings.selectedKommune
 
     dotsCache.clear()
+    dotsController?.setClustering(settings.dotsClustering !== false)
     scheduleDotsReload()
+  })
+
+  $effect(() => {
+    if (settings.visualization !== 'dots') return
+    settings.orgTypes
+    applyOrgTypeVisibility()
   })
 </script>
 

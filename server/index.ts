@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { compress } from 'hono/compress'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { existsSync } from 'node:fs'
@@ -10,6 +11,7 @@ import {
   limitForZoom,
   parseFilters,
 } from './filters.js'
+import { toCompactPoint, roundCoord, type CompactPoint } from '../scripts/lib/points.js'
 
 const dbPath = process.env.DATABASE_PATH ?? DEFAULT_DB_PATH
 
@@ -23,6 +25,7 @@ const db = openDatabase(dbPath)
 const app = new Hono()
 
 app.use('/*', cors())
+app.use(compress())
 
 function organizationQuery(filters: ReturnType<typeof parseFilters>, geocodedOnly = true) {
   const { conditions, params } = buildFilterQuery(filters, geocodedOnly)
@@ -97,6 +100,7 @@ app.get('/api/organizations/points', (c) => {
     filters.zoom,
     Number.isFinite(explicitLimit) ? explicitLimit : undefined,
   )
+  const compact = c.req.query('format') === 'compact'
   const { conditions, params } = organizationQuery(filters)
 
   const rows = db
@@ -113,12 +117,23 @@ app.get('/api/organizations/points', (c) => {
     lng: number
   }>
 
+  if (compact) {
+    const points: CompactPoint[] = rows.map((row) =>
+      toCompactPoint(row.orgnr, row.lng, row.lat, row.org_type),
+    )
+    return c.json({
+      points,
+      count: points.length,
+      truncated: points.length >= limit,
+    })
+  }
+
   return c.json({
     points: rows.map((row) => ({
       orgnr: row.orgnr,
       orgType: row.org_type,
-      lat: row.lat,
-      lng: row.lng,
+      lat: roundCoord(row.lat),
+      lng: roundCoord(row.lng),
     })),
     count: rows.length,
     truncated: rows.length >= limit,

@@ -11,6 +11,7 @@ export const defaultSettings: MapSettings = {
   selectedFylke: '',
   selectedKommune: '',
   dotsDetailMinZoom: 12,
+  dotsClustering: true,
 }
 
 export const mapSettings = $state<MapSettings>({ ...defaultSettings })
@@ -33,4 +34,8 @@ export function setVisualization(mode: VisualizationMode) {
 
 export function setColorScheme(scheme: ColorScheme) {
   mapSettings.colorScheme = scheme
+}
+
+export function setDotsClustering(enabled: boolean) {
+  mapSettings.dotsClustering = enabled
 }

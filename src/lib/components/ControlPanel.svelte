@@ -4,6 +4,7 @@
     mapSettings,
     resetSettings,
     setColorScheme,
+    setDotsClustering,
     setVisualization,
     toggleOrgType,
   } from '../stores/settings.svelte'
@@ -103,22 +104,8 @@
 
     {#if isDotsView}
       <p class="hint">
-        Zoom inn (nivå {MIN_DOTS_ZOOM}+) eller velg fylke/kommune. Prikker grupperes automatisk
-        til du zoomer inn på gate-nivå.
+        Zoom inn (nivå {MIN_DOTS_ZOOM}+) eller velg fylke/kommune for å vise geokodede adresser.
       </p>
-      {#if dotsState.loading}
-        <p class="hint loading-hint">
-          {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Geokoder adresser…'}
-          {dotsState.message ?? ''}
-        </p>
-      {:else if dotsState.organizations > 0}
-        <p class="hint">
-          {dotsState.organizations.toLocaleString('nb-NO')} prikker i kartet
-          {#if dotsState.skipped > 0}
-            · {dotsState.skipped.toLocaleString('nb-NO')} uten adressetreff
-          {/if}
-        </p>
-      {/if}
     {/if}
 
     <label class="field">
@@ -140,6 +127,40 @@
       Vis forklaring
     </label>
   </section>
+
+  {#if isDotsView}
+    <section class="section">
+      <h2>Adresser</h2>
+      <label class="checkbox">
+        <input
+          type="checkbox"
+          checked={mapSettings.dotsClustering !== false}
+          onchange={(e) => setDotsClustering(e.currentTarget.checked)}
+        />
+        Grupper prikker i bobler når du er zoomet ut
+      </label>
+      <p class="hint">
+        {#if mapSettings.dotsClustering !== false}
+          Prikker slås sammen til bobler til du zoomer inn på gate-nivå.
+        {:else}
+          Alle prikker i kartutsnittet vises enkeltvis, uten bobler.
+        {/if}
+      </p>
+      {#if dotsState.loading}
+        <p class="hint loading-hint">
+          {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Oppdaterer kart…'}
+          {dotsState.message ?? ''}
+        </p>
+      {:else if dotsState.organizations > 0}
+        <p class="hint">
+          {dotsState.organizations.toLocaleString('nb-NO')} prikker i kartet
+          {#if dotsState.skipped > 0}
+            · {dotsState.skipped.toLocaleString('nb-NO')} uten adressetreff
+          {/if}
+        </p>
+      {/if}
+    </section>
+  {/if}
 
   <section class="section">
     <h2>Kommune</h2>

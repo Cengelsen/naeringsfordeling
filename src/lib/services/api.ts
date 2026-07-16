@@ -7,11 +7,19 @@ import type {
   OrganizationPoint,
   Organisasjonsform,
 } from '../types'
+import {
+  canUseStaticTiles,
+  filterPointsInBbox,
+  parsePointsResponse,
+  type CompactPoint,
+} from '../map/points'
+import { fetchViewportPointTiles } from '../map/pointTiles'
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
 
 export const MIN_DOTS_ZOOM = 9
 export const DOTS_DETAIL_MIN_ZOOM = 12
+export const MAX_VIEWPORT_DOTS = 50000
 
 class ApiError extends Error {
   constructor(message: string) {
@@ -44,6 +52,21 @@ export function limitForZoom(zoom: number): number {
   return 50000
 }
 
+/** Filters that require server-side data reload (excludes orgTypes). */
+export function dataFiltersToParams(filters: MapFilters): URLSearchParams {
+  const params = new URLSearchParams()
+  if (!filters.excludeKonkurs) params.set('excludeKonkurs', 'false')
+  if (!filters.excludeUnderAvvikling) params.set('excludeUnderAvvikling', 'false')
+  if (filters.vatRegisteredOnly) params.set('vatRegisteredOnly', 'true')
+  return params
+}
+
+function filtersToParams(filters: MapFilters): URLSearchParams {
+  const params = dataFiltersToParams(filters)
+  if (filters.orgTypes.length > 0) params.set('orgTypes', filters.orgTypes.join(','))
+  return params
+}
+
 export async function checkApiHealth(): Promise<void> {
   await apiFetch<{ ok: boolean }>('/api/health')
 }
@@ -70,15 +93,6 @@ export async function fetchKommuner(geojson: FeatureCollection | null): Promise<
   }))
 }
 
-function filtersToParams(filters: MapFilters): URLSearchParams {
-  const params = new URLSearchParams()
-  if (filters.orgTypes.length > 0) params.set('orgTypes', filters.orgTypes.join(','))
-  if (!filters.excludeKonkurs) params.set('excludeKonkurs', 'false')
-  if (!filters.excludeUnderAvvikling) params.set('excludeUnderAvvikling', 'false')
-  if (filters.vatRegisteredOnly) params.set('vatRegisteredOnly', 'true')
-  return params
-}
-
 export async function fetchMunicipalityCounts(filters: MapFilters): Promise<MunicipalityCount[]> {
   const params = filtersToParams(filters)
   const data = await apiFetch<{ counts: MunicipalityCount[] }>(
@@ -95,11 +109,12 @@ export interface FetchPointsOptions {
   limit?: number
 }
 
-export async function fetchOrganizationPoints(
+async function fetchOrganizationPointsFromApi(
   filters: MapFilters,
   options: FetchPointsOptions = {},
 ): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
-  const params = filtersToParams(filters)
+  const params = dataFiltersToParams(filters)
+  params.set('format', 'compact')
 
   if (options.bbox) {
     params.set('bbox', options.bbox.join(','))
@@ -120,14 +135,38 @@ export async function fetchOrganizationPoints(
     params.set('fylke', options.selectedFylke)
   }
 
-  const data = await apiFetch<{ points: OrganizationPoint[]; truncated: boolean }>(
-    `/api/organizations/points?${params.toString()}`,
-  )
+  const data = await apiFetch<{
+    points: OrganizationPoint[] | CompactPoint[]
+    truncated: boolean
+  }>(`/api/organizations/points?${params.toString()}`)
 
   return {
-    points: data.points,
+    points: parsePointsResponse(data),
     truncated: data.truncated,
   }
+}
+
+export async function fetchOrganizationPoints(
+  filters: MapFilters,
+  options: FetchPointsOptions = {},
+): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
+  const useTiles =
+    canUseStaticTiles(filters) &&
+    options.kommunenumre &&
+    options.kommunenumre.length > 0 &&
+    options.bbox
+
+  if (useTiles) {
+    const tiled = await fetchViewportPointTiles(options.kommunenumre!, options.bbox!)
+    if (tiled && tiled.length > 0) {
+      return {
+        points: tiled,
+        truncated: false,
+      }
+    }
+  }
+
+  return fetchOrganizationPointsFromApi(filters, options)
 }
 
 export async function fetchOrganizationDetail(orgnr: string): Promise<Organization> {

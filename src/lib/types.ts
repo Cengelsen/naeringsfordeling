@@ -35,6 +35,8 @@ export interface MapSettings extends MapFilters {
   selectedKommune: string
   /** Map zoom at which individual address dots replace clusters */
   dotsDetailMinZoom: number
+  /** Group nearby dots into count bubbles when zoomed out */
+  dotsClustering: boolean
 }
 
 export interface MunicipalityCount {

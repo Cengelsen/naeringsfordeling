@@ -101,10 +101,11 @@ export function dotsCacheKey(parts: {
   kommunenumre: string[]
   filters: string
   zoom: number
+  clustering: boolean
 }): string {
   const bbox = parts.bbox?.map((value) => value.toFixed(4)).join(',') ?? ''
   const kommuner = [...parts.kommunenumre].sort().join(',')
-  return `${bbox}|${kommuner}|z${parts.zoom}|${parts.filters}`
+  return `${bbox}|${kommuner}|z${parts.zoom}|c${parts.clustering ? 1 : 0}|${parts.filters}`
 }
 
 export function expandBbox(

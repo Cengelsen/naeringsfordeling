@@ -11,7 +11,6 @@ const SOURCE_ID = 'org-dots'
 const CLUSTER_LAYER_ID = 'org-clusters'
 const CLUSTER_COUNT_LAYER_ID = 'org-cluster-count'
 const POINT_LAYER_ID = 'org-points'
-const CLICK_LAYERS = [POINT_LAYER_ID, CLUSTER_LAYER_ID]
 const CLICK_TOLERANCE_PX = 10
 
 function pointRadiusExpression(detailMinZoom: number): maplibregl.ExpressionSpecification {
@@ -50,11 +49,14 @@ const TRANSPARENT_STYLE: maplibregl.StyleSpecification = {
 
 export interface MaplibreDotsLayerOptions {
   dotsDetailMinZoom: number
+  dotsClustering: boolean
   onPointClick: (orgnr: string, latlng: L.LatLng) => void
 }
 
 export interface MaplibreDotsController {
   setPoints(points: OrganizationPoint[]): void
+  setVisibleOrgTypes(orgTypes: string[]): void
+  setClustering(enabled: boolean): void
   setStale(stale: boolean): void
   bringToFront(): void
   remove(): void
@@ -94,16 +96,21 @@ export function createMaplibreDotsLayer(
   options: MaplibreDotsLayerOptions,
 ): MaplibreDotsController {
   let ready = false
-  let initialized = false
+  let styleReady = false
   let stale = false
+  let clusteringEnabled = options.dotsClustering
   let currentTypes: string[] = []
+  let visibleOrgTypes: string[] = []
+  let currentPoints: OrganizationPoint[] = []
   let pendingPoints: OrganizationPoint[] | null = null
+  let clickLayers = clusteringEnabled ? [POINT_LAYER_ID, CLUSTER_LAYER_ID] : [POINT_LAYER_ID]
+
+  const clusterMaxZoom = Math.max(0, options.dotsDetailMinZoom - 1)
 
   const glLayer = L.maplibreGL({
     style: TRANSPARENT_STYLE,
     interactive: false,
     attributionControl: false,
-    // markerPane (z-index 600) sits above overlayPane (400) where kommune polygons render
     pane: 'markerPane',
   } as Parameters<typeof L.maplibreGL>[0]).addTo(map)
 
@@ -119,7 +126,34 @@ export function createMaplibreDotsLayer(
   mlMap.touchZoomRotate.disable()
   mlMap.keyboard.disable()
 
-  const clusterMaxZoom = Math.max(0, options.dotsDetailMinZoom - 1)
+  function pointLayerFilter(): maplibregl.FilterSpecification {
+    const typeFilter =
+      visibleOrgTypes.length > 0
+        ? (['in', ['get', 'orgType'], ['literal', visibleOrgTypes]] as maplibregl.FilterSpecification)
+        : null
+
+    if (clusteringEnabled) {
+      const unclustered: maplibregl.FilterSpecification = ['!', ['has', 'point_count']]
+      return typeFilter ? (['all', unclustered, typeFilter] as maplibregl.FilterSpecification) : unclustered
+    }
+
+    return typeFilter ?? true
+  }
+
+  function applyTypeVisibility() {
+    if (!mlMap.getLayer(POINT_LAYER_ID)) return
+    mlMap.setFilter(POINT_LAYER_ID, pointLayerFilter())
+
+    if (clusteringEnabled) {
+      const hideClusters = visibleOrgTypes.length > 0 ? 'none' : 'visible'
+      if (mlMap.getLayer(CLUSTER_LAYER_ID)) {
+        mlMap.setLayoutProperty(CLUSTER_LAYER_ID, 'visibility', hideClusters)
+      }
+      if (mlMap.getLayer(CLUSTER_COUNT_LAYER_ID)) {
+        mlMap.setLayoutProperty(CLUSTER_COUNT_LAYER_ID, 'visibility', hideClusters)
+      }
+    }
+  }
 
   function applyPointColors(types: string[]) {
     if (!mlMap.getLayer(POINT_LAYER_ID)) return
@@ -146,71 +180,20 @@ export function createMaplibreDotsLayer(
     }
   }
 
-  function updateSource(points: OrganizationPoint[]) {
-    currentTypes = [...new Set(points.map((point) => point.orgType))].sort()
-    const source = mlMap.getSource(SOURCE_ID) as GeoJSONSource | undefined
-    if (source) {
-      source.setData(pointsToGeoJson(points))
-      applyPointColors(currentTypes)
-      applyOpacity()
+  function removeDataLayers() {
+    for (const id of [POINT_LAYER_ID, CLUSTER_LAYER_ID, CLUSTER_COUNT_LAYER_ID]) {
+      if (mlMap.getLayer(id)) mlMap.removeLayer(id)
     }
+    if (mlMap.getSource(SOURCE_ID)) mlMap.removeSource(SOURCE_ID)
   }
 
-  function initLayers() {
-    if (initialized) return
-    initialized = true
-
-    mlMap.addSource(SOURCE_ID, {
-      type: 'geojson',
-      data: EMPTY_COLLECTION,
-      cluster: true,
-      clusterMaxZoom,
-      clusterRadius: 50,
-    })
-
-    mlMap.addLayer({
-      id: CLUSTER_LAYER_ID,
-      type: 'circle',
-      source: SOURCE_ID,
-      filter: ['has', 'point_count'],
-      paint: {
-        'circle-color': [
-          'step',
-          ['get', 'point_count'],
-          '#38bdf8',
-          25,
-          '#0ea5e9',
-          100,
-          '#0284c7',
-          500,
-          '#0369a1',
-        ],
-        'circle-radius': ['step', ['get', 'point_count'], 16, 25, 20, 100, 26, 500, 32],
-        'circle-stroke-width': 1,
-        'circle-stroke-color': '#0f172a',
-        'circle-opacity': 0.92,
-      },
-    })
-
-    mlMap.addLayer({
-      id: CLUSTER_COUNT_LAYER_ID,
-      type: 'symbol',
-      source: SOURCE_ID,
-      filter: ['has', 'point_count'],
-      layout: {
-        'text-field': ['get', 'point_count_abbreviated'],
-        'text-size': 12,
-      },
-      paint: {
-        'text-color': '#f8fafc',
-      },
-    })
-
+  function addPointLayer() {
     mlMap.addLayer({
       id: POINT_LAYER_ID,
       type: 'circle',
       source: SOURCE_ID,
-      filter: ['!', ['has', 'point_count']],
+      minzoom: Math.max(0, options.dotsDetailMinZoom - 2),
+      filter: pointLayerFilter(),
       paint: {
         'circle-color':
           currentTypes.length > 0 ? orgTypeColorExpression(currentTypes) : '#64748b',
@@ -228,16 +211,97 @@ export function createMaplibreDotsLayer(
         'circle-opacity': 0.88,
       },
     })
+  }
 
+  function setupDataLayers(clustered: boolean) {
+    if (!styleReady) return
+
+    removeDataLayers()
+    clusteringEnabled = clustered
+    clickLayers = clustered ? [POINT_LAYER_ID, CLUSTER_LAYER_ID] : [POINT_LAYER_ID]
+
+    mlMap.addSource(SOURCE_ID, {
+      type: 'geojson',
+      data: pointsToGeoJson(currentPoints),
+      ...(clustered
+        ? { cluster: true, clusterMaxZoom, clusterRadius: 50 }
+        : {}),
+    })
+
+    if (clustered) {
+      mlMap.addLayer({
+        id: CLUSTER_LAYER_ID,
+        type: 'circle',
+        source: SOURCE_ID,
+        minzoom: 0,
+        maxzoom: options.dotsDetailMinZoom,
+        filter: ['has', 'point_count'],
+        paint: {
+          'circle-color': [
+            'step',
+            ['get', 'point_count'],
+            '#38bdf8',
+            25,
+            '#0ea5e9',
+            100,
+            '#0284c7',
+            500,
+            '#0369a1',
+          ],
+          'circle-radius': ['step', ['get', 'point_count'], 16, 25, 20, 100, 26, 500, 32],
+          'circle-stroke-width': 1,
+          'circle-stroke-color': '#0f172a',
+          'circle-opacity': 0.92,
+        },
+      })
+
+      mlMap.addLayer({
+        id: CLUSTER_COUNT_LAYER_ID,
+        type: 'symbol',
+        source: SOURCE_ID,
+        minzoom: 0,
+        maxzoom: options.dotsDetailMinZoom,
+        filter: ['has', 'point_count'],
+        layout: {
+          'text-field': ['get', 'point_count_abbreviated'],
+          'text-size': 12,
+        },
+        paint: {
+          'text-color': '#f8fafc',
+        },
+      })
+    }
+
+    addPointLayer()
+    applyPointColors(currentTypes)
+    applyTypeVisibility()
+    applyOpacity()
     ready = true
+  }
+
+  function updateSource(points: OrganizationPoint[]) {
+    currentPoints = points
+    currentTypes = [...new Set(points.map((point) => point.orgType))].sort()
+    const source = mlMap.getSource(SOURCE_ID) as GeoJSONSource | undefined
+    if (source) {
+      source.setData(pointsToGeoJson(points))
+      applyPointColors(currentTypes)
+      applyOpacity()
+    }
+  }
+
+  function initStyle() {
+    if (styleReady) return
+    styleReady = true
+    setupDataLayers(clusteringEnabled)
     if (pendingPoints) {
       updateSource(pendingPoints)
       pendingPoints = null
     }
   }
 
-  mlMap.on('load', initLayers)
-  mlMap.once('styledata', initLayers)
+  mlMap.on('load', initStyle)
+  mlMap.once('styledata', initStyle)
 
   async function handleClusterFeature(feature: maplibregl.MapGeoJSONFeature) {
     const clusterId = feature.properties?.cluster_id
@@ -267,7 +331,7 @@ export function createMaplibreDotsLayer(
         [point.x - CLICK_TOLERANCE_PX, point.y - CLICK_TOLERANCE_PX],
         [point.x + CLICK_TOLERANCE_PX, point.y + CLICK_TOLERANCE_PX],
       ],
-      { layers: CLICK_LAYERS },
+      { layers: clickLayers },
     )
   }
 
@@ -308,9 +372,21 @@ export function createMaplibreDotsLayer(
     setPoints(points) {
       if (!ready) {
         pendingPoints = points
+        currentPoints = points
         return
       }
       updateSource(points)
+    },
+    setClustering(enabled) {
+      if (enabled === clusteringEnabled && ready) return
+      clusteringEnabled = enabled
+      if (!styleReady) return
+      ready = false
+      setupDataLayers(enabled)
+    },
+    setVisibleOrgTypes(orgTypes) {
+      visibleOrgTypes = [...orgTypes]
+      if (ready) applyTypeVisibility()
     },
     setStale(nextStale) {
       stale = nextStale
