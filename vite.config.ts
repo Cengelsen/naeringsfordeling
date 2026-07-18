@@ -27,7 +27,7 @@ function pmtilesHeaders(): Plugin {
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: process.env.GITHUB_PAGES === 'true' ? '/naeringsfordeling/' : '/',
+  base: process.env.GITHUB_PAGES === 'true' ? (process.env.VITE_BASE ?? '/') : '/',
   plugins: [svelte(), pmtilesHeaders()],
   server: {
     proxy: {
