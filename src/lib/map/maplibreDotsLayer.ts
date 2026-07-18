@@ -137,13 +137,6 @@ export function createMaplibreDotsLayer(
     throw new Error('Failed to initialize MapLibre map (WebGL unavailable)')
   }
 
-  const canvas = mlMap.getCanvas()
-  const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl')
-  if (!gl) {
-    removeOrphanMaplibreGlLayers(map)
-    throw new Error('WebGL context unavailable')
-  }
-
   mlMap.dragPan.disable()
   mlMap.scrollZoom.disable()
   mlMap.boxZoom.disable()
