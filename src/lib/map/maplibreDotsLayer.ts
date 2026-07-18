@@ -39,17 +39,18 @@ function pointRadiusExpression(detailMinZoom: number): maplibregl.ExpressionSpec
 
 function multiMarkerIconSizeExpression(detailMinZoom: number): maplibregl.ExpressionSpecification {
   const mlDetailZoom = Math.max(0, detailMinZoom - 1)
-  const scale = SPLIT_SQUARE_IMAGE_SIZE / 16
+  const toIconSize = (radius: number) => (radius * 2) / SPLIT_SQUARE_IMAGE_SIZE
+
   return [
     'interpolate',
     ['linear'],
     ['zoom'],
     mlDetailZoom,
-    0.55 * scale,
+    toIconSize(4),
     mlDetailZoom + 3,
-    0.7 * scale,
+    toIconSize(6),
     mlDetailZoom + 6,
-    0.85 * scale,
+    toIconSize(8),
   ]
 }
 
@@ -97,7 +98,7 @@ function syncMultiSquareImages(
     if (mlMap.hasImage(key)) continue
 
     mlMap.addImage(key, createSplitSquareImageData(coloredSegments(group, colorTypes)), {
-      pixelRatio: 2,
+      pixelRatio: 1,
     })
   }
 }

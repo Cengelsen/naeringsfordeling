@@ -9,7 +9,10 @@ export interface ColoredSegment {
   color: string
 }
 
-export const SPLIT_SQUARE_IMAGE_SIZE = 48
+/** Pixel size of generated MapLibre icon (matched to circle diameter via icon-size). */
+export const SPLIT_SQUARE_IMAGE_SIZE = 24
+
+const MAX_MATRIX_CELLS = 36
 
 export function coloredSegments(group: LocationGroup, colorTypes: string[]): ColoredSegment[] {
   return orgTypeSegments(group).map((segment) => ({
@@ -22,53 +25,118 @@ export function colorMixKey(segments: ColoredSegment[]): string {
   return `mix-${segments.map((segment) => `${segment.orgType}:${segment.count}`).join('|')}`
 }
 
-export function conicGradientCss(segments: ColoredSegment[]): string {
-  if (segments.length === 1) return segments[0]!.color
+function allocateMatrixCells(segments: ColoredSegment[], cellCount: number): string[] {
+  const total = segments.reduce((sum, segment) => sum + segment.count, 0)
+  if (total === 0 || cellCount === 0) return []
 
-  let angle = 0
-  const stops: string[] = []
-  for (const segment of segments) {
-    const start = angle
-    angle += segment.fraction * 360
-    stops.push(`${segment.color} ${start}deg ${angle}deg`)
+  const allocations = segments.map((segment) => {
+    const exact = (segment.count / total) * cellCount
+    const base = Math.floor(exact)
+    return {
+      color: segment.color,
+      count: base,
+      remainder: exact - base,
+    }
+  })
+
+  let assigned = allocations.reduce((sum, entry) => sum + entry.count, 0)
+  const byRemainder = allocations
+    .map((entry, index) => ({ index, remainder: entry.remainder }))
+    .sort((left, right) => right.remainder - left.remainder)
+
+  for (const entry of byRemainder) {
+    if (assigned >= cellCount) break
+    allocations[entry.index]!.count += 1
+    assigned += 1
   }
 
-  return `conic-gradient(from -90deg, ${stops.join(', ')})`
+  const colors: string[] = []
+  for (const allocation of allocations) {
+    for (let index = 0; index < allocation.count; index++) {
+      colors.push(allocation.color)
+    }
+  }
+
+  return colors
 }
 
-export function drawSplitSquareCanvas(
+function matrixCellColors(segments: ColoredSegment[]): string[] {
+  const total = segments.reduce((sum, segment) => sum + segment.count, 0)
+  if (total === 0) return []
+
+  if (total <= MAX_MATRIX_CELLS) {
+    const colors: string[] = []
+    for (const segment of segments) {
+      for (let index = 0; index < segment.count; index++) {
+        colors.push(segment.color)
+      }
+    }
+    return colors
+  }
+
+  return allocateMatrixCells(segments, MAX_MATRIX_CELLS)
+}
+
+function matrixDimensions(cellCount: number): { rows: number; cols: number } {
+  if (cellCount <= 1) return { rows: 1, cols: 1 }
+
+  let best = { rows: 1, cols: cellCount, waste: cellCount - 1 }
+  const maxSide = Math.min(6, Math.ceil(Math.sqrt(cellCount)) + 1)
+
+  for (let cols = 1; cols <= maxSide; cols++) {
+    const rows = Math.ceil(cellCount / cols)
+    const waste = rows * cols - cellCount
+    const aspectPenalty = Math.abs(rows - cols)
+    const bestPenalty = Math.abs(best.rows - best.cols)
+    if (
+      waste < best.waste ||
+      (waste === best.waste && aspectPenalty < bestPenalty)
+    ) {
+      best = { rows, cols, waste }
+    }
+  }
+
+  return { rows: best.rows, cols: best.cols }
+}
+
+export function matrixLayout(segments: ColoredSegment[]): {
+  rows: number
+  cols: number
+  colors: string[]
+} {
+  const colors = matrixCellColors(segments)
+  const { rows, cols } = matrixDimensions(colors.length)
+  return { rows, cols, colors }
+}
+
+export function drawMatrixSquareCanvas(
   ctx: CanvasRenderingContext2D,
   size: number,
   segments: ColoredSegment[],
 ) {
   ctx.clearRect(0, 0, size, size)
 
-  const inset = 2
-  ctx.save()
-  ctx.beginPath()
-  ctx.rect(inset, inset, size - inset * 2, size - inset * 2)
-  ctx.clip()
+  const inset = 1
+  const inner = size - inset * 2
+  const { rows, cols, colors } = matrixLayout(segments)
+  const cellWidth = inner / cols
+  const cellHeight = inner / rows
 
-  const center = size / 2
-  const radius = size / 2
-  let angle = -Math.PI / 2
-
-  for (const segment of segments) {
-    const sweep = segment.fraction * Math.PI * 2
-    ctx.beginPath()
-    ctx.moveTo(center, center)
-    ctx.arc(center, center, radius, angle, angle + sweep)
-    ctx.closePath()
-    ctx.fillStyle = segment.color
-    ctx.fill()
-    angle += sweep
+  for (let index = 0; index < colors.length; index++) {
+    const row = Math.floor(index / cols)
+    const col = index % cols
+    ctx.fillStyle = colors[index]!
+    ctx.fillRect(
+      inset + col * cellWidth,
+      inset + row * cellHeight,
+      cellWidth,
+      cellHeight,
+    )
   }
 
-  ctx.restore()
-
   ctx.strokeStyle = '#0f172a'
-  ctx.lineWidth = 2
-  ctx.strokeRect(inset + 0.5, inset + 0.5, size - inset * 2 - 1, size - inset * 2 - 1)
+  ctx.lineWidth = 1
+  ctx.strokeRect(inset + 0.5, inset + 0.5, inner - 1, inner - 1)
 }
 
 export function createSplitSquareImageData(segments: ColoredSegment[]): ImageData {
@@ -80,6 +148,20 @@ export function createSplitSquareImageData(segments: ColoredSegment[]): ImageDat
     throw new Error('Canvas ikke tilgjengelig')
   }
 
-  drawSplitSquareCanvas(ctx, SPLIT_SQUARE_IMAGE_SIZE, segments)
+  drawMatrixSquareCanvas(ctx, SPLIT_SQUARE_IMAGE_SIZE, segments)
   return ctx.getImageData(0, 0, SPLIT_SQUARE_IMAGE_SIZE, SPLIT_SQUARE_IMAGE_SIZE)
+}
+
+export function matrixSquareHtml(
+  segments: ColoredSegment[],
+  sizePx: number,
+  opacity: number,
+  title: string,
+): string {
+  const { rows, cols, colors } = matrixLayout(segments)
+  const cells = colors
+    .map((color) => `<div class="org-dot-square-cell" style="background:${color}"></div>`)
+    .join('')
+
+  return `<div class="org-dot-square-matrix" style="width:${sizePx}px;height:${sizePx}px;opacity:${opacity};grid-template-columns:repeat(${cols},1fr);grid-template-rows:repeat(${rows},1fr)" title="${title}">${cells}</div>`
 }

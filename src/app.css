@@ -26,6 +26,17 @@ body {
   border: none !important;
 }
 
+.org-dot-square-matrix {
+  display: grid;
+  box-sizing: border-box;
+  border: 1px solid #0f172a;
+}
+
+.org-dot-square-cell {
+  min-width: 0;
+  min-height: 0;
+}
+
 .leaflet-popup.address-popup .leaflet-popup-content {
   margin: 12px 14px;
 }
