@@ -6,6 +6,7 @@ import {
   type MaplibreDotsLayerOptions,
 } from './maplibreDotsLayer'
 import { isWebglDotsFailed, markWebglDotsFailed } from './webgl'
+import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
 
 export type DotsLayerController = MaplibreDotsController
 export type DotsLayerOptions = MaplibreDotsLayerOptions
@@ -31,6 +32,7 @@ export function createDotsLayer(
     }
   } catch (error) {
     markWebglDotsFailed()
+    removeOrphanMaplibreGlLayers(map)
     console.warn('MapLibre/WebGL failed, falling back to Leaflet dots', error)
     return {
       controller: createLeafletDotsLayer(map, {

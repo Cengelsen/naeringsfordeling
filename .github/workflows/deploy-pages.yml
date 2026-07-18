@@ -72,6 +72,7 @@ jobs:
           GITHUB_PAGES: 'true'
           VITE_BASE: /
           VITE_STATIC_API: ${{ hashFiles('data/organizations.db') != '' && 'true' || '' }}
+          VITE_HAS_PMTILES: ${{ hashFiles('public/data/points.pmtiles') != '' && 'true' || '' }}
         run: yarn build
 
       - name: Upload Pages artifact

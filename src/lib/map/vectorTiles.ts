@@ -46,6 +46,10 @@ export async function probeVectorTiles(): Promise<{
   available: boolean
   manifest: VectorTilesManifest | null
 }> {
+  if (import.meta.env.VITE_HAS_PMTILES !== 'true') {
+    return { available: false, manifest: null }
+  }
+
   try {
     const [head, manifest] = await Promise.all([
       fetch(VECTOR_TILES_PATH, { method: 'HEAD' }),

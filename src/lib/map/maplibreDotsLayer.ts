@@ -7,6 +7,7 @@ import type { OrganizationPoint } from '../types'
 import { orgTypeColorExpression } from '../utils/orgTypeColors'
 import { ensurePmtilesProtocol, VECTOR_TILES_LAYER } from './vectorTiles'
 import { jitterCoordinates } from './jitter'
+import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
 
 const SOURCE_ID = 'org-dots'
 const CLUSTER_LAYER_ID = 'org-clusters'
@@ -121,11 +122,7 @@ export function createMaplibreDotsLayer(
   try {
     glLayer.addTo(map)
   } catch (error) {
-    try {
-      glLayer.remove()
-    } catch {
-      // Layer may already be partially torn down after WebGL init failure
-    }
+    removeOrphanMaplibreGlLayers(map)
     throw error
   }
 
@@ -136,8 +133,15 @@ export function createMaplibreDotsLayer(
 
   const mlMap = glLayer.getMaplibreMap()
   if (!mlMap) {
-    glLayer.remove()
+    removeOrphanMaplibreGlLayers(map)
     throw new Error('Failed to initialize MapLibre map (WebGL unavailable)')
+  }
+
+  const canvas = mlMap.getCanvas()
+  const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl')
+  if (!gl) {
+    removeOrphanMaplibreGlLayers(map)
+    throw new Error('WebGL context unavailable')
   }
 
   mlMap.dragPan.disable()
@@ -444,7 +448,12 @@ export function createMaplibreDotsLayer(
       map.off('click', handleLeafletClick)
       map.off('mousemove', handleLeafletMouseMove)
       map.getContainer().style.cursor = ''
-      glLayer.remove()
+      try {
+        glLayer.remove()
+      } catch {
+        // ignore partial teardown
+      }
+      removeOrphanMaplibreGlLayers(map)
     },
   }
 }
