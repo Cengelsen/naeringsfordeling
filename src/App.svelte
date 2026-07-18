@@ -11,6 +11,7 @@
   } from './lib/services/api'
   import type { Kommune, DotsLoadState, LoadingState, MunicipalityCount, Organisasjonsform } from './lib/types'
   import { fylkeFromKommune } from './lib/utils/geo'
+  import { assetUrl } from './lib/utils/assets'
 
   let orgForms = $state<Organisasjonsform[]>([])
   let kommuner = $state<Kommune[]>([])
@@ -95,7 +96,7 @@
     try {
       await checkApiHealth()
 
-      const geoResponse = await fetch('/data/kommuner.geojson').then((r) => {
+      const geoResponse = await fetch(assetUrl('data/kommuner.geojson')).then((r) => {
         if (!r.ok) throw new Error('Kunne ikke laste kartdata')
         return r.json() as Promise<FeatureCollection>
       })

@@ -16,8 +16,104 @@ import {
   type CompactPoint,
 } from '../map/points'
 import { fetchViewportPointTiles } from '../map/pointTiles'
+import { assetUrl } from '../utils/assets'
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
+const STATIC_API = import.meta.env.VITE_STATIC_API === 'true'
+const STATIC_API_BASE = assetUrl('data/api')
+
+interface MunicipalityBreakdownRow {
+  kommunenummer: string
+  org_type: string
+  konkurs: number
+  under_avvikling: number
+  vat_registered: number
+  count: number
+}
+
+type SearchIndexRow = [string, string, string, string, string, number | null, number | null]
+
+let municipalityBreakdownPromise: Promise<MunicipalityBreakdownRow[]> | null = null
+let organizationsPromise: Promise<Record<string, Organization>> | null = null
+let searchIndexPromise: Promise<OrganizationSearchHit[]> | null = null
+
+async function staticFetch<T>(file: string): Promise<T> {
+  const response = await fetch(`${STATIC_API_BASE}/${file}`)
+  if (!response.ok) {
+    throw new ApiError(`Statisk data mangler (${file})`)
+  }
+  return response.json() as Promise<T>
+}
+
+async function loadMunicipalityBreakdown(): Promise<MunicipalityBreakdownRow[]> {
+  municipalityBreakdownPromise ??= staticFetch<{ rows: MunicipalityBreakdownRow[] }>(
+    'municipality-breakdown.json',
+  ).then((data) => data.rows)
+  return municipalityBreakdownPromise
+}
+
+async function loadOrganizations(): Promise<Record<string, Organization>> {
+  organizationsPromise ??= staticFetch<{ organizations: Record<string, Organization> }>(
+    'organizations.json',
+  ).then((data) => data.organizations)
+  return organizationsPromise
+}
+
+async function loadSearchIndex(): Promise<OrganizationSearchHit[]> {
+  searchIndexPromise ??= staticFetch<{ rows: SearchIndexRow[] }>('search-index.json').then((data) =>
+    data.rows.map(([orgnr, navn, orgType, orgTypeLabel, kommunenummer, lat, lng]) => ({
+      orgnr,
+      navn,
+      orgType,
+      orgTypeLabel,
+      kommunenummer,
+      lat,
+      lng,
+    })),
+  )
+  return searchIndexPromise
+}
+
+function aggregateMunicipalityCounts(
+  rows: MunicipalityBreakdownRow[],
+  filters: MapFilters,
+): MunicipalityCount[] {
+  const totals = new Map<string, number>()
+
+  for (const row of rows) {
+    if (filters.orgTypes.length > 0 && !filters.orgTypes.includes(row.org_type)) continue
+    if (filters.excludeKonkurs && row.konkurs !== 0) continue
+    if (filters.excludeUnderAvvikling && row.under_avvikling !== 0) continue
+    if (filters.vatRegisteredOnly && row.vat_registered !== 1) continue
+    totals.set(row.kommunenummer, (totals.get(row.kommunenummer) ?? 0) + row.count)
+  }
+
+  return [...totals.entries()]
+    .map(([kommunenummer, count]) => ({ kommunenummer, count }))
+    .sort((a, b) => a.kommunenummer.localeCompare(b.kommunenummer))
+}
+
+function searchStaticOrganizations(query: string, limit: number, index: OrganizationSearchHit[]) {
+  const raw = query.trim()
+  if (raw.length < 2) return []
+
+  const digits = raw.replace(/\D/g, '')
+  if (digits.length === 9) {
+    const hit = index.find((row) => row.orgnr === digits)
+    return hit ? [hit] : []
+  }
+
+  const lower = raw.toLowerCase()
+  return index
+    .filter((row) => row.navn.toLowerCase().includes(lower))
+    .sort((a, b) => {
+      const aPrefix = a.navn.toLowerCase().startsWith(lower) ? 0 : 1
+      const bPrefix = b.navn.toLowerCase().startsWith(lower) ? 0 : 1
+      if (aPrefix !== bPrefix) return aPrefix - bPrefix
+      return a.navn.length - b.navn.length || a.navn.localeCompare(b.navn, 'nb')
+    })
+    .slice(0, limit)
+}
 
 export const MIN_DOTS_ZOOM = 9
 export const DOTS_DETAIL_MIN_ZOOM = 12
@@ -31,6 +127,10 @@ class ApiError extends Error {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  if (STATIC_API) {
+    throw new ApiError('Live API er deaktivert i statisk modus')
+  }
+
   let response: Response
   try {
     response = await fetch(`${API_BASE}${path}`, init)
@@ -70,16 +170,28 @@ function filtersToParams(filters: MapFilters): URLSearchParams {
 }
 
 export async function checkApiHealth(): Promise<void> {
+  if (STATIC_API) {
+    await staticFetch<{ ok: boolean }>('health.json')
+    return
+  }
   await apiFetch<{ ok: boolean }>('/api/health')
 }
 
 export async function fetchOrganisasjonsformer(): Promise<Organisasjonsform[]> {
+  if (STATIC_API) {
+    const data = await staticFetch<{ organisasjonsformer: Organisasjonsform[] }>(
+      'organisasjonsformer.json',
+    )
+    return data.organisasjonsformer
+  }
   const data = await apiFetch<{ organisasjonsformer: Organisasjonsform[] }>('/api/organisasjonsformer')
   return data.organisasjonsformer
 }
 
 export async function fetchKommuner(geojson: FeatureCollection | null): Promise<Kommune[]> {
-  const data = await apiFetch<{ kommuner: Array<{ nummer: string; count: number }> }>('/api/kommuner')
+  const data = STATIC_API
+    ? await staticFetch<{ kommuner: Array<{ nummer: string; count: number }> }>('kommuner.json')
+    : await apiFetch<{ kommuner: Array<{ nummer: string; count: number }> }>('/api/kommuner')
   const names = new Map<string, string>()
 
   for (const feature of geojson?.features ?? []) {
@@ -96,6 +208,11 @@ export async function fetchKommuner(geojson: FeatureCollection | null): Promise<
 }
 
 export async function fetchMunicipalityCounts(filters: MapFilters): Promise<MunicipalityCount[]> {
+  if (STATIC_API) {
+    const rows = await loadMunicipalityBreakdown()
+    return aggregateMunicipalityCounts(rows, filters)
+  }
+
   const params = filtersToParams(filters)
   const data = await apiFetch<{ counts: MunicipalityCount[] }>(
     `/api/municipality-counts?${params.toString()}`,
@@ -115,6 +232,10 @@ async function fetchOrganizationPointsFromApi(
   filters: MapFilters,
   options: FetchPointsOptions = {},
 ): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
+  if (STATIC_API) {
+    return { points: [], truncated: false }
+  }
+
   const params = dataFiltersToParams(filters)
   params.set('format', 'compact')
 
@@ -172,11 +293,36 @@ export async function fetchOrganizationPoints(
 }
 
 export async function fetchOrganizationDetail(orgnr: string): Promise<Organization> {
+  if (STATIC_API) {
+    const organizations = await loadOrganizations()
+    const organization = organizations[orgnr.replace(/\D/g, '')]
+    if (!organization) {
+      throw new ApiError('Organisasjon ikke funnet')
+    }
+    return organization
+  }
+
   const data = await apiFetch<{ organization: Organization }>(`/api/organizations/${orgnr}`)
   return data.organization
 }
 
 export async function fetchOrganizationLocation(orgnr: string): Promise<OrganizationLocation> {
+  if (STATIC_API) {
+    const organizations = await loadOrganizations()
+    const organization = organizations[orgnr.replace(/\D/g, '')]
+    if (!organization) {
+      throw new ApiError('Organisasjon ikke funnet')
+    }
+
+    return {
+      orgnr: organization.orgnr,
+      lat: organization.lat,
+      lng: organization.lng,
+      kommunenummer: organization.kommunenummer,
+      source: organization.lat != null && organization.lng != null ? 'database' : 'none',
+    }
+  }
+
   const data = await apiFetch<{ location: OrganizationLocation }>(
     `/api/organizations/${orgnr}/locate`,
   )
@@ -184,6 +330,11 @@ export async function fetchOrganizationLocation(orgnr: string): Promise<Organiza
 }
 
 export async function searchOrganizations(query: string, limit = 8): Promise<OrganizationSearchHit[]> {
+  if (STATIC_API) {
+    const index = await loadSearchIndex()
+    return searchStaticOrganizations(query, limit, index)
+  }
+
   const params = new URLSearchParams({ q: query, limit: String(limit) })
   const data = await apiFetch<{ results: OrganizationSearchHit[] }>(
     `/api/organizations/search?${params.toString()}`,
@@ -198,6 +349,10 @@ export async function fetchOrganizations(
   selectedFylke: string,
   limit = 50000,
 ): Promise<{ organizations: Organization[]; truncated: boolean }> {
+  if (STATIC_API) {
+    return { organizations: [], truncated: false }
+  }
+
   const params = filtersToParams(filters)
   params.set('limit', String(limit))
 

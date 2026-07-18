@@ -1,4 +1,5 @@
 import type { OrganizationPoint } from '../types'
+import { assetUrl } from '../utils/assets'
 
 /** [orgnr, lng, lat, orgType] */
 export type CompactPoint = [string, number, number, string]
@@ -60,7 +61,7 @@ export async function fetchKommunePointTile(
   }
 
   try {
-    const response = await fetch(`/data/points/${kommunenummer}.json`)
+    const response = await fetch(assetUrl(`data/points/${kommunenummer}.json`))
     if (!response.ok) return null
     const data = (await response.json()) as { points: CompactPoint[] }
     return fromCompactPoints(data.points)

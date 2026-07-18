@@ -15,6 +15,8 @@ data
 public/data/points/
 public/data/points.pmtiles
 public/data/points.mbtiles
+public/data/api/
+public/data/kommuner.geojson
 *.local
 
 # Editor directories and files

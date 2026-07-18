@@ -1,8 +1,9 @@
 import maplibregl from 'maplibre-gl'
 import { Protocol } from 'pmtiles'
+import { assetUrl } from '../utils/assets'
 
-export const VECTOR_TILES_PATH = '/data/points.pmtiles'
-export const VECTOR_TILES_MANIFEST = '/data/points/manifest.json'
+export const VECTOR_TILES_PATH = assetUrl('data/points.pmtiles')
+export const VECTOR_TILES_MANIFEST = assetUrl('data/points/manifest.json')
 export const VECTOR_TILES_LAYER = 'organizations'
 
 export interface VectorTilesManifest {

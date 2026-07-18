@@ -1,9 +1,9 @@
 const CACHE = 'naeringsfordeling-v1'
-const PRECACHE = ['/data/points/manifest.json']
+const PRECACHE = ['data/points/manifest.json']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(PRECACHE)).then(() => self.skipWaiting()),
+    caches.open(CACHE).then((cache) => cache.addAll(PRECACHE.map((path) => new URL(path, self.location).href))).then(() => self.skipWaiting()),
   )
 })
 
@@ -20,8 +20,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url)
 
   if (
-    url.pathname.startsWith('/data/points/') ||
-    url.pathname === '/data/points.pmtiles'
+    url.pathname.includes('/data/points/') ||
+    url.pathname.endsWith('/data/points.pmtiles')
   ) {
     event.respondWith(
       caches.open(CACHE).then(async (cache) => {

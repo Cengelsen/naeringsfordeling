@@ -1,4 +1,5 @@
 import type { OrganizationPoint } from '../types'
+import { assetUrl } from '../utils/assets'
 import { filterPointsInBbox, fromCompactPoints, type CompactPoint } from './points'
 
 /** Kommuner with at least this many points are split into a lat/lng grid. */
@@ -49,7 +50,7 @@ let pointsIndexPromise: Promise<PointsIndex | null> | null = null
 
 export async function loadPointsIndex(): Promise<PointsIndex | null> {
   if (!pointsIndexPromise) {
-    pointsIndexPromise = fetch('/data/points/index.json')
+    pointsIndexPromise = fetch(assetUrl('data/points/index.json'))
       .then(async (response) => {
         if (!response.ok) return null
         return (await response.json()) as PointsIndex
@@ -75,7 +76,7 @@ async function fetchKommuneTileFile(path: string): Promise<OrganizationPoint[] |
 }
 
 async function fetchKommuneMonolith(kommunenummer: string): Promise<OrganizationPoint[] | null> {
-  return fetchKommuneTileFile(`/data/points/${kommunenummer}.json`)
+  return fetchKommuneTileFile(assetUrl(`data/points/${kommunenummer}.json`))
 }
 
 async function fetchKommuneGridCells(
@@ -85,7 +86,7 @@ async function fetchKommuneGridCells(
 ): Promise<OrganizationPoint[] | null> {
   const cells = gridCellsForBbox(bbox, cellDeg)
   const results = await Promise.all(
-    cells.map((cell) => fetchKommuneTileFile(`/data/points/${kommunenummer}/${cell}.json`)),
+    cells.map((cell) => fetchKommuneTileFile(assetUrl(`data/points/${kommunenummer}/${cell}.json`))),
   )
 
   const loaded = results.filter((result): result is OrganizationPoint[] => result != null)

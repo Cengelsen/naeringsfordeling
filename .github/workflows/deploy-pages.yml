@@ -1,0 +1,90 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Sync organization database]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Download static data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p public/data/points data
+
+          curl -fsSL \
+            -o public/data/kommuner.geojson \
+            https://raw.githubusercontent.com/robhop/fylker-og-kommuner/main/Kommuner-M.geojson
+
+          if gh release view database >/dev/null 2>&1; then
+            gh release download database --pattern 'organizations.db' --dir data --clobber
+            echo "Loaded organizations.db from release"
+          else
+            echo "No database release yet – static API export will be skipped"
+          fi
+
+          if gh release view points >/dev/null 2>&1; then
+            gh release download points --pattern 'points.pmtiles' --dir public/data --clobber
+            gh release download points --pattern 'manifest.json' --dir public/data/points --clobber
+            echo "Loaded vector tiles from release"
+          else
+            echo "No points release yet – dots mode will rely on API fallback"
+          fi
+
+      - name: Export static API
+        if: hashFiles('data/organizations.db') != ''
+        run: yarn export-static-api
+
+      - name: Build site
+        env:
+          GITHUB_PAGES: 'true'
+          VITE_STATIC_API: ${{ hashFiles('data/organizations.db') != '' && 'true' || '' }}
+        run: yarn build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
