@@ -47,21 +47,31 @@ export function gridCellsForBbox(
 }
 
 let pointsIndexPromise: Promise<PointsIndex | null> | null = null
+let pointsIndexUnavailable = false
 
 export async function loadPointsIndex(): Promise<PointsIndex | null> {
+  if (pointsIndexUnavailable) return null
+
   if (!pointsIndexPromise) {
     pointsIndexPromise = fetch(assetUrl('data/points/index.json'))
       .then(async (response) => {
-        if (!response.ok) return null
+        if (!response.ok) {
+          pointsIndexUnavailable = true
+          return null
+        }
         return (await response.json()) as PointsIndex
       })
-      .catch(() => null)
+      .catch(() => {
+        pointsIndexUnavailable = true
+        return null
+      })
   }
   return pointsIndexPromise
 }
 
 export function resetPointsIndexCache() {
   pointsIndexPromise = null
+  pointsIndexUnavailable = false
 }
 
 async function fetchKommuneTileFile(path: string): Promise<OrganizationPoint[] | null> {
@@ -100,7 +110,9 @@ export async function fetchKommunePointsForViewport(
   bbox: [number, number, number, number],
 ): Promise<OrganizationPoint[] | null> {
   const index = await loadPointsIndex()
-  const entry = index?.kommuner.find((item) => item.kommunenummer === kommunenummer)
+  if (!index) return null
+
+  const entry = index.kommuner.find((item) => item.kommunenummer === kommunenummer)
 
   if (entry?.gridded) {
     const cellDeg = index?.cellDeg ?? GRID_CELL_DEG

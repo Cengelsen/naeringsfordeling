@@ -1,11 +1,16 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { gzipSync } from 'node:zlib'
 import { join } from 'node:path'
 import { openDatabase, DEFAULT_DB_PATH } from './lib/db.js'
 
 const outputDir = process.env.STATIC_API_DIR ?? 'public/data/api'
 
-function writeJson(name: string, data: unknown) {
-  writeFileSync(join(outputDir, name), `${JSON.stringify(data)}\n`)
+function writeJson(name: string, data: unknown, gzip = false) {
+  const json = `${JSON.stringify(data)}\n`
+  writeFileSync(join(outputDir, name), json)
+  if (gzip) {
+    writeFileSync(join(outputDir, `${name}.gz`), gzipSync(json))
+  }
 }
 
 const db = openDatabase(DEFAULT_DB_PATH)
@@ -104,7 +109,43 @@ for (const row of orgRows) {
 writeJson('organizations.json', { organizations })
 writeJson('search-index.json', { rows: searchIndex })
 
+type GeocodedPointRow = [string, number, number, string, string, number, number, number]
+const geocodedPoints: GeocodedPointRow[] = []
+
+const geocodedRows = db
+  .prepare(
+    `SELECT orgnr, lng, lat, org_type, kommunenummer, konkurs, under_avvikling, vat_registered
+     FROM organizations
+     WHERE deleted = 0 AND lat IS NOT NULL AND lng IS NOT NULL`,
+  )
+  .iterate() as Iterable<{
+  orgnr: string
+  lng: number
+  lat: number
+  org_type: string
+  kommunenummer: string
+  konkurs: number
+  under_avvikling: number
+  vat_registered: number
+}>
+
+for (const row of geocodedRows) {
+  geocodedPoints.push([
+    row.orgnr,
+    row.lng,
+    row.lat,
+    row.org_type,
+    row.kommunenummer,
+    row.konkurs,
+    row.under_avvikling,
+    row.vat_registered,
+  ])
+}
+
+writeJson('geocoded-points.json', { rows: geocodedPoints }, true)
+
 console.log(`Exported static API to ${outputDir}`)
 console.log(`  ${orgForms.length} org types, ${kommuner.length} kommuner`)
 console.log(`  ${municipalityBreakdown.length} municipality breakdown rows`)
 console.log(`  ${searchIndex.length.toLocaleString('nb-NO')} organizations`)
+console.log(`  ${geocodedPoints.length.toLocaleString('nb-NO')} geocoded points`)
