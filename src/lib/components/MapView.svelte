@@ -202,6 +202,25 @@
          ${org.addressText}, ${org.postnummer}`
   }
 
+  function addressPopupHtml(orgs: Organization[]): string {
+    const addressLine =
+      orgs[0]?.addressText && orgs[0]?.postnummer
+        ? `<p style="margin:0 0 0.75em"><strong>${orgs[0].addressText}, ${orgs[0].postnummer}</strong></p>`
+        : ''
+    const items = orgs
+      .map(
+        (org) =>
+          `<div style="margin:0.5em 0;padding-bottom:0.5em;border-bottom:1px solid #e2e8f0">
+            <strong>${org.navn}</strong><br/>
+            ${org.orgTypeLabel} (${org.orgType})<br/>
+            Org.nr ${org.orgnr}
+          </div>`,
+      )
+      .join('')
+
+    return `${addressLine}<p style="margin:0 0 0.5em">${orgs.length} organisasjoner på denne adressen:</p>${items}`
+  }
+
   async function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
     if (!map) return
 
@@ -216,6 +235,31 @@
       popup.setContent(`${orgPopupHtml(org)}${extra}`)
     } catch (err) {
       popup.setContent(err instanceof Error ? err.message : 'Kunne ikke hente organisasjon')
+    }
+  }
+
+  async function showAddressPopup(orgnrs: string[], latlng: L.LatLng) {
+    if (!map) return
+
+    const popup = L.popup({ maxWidth: 360 })
+      .setLatLng(latlng)
+      .setContent('Henter…')
+      .openOn(map)
+
+    try {
+      const orgs = await Promise.all(orgnrs.map((orgnr) => fetchOrganizationDetail(orgnr)))
+      orgs.sort((a, b) => a.navn.localeCompare(b.navn, 'nb'))
+      popup.setContent(addressPopupHtml(orgs))
+    } catch (err) {
+      popup.setContent(err instanceof Error ? err.message : 'Kunne ikke hente organisasjoner')
+    }
+  }
+
+  function handleMarkerClick(orgnrs: string[], latlng: L.LatLng) {
+    if (orgnrs.length === 1) {
+      void showOrganizationPopup(orgnrs[0]!, latlng)
+    } else {
+      void showAddressPopup(orgnrs, latlng)
     }
   }
 
@@ -327,7 +371,7 @@
       dotsClustering: false,
       vectorTilesUrl: vectorUrl,
       orgTypesForColors,
-      onPointClick: showOrganizationPopup,
+      onMarkerClick: handleMarkerClick,
       onVectorTilesError: disableVectorTiles,
     })
 

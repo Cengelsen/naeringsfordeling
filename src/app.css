@@ -20,3 +20,9 @@ body,
 body {
   overflow: hidden;
 }
+
+.org-dot-square-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+

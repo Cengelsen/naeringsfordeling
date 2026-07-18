@@ -1,7 +1,7 @@
 import L from 'leaflet'
 import type { OrganizationPoint } from '../types'
 import { colorForOrgType } from '../utils/orgTypeColors'
-import { jitterCoordinates } from './jitter'
+import { groupPointsByLocation, orgnrsFromGroup } from './addressGroups'
 import type { MaplibreDotsController, MaplibreDotsLayerOptions } from './maplibreDotsLayer'
 
 const MAX_LEAFLET_DOTS = 4000
@@ -28,6 +28,36 @@ export function createLeafletDotsLayer(
     return 4
   }
 
+  function squareSize(): number {
+    return pointRadius() * 2 + 2
+  }
+
+  function addSquareMarker(
+    lat: number,
+    lng: number,
+    color: string,
+    orgnrs: string[],
+    orgCount: number,
+  ) {
+    const size = squareSize()
+    const opacity = stale ? 0.45 : 0.85
+    const marker = L.marker([lat, lng], {
+      icon: L.divIcon({
+        className: 'org-dot-square-wrap',
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+        html: `<div class="org-dot-square" style="width:${size}px;height:${size}px;background:${color};border:1.5px solid #0f172a;opacity:${opacity};box-sizing:border-box" title="${orgCount} organisasjoner"></div>`,
+      }),
+    })
+
+    marker.on('click', (event: L.LeafletMouseEvent) => {
+      L.DomEvent.stopPropagation(event)
+      options.onMarkerClick(orgnrs, event.latlng)
+    })
+
+    marker.addTo(layer)
+  }
+
   function rebuild() {
     layer.clearLayers()
 
@@ -40,32 +70,34 @@ export function createLeafletDotsLayer(
     const capped =
       filtered.length > MAX_LEAFLET_DOTS ? filtered.slice(0, MAX_LEAFLET_DOTS) : filtered
 
-    const grouped = new Map<string, number>()
+    const groups = groupPointsByLocation(capped)
     const radius = pointRadius()
     const opacity = stale ? 0.45 : 0.85
 
-    for (const point of capped) {
-      const locationKey = `${point.lat.toFixed(5)}:${point.lng.toFixed(5)}`
-      const index = grouped.get(locationKey) ?? 0
-      grouped.set(locationKey, index + 1)
-      const totalAtPoint = grouped.get(locationKey) ?? 1
-      const [lat, lng] = jitterCoordinates(point.lat, point.lng, index, totalAtPoint)
+    for (const group of groups) {
+      const orgnrs = orgnrsFromGroup(group)
+      const color = colorForOrgType(group.orgType, colorTypes)
 
-      const marker = L.circleMarker([lat, lng], {
-        radius,
-        fillColor: colorForOrgType(point.orgType, colorTypes),
-        color: '#0f172a',
-        weight: 0.75,
-        opacity,
-        fillOpacity: opacity,
-      })
+      if (group.orgCount === 1) {
+        const point = group.orgs[0]!
+        const marker = L.circleMarker([group.lat, group.lng], {
+          radius,
+          fillColor: color,
+          color: '#0f172a',
+          weight: 0.75,
+          opacity,
+          fillOpacity: opacity,
+        })
 
-      marker.on('click', (event: L.LeafletMouseEvent) => {
-        L.DomEvent.stopPropagation(event)
-        options.onPointClick(point.orgnr, event.latlng)
-      })
+        marker.on('click', (event: L.LeafletMouseEvent) => {
+          L.DomEvent.stopPropagation(event)
+          options.onMarkerClick([point.orgnr], event.latlng)
+        })
 
-      marker.addTo(layer)
+        marker.addTo(layer)
+      } else {
+        addSquareMarker(group.lat, group.lng, color, orgnrs, group.orgCount)
+      }
     }
   }
 
@@ -96,7 +128,7 @@ export function createLeafletDotsLayer(
     },
     bringToFront() {
       layer.eachLayer((child) => {
-        if (child instanceof L.CircleMarker) child.bringToFront()
+        if (child instanceof L.CircleMarker || child instanceof L.Marker) child.bringToFront()
       })
     },
     remove() {
