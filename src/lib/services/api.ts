@@ -33,7 +33,20 @@ interface MunicipalityBreakdownRow {
 }
 
 type SearchIndexRow = [string, string, string, string, string, number | null, number | null]
-type GeocodedPointRow = [string, number, number, string, string, number, number, number]
+type GeocodedPointRow = [
+  string,
+  number,
+  number,
+  string,
+  string,
+  number,
+  number,
+  number,
+  string,
+  string,
+  string,
+  string,
+]
 
 let municipalityBreakdownPromise: Promise<MunicipalityBreakdownRow[]> | null = null
 let organizationsPromise: Promise<Record<string, Organization>> | null = null
@@ -109,7 +122,7 @@ async function fetchOrganizationPointsFromStatic(
   for (const row of candidates) {
     if (!geocodedPointMatchesFilters(row, filters)) continue
 
-    const [, lng, lat, orgType] = row
+    const [, lng, lat, orgType, kommunenummer] = row
     if (options.bbox && !geocodedPointInBbox(row, options.bbox)) continue
 
     points.push({
@@ -117,6 +130,11 @@ async function fetchOrganizationPointsFromStatic(
       lng,
       lat,
       orgType,
+      kommunenummer,
+      navn: row[8],
+      orgTypeLabel: row[9],
+      addressText: row[10],
+      postnummer: row[11],
     })
 
     if (points.length >= limit) {

@@ -50,7 +50,8 @@ function queryOrganizationPoints(
     const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
     return db
       .prepare(
-        `SELECT o.orgnr, o.org_type, o.lat, o.lng
+        `SELECT o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_text, o.postnummer,
+                o.kommunenummer, o.lat, o.lng
          FROM organizations o
          INNER JOIN orgs_rtree r ON r.id = o.rowid
          WHERE r.maxLng >= ? AND r.minLng <= ?
@@ -61,6 +62,11 @@ function queryOrganizationPoints(
       .all(minLng, maxLng, minLat, maxLat, ...query.params, limit) as Array<{
       orgnr: string
       org_type: string
+      org_type_label: string
+      navn: string
+      address_text: string
+      postnummer: string
+      kommunenummer: string
       lat: number
       lng: number
     }>
@@ -69,7 +75,8 @@ function queryOrganizationPoints(
   appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
   return db
     .prepare(
-      `SELECT o.orgnr, o.org_type, o.lat, o.lng
+      `SELECT o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_text, o.postnummer,
+              o.kommunenummer, o.lat, o.lng
        FROM organizations o
        WHERE ${query.conditions.join(' AND ')}
        LIMIT ?`,
@@ -77,6 +84,11 @@ function queryOrganizationPoints(
     .all(...query.params, limit) as Array<{
     orgnr: string
     org_type: string
+    org_type_label: string
+    navn: string
+    address_text: string
+    postnummer: string
+    kommunenummer: string
     lat: number
     lng: number
   }>
@@ -153,7 +165,12 @@ app.get('/api/organizations/points', (c) => {
 
   if (compact) {
     const points: CompactPoint[] = rows.map((row) =>
-      toCompactPoint(row.orgnr, row.lng, row.lat, row.org_type),
+      toCompactPoint(row.orgnr, row.lng, row.lat, row.org_type, {
+        navn: row.navn,
+        orgTypeLabel: row.org_type_label,
+        addressText: row.address_text ?? '',
+        postnummer: row.postnummer ?? '',
+      }),
     )
     return c.json({
       points,
@@ -166,6 +183,11 @@ app.get('/api/organizations/points', (c) => {
     points: rows.map((row) => ({
       orgnr: row.orgnr,
       orgType: row.org_type,
+      orgTypeLabel: row.org_type_label,
+      navn: row.navn,
+      addressText: row.address_text ?? '',
+      postnummer: row.postnummer ?? '',
+      kommunenummer: row.kommunenummer,
       lat: roundCoord(row.lat),
       lng: roundCoord(row.lng),
     })),

@@ -26,3 +26,33 @@ body {
   border: none !important;
 }
 
+.leaflet-popup.address-popup .leaflet-popup-content {
+  margin: 12px 14px;
+}
+
+.address-popup-header {
+  margin: 0 0 0.75em;
+}
+
+.address-popup-summary {
+  margin: 0 0 0.5em;
+}
+
+.address-popup-list {
+  max-height: min(50vh, 320px);
+  overflow-y: auto;
+  padding-right: 0.25em;
+}
+
+.address-popup-item {
+  margin: 0.5em 0;
+  padding-bottom: 0.5em;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.address-popup-item:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+

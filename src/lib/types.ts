@@ -102,6 +102,11 @@ export interface OrganizationPoint {
   orgType: string
   lat: number
   lng: number
+  navn?: string
+  orgTypeLabel?: string
+  addressText?: string
+  postnummer?: string
+  kommunenummer?: string
 }
 
 export interface KommuneFeatureProperties {

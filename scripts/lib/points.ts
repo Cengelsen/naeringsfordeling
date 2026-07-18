@@ -1,4 +1,4 @@
-export type CompactPoint = [string, number, number, string]
+export type CompactPoint = [string, number, number, string, ...string[]]
 
 export interface OrganizationPointRow {
   orgnr: string
@@ -19,8 +19,18 @@ export function toCompactPoint(
   lng: number,
   lat: number,
   orgType: string,
+  details?: {
+    navn: string
+    orgTypeLabel: string
+    addressText: string
+    postnummer: string
+  },
 ): CompactPoint {
-  return [orgnr, roundCoord(lng), roundCoord(lat), orgType]
+  const base: CompactPoint = [orgnr, roundCoord(lng), roundCoord(lat), orgType]
+  if (details) {
+    base.push(details.navn, details.orgTypeLabel, details.addressText, details.postnummer)
+  }
+  return base
 }
 
 export function fromCompactPoint(point: CompactPoint): OrganizationPointRow {

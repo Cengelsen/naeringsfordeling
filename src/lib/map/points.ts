@@ -1,16 +1,42 @@
-import type { OrganizationPoint } from '../types'
+import type { Organization, OrganizationPoint } from '../types'
 import { assetUrl } from '../utils/assets'
 
-/** [orgnr, lng, lat, orgType] */
-export type CompactPoint = [string, number, number, string]
+/** [orgnr, lng, lat, orgType] or extended with [navn, orgTypeLabel, addressText, postnummer] */
+export type CompactPoint = [string, number, number, string, ...string[]]
 
 export function fromCompactPoint(point: CompactPoint): OrganizationPoint {
-  return {
+  const base: OrganizationPoint = {
     orgnr: point[0],
     lng: point[1],
     lat: point[2],
     orgType: point[3],
   }
+  if (point.length >= 8) {
+    base.navn = point[4]
+    base.orgTypeLabel = point[5]
+    base.addressText = point[6]
+    base.postnummer = point[7]
+  }
+  return base
+}
+
+export function organizationFromPoint(point: OrganizationPoint): Organization | null {
+  if (!point.navn) return null
+  return {
+    orgnr: point.orgnr,
+    navn: point.navn,
+    orgType: point.orgType,
+    orgTypeLabel: point.orgTypeLabel ?? point.orgType,
+    addressText: point.addressText ?? '',
+    postnummer: point.postnummer ?? '',
+    kommunenummer: point.kommunenummer ?? '',
+    lat: point.lat,
+    lng: point.lng,
+  }
+}
+
+export function normalizeOrgnr(orgnr: string): string {
+  return orgnr.replace(/\D/g, '')
 }
 
 export function fromCompactPoints(points: CompactPoint[]): OrganizationPoint[] {

@@ -31,7 +31,7 @@
     MIN_DOTS_ZOOM,
   } from '../services/api'
   import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
-  import { canUseStaticTiles, filterPointsByOrgTypes } from '../map/points'
+  import { canUseStaticTiles, filterPointsByOrgTypes, normalizeOrgnr, organizationFromPoint } from '../map/points'
   import {
     probeVectorTiles,
     vectorTilesSourceUrl,
@@ -205,12 +205,12 @@
   function addressPopupHtml(orgs: Organization[]): string {
     const addressLine =
       orgs[0]?.addressText && orgs[0]?.postnummer
-        ? `<p style="margin:0 0 0.75em"><strong>${orgs[0].addressText}, ${orgs[0].postnummer}</strong></p>`
+        ? `<p class="address-popup-header"><strong>${orgs[0].addressText}, ${orgs[0].postnummer}</strong></p>`
         : ''
     const items = orgs
       .map(
         (org) =>
-          `<div style="margin:0.5em 0;padding-bottom:0.5em;border-bottom:1px solid #e2e8f0">
+          `<div class="address-popup-item">
             <strong>${org.navn}</strong><br/>
             ${org.orgTypeLabel} (${org.orgType})<br/>
             Org.nr ${org.orgnr}
@@ -218,7 +218,23 @@
       )
       .join('')
 
-    return `${addressLine}<p style="margin:0 0 0.5em">${orgs.length} organisasjoner på denne adressen:</p>${items}`
+    return `${addressLine}<p class="address-popup-summary">${orgs.length} organisasjoner på denne adressen</p><div class="address-popup-list">${items}</div>`
+  }
+
+  function resolveOrganizationsFromPoints(orgnrs: string[]): Organization[] {
+    const index = new Map(allPoints.map((point) => [normalizeOrgnr(point.orgnr), point]))
+    const resolved: Organization[] = []
+
+    for (const orgnr of orgnrs) {
+      const point = index.get(normalizeOrgnr(orgnr))
+      const org = point ? organizationFromPoint(point) : null
+      if (!org) {
+        throw new Error(`Mangler organisasjonsdata for org.nr ${orgnr}`)
+      }
+      resolved.push(org)
+    }
+
+    return resolved
   }
 
   async function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
@@ -238,20 +254,21 @@
     }
   }
 
-  async function showAddressPopup(orgnrs: string[], latlng: L.LatLng) {
+  function showAddressPopup(orgnrs: string[], latlng: L.LatLng) {
     if (!map) return
 
-    const popup = L.popup({ maxWidth: 360 })
-      .setLatLng(latlng)
-      .setContent('Henter…')
-      .openOn(map)
-
     try {
-      const orgs = await Promise.all(orgnrs.map((orgnr) => fetchOrganizationDetail(orgnr)))
+      const orgs = resolveOrganizationsFromPoints(orgnrs)
       orgs.sort((a, b) => a.navn.localeCompare(b.navn, 'nb'))
-      popup.setContent(addressPopupHtml(orgs))
+      L.popup({ maxWidth: 360, className: 'address-popup' })
+        .setLatLng(latlng)
+        .setContent(addressPopupHtml(orgs))
+        .openOn(map)
     } catch (err) {
-      popup.setContent(err instanceof Error ? err.message : 'Kunne ikke hente organisasjoner')
+      L.popup({ maxWidth: 320 })
+        .setLatLng(latlng)
+        .setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjoner')
+        .openOn(map)
     }
   }
 
@@ -259,7 +276,7 @@
     if (orgnrs.length === 1) {
       void showOrganizationPopup(orgnrs[0]!, latlng)
     } else {
-      void showAddressPopup(orgnrs, latlng)
+      showAddressPopup(orgnrs, latlng)
     }
   }
 

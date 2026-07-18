@@ -109,12 +109,26 @@ for (const row of orgRows) {
 writeJson('organizations.json', { organizations })
 writeJson('search-index.json', { rows: searchIndex })
 
-type GeocodedPointRow = [string, number, number, string, string, number, number, number]
+type GeocodedPointRow = [
+  string,
+  number,
+  number,
+  string,
+  string,
+  number,
+  number,
+  number,
+  string,
+  string,
+  string,
+  string,
+]
 const geocodedPoints: GeocodedPointRow[] = []
 
 const geocodedRows = db
   .prepare(
-    `SELECT orgnr, lng, lat, org_type, kommunenummer, konkurs, under_avvikling, vat_registered
+    `SELECT orgnr, lng, lat, org_type, org_type_label, navn, address_text, postnummer,
+            kommunenummer, konkurs, under_avvikling, vat_registered
      FROM organizations
      WHERE deleted = 0 AND lat IS NOT NULL AND lng IS NOT NULL`,
   )
@@ -123,6 +137,10 @@ const geocodedRows = db
   lng: number
   lat: number
   org_type: string
+  org_type_label: string
+  navn: string
+  address_text: string
+  postnummer: string
   kommunenummer: string
   konkurs: number
   under_avvikling: number
@@ -139,6 +157,10 @@ for (const row of geocodedRows) {
     row.konkurs,
     row.under_avvikling,
     row.vat_registered,
+    row.navn,
+    row.org_type_label,
+    row.address_text ?? '',
+    row.postnummer ?? '',
   ])
 }
 
