@@ -84,6 +84,8 @@ export interface OrganizationSearchHit {
   kommunenummer: string
   lat: number | null
   lng: number | null
+  addressText?: string
+  postnummer?: string
 }
 
 export type OrganizationLocationSource = 'database' | 'cache' | 'geocoded' | 'none'

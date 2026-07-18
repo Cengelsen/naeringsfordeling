@@ -68,7 +68,9 @@ type OrgRow = {
 }
 
 const organizations: Record<string, ReturnType<typeof mapOrganization>> = {}
-const searchIndex: Array<[string, string, string, string, string, number | null, number | null]> = []
+const searchIndex: Array<
+  [string, string, string, string, string, number | null, number | null, string, string]
+> = []
 
 const orgRows = db
   .prepare(
@@ -103,11 +105,13 @@ for (const row of orgRows) {
     row.kommunenummer,
     row.lat,
     row.lng,
+    row.address_text ?? '',
+    row.postnummer ?? '',
   ])
 }
 
 writeJson('organizations.json', { organizations })
-writeJson('search-index.json', { rows: searchIndex })
+writeJson('search-index.json', { rows: searchIndex }, true)
 
 type GeocodedPointRow = [
   string,

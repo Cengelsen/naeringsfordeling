@@ -12,6 +12,7 @@ import type {
 import {
   canUseStaticTiles,
   filterPointsInBbox,
+  normalizeOrgnr,
   parsePointsResponse,
   type CompactPoint,
 } from '../map/points'
@@ -32,7 +33,17 @@ interface MunicipalityBreakdownRow {
   count: number
 }
 
-type SearchIndexRow = [string, string, string, string, string, number | null, number | null]
+type SearchIndexRow = [
+  string,
+  string,
+  string,
+  string,
+  string,
+  number | null,
+  number | null,
+  string?,
+  string?,
+]
 type GeocodedPointRow = [
   string,
   number,
@@ -51,6 +62,7 @@ type GeocodedPointRow = [
 let municipalityBreakdownPromise: Promise<MunicipalityBreakdownRow[]> | null = null
 let organizationsPromise: Promise<Record<string, Organization>> | null = null
 let searchIndexPromise: Promise<OrganizationSearchHit[]> | null = null
+let searchIndexByOrgnrPromise: Promise<Map<string, OrganizationSearchHit>> | null = null
 let geocodedPointsPromise: Promise<GeocodedPointRow[]> | null = null
 let geocodedPointsByKommunePromise: Promise<Map<string, GeocodedPointRow[]>> | null = null
 
@@ -159,19 +171,63 @@ async function loadOrganizations(): Promise<Record<string, Organization>> {
   return organizationsPromise
 }
 
+function mapSearchIndexRow(row: SearchIndexRow): OrganizationSearchHit {
+  return {
+    orgnr: row[0],
+    navn: row[1],
+    orgType: row[2],
+    orgTypeLabel: row[3],
+    kommunenummer: row[4],
+    lat: row[5],
+    lng: row[6],
+    addressText: row[7] ?? '',
+    postnummer: row[8] ?? '',
+  }
+}
+
+function organizationFromSearchHit(hit: OrganizationSearchHit): Organization {
+  return {
+    orgnr: hit.orgnr,
+    navn: hit.navn,
+    orgType: hit.orgType,
+    orgTypeLabel: hit.orgTypeLabel,
+    addressText: hit.addressText ?? '',
+    postnummer: hit.postnummer ?? '',
+    kommunenummer: hit.kommunenummer,
+    lat: hit.lat,
+    lng: hit.lng,
+  }
+}
+
 async function loadSearchIndex(): Promise<OrganizationSearchHit[]> {
-  searchIndexPromise ??= staticFetch<{ rows: SearchIndexRow[] }>('search-index.json').then((data) =>
-    data.rows.map(([orgnr, navn, orgType, orgTypeLabel, kommunenummer, lat, lng]) => ({
-      orgnr,
-      navn,
-      orgType,
-      orgTypeLabel,
-      kommunenummer,
-      lat,
-      lng,
-    })),
-  )
+  searchIndexPromise ??= fetchStaticJson<{ rows: SearchIndexRow[] }>(
+    `${STATIC_API_BASE}/search-index.json`,
+  ).then((data) => data.rows.map(mapSearchIndexRow))
   return searchIndexPromise
+}
+
+async function loadSearchIndexByOrgnr(): Promise<Map<string, OrganizationSearchHit>> {
+  searchIndexByOrgnrPromise ??= loadSearchIndex().then((rows) => {
+    const map = new Map<string, OrganizationSearchHit>()
+    for (const row of rows) {
+      map.set(normalizeOrgnr(row.orgnr), row)
+    }
+    return map
+  })
+  return searchIndexByOrgnrPromise
+}
+
+/** Warm the local search index (static deployment). */
+export function prefetchLocalSearchIndex(): Promise<void> {
+  if (!STATIC_API) return Promise.resolve()
+  return loadSearchIndex().then(() => undefined)
+}
+
+export async function lookupOrganizationLocal(orgnr: string): Promise<Organization | null> {
+  if (!STATIC_API) return null
+  const index = await loadSearchIndexByOrgnr()
+  const hit = index.get(normalizeOrgnr(orgnr))
+  return hit ? organizationFromSearchHit(hit) : null
 }
 
 function aggregateMunicipalityCounts(
@@ -198,14 +254,25 @@ function searchStaticOrganizations(query: string, limit: number, index: Organiza
   if (raw.length < 2) return []
 
   const digits = raw.replace(/\D/g, '')
+
   if (digits.length === 9) {
     const hit = index.find((row) => row.orgnr === digits)
     return hit ? [hit] : []
   }
 
+  if (digits.length >= 3) {
+    return index
+      .filter((row) => row.orgnr.startsWith(digits))
+      .sort((left, right) => left.orgnr.localeCompare(right.orgnr))
+      .slice(0, limit)
+  }
+
   const lower = raw.toLowerCase()
   return index
-    .filter((row) => row.navn.toLowerCase().includes(lower))
+    .filter(
+      (row) =>
+        row.navn.toLowerCase().includes(lower) || row.orgnr.includes(digits),
+    )
     .sort((a, b) => {
       const aPrefix = a.navn.toLowerCase().startsWith(lower) ? 0 : 1
       const bPrefix = b.navn.toLowerCase().startsWith(lower) ? 0 : 1
@@ -395,8 +462,7 @@ export async function fetchOrganizationPoints(
 
 export async function fetchOrganizationDetail(orgnr: string): Promise<Organization> {
   if (STATIC_API) {
-    const organizations = await loadOrganizations()
-    const organization = organizations[orgnr.replace(/\D/g, '')]
+    const organization = await lookupOrganizationLocal(orgnr)
     if (!organization) {
       throw new ApiError('Organisasjon ikke funnet')
     }
@@ -409,18 +475,17 @@ export async function fetchOrganizationDetail(orgnr: string): Promise<Organizati
 
 export async function fetchOrganizationLocation(orgnr: string): Promise<OrganizationLocation> {
   if (STATIC_API) {
-    const organizations = await loadOrganizations()
-    const organization = organizations[orgnr.replace(/\D/g, '')]
-    if (!organization) {
+    const hit = (await loadSearchIndexByOrgnr()).get(normalizeOrgnr(orgnr))
+    if (!hit) {
       throw new ApiError('Organisasjon ikke funnet')
     }
 
     return {
-      orgnr: organization.orgnr,
-      lat: organization.lat,
-      lng: organization.lng,
-      kommunenummer: organization.kommunenummer,
-      source: organization.lat != null && organization.lng != null ? 'database' : 'none',
+      orgnr: hit.orgnr,
+      lat: hit.lat,
+      lng: hit.lng,
+      kommunenummer: hit.kommunenummer,
+      source: hit.lat != null && hit.lng != null ? 'database' : 'none',
     }
   }
 

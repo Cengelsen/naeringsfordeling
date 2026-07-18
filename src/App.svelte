@@ -8,6 +8,7 @@
     fetchKommuner,
     fetchMunicipalityCounts,
     fetchOrganisasjonsformer,
+    prefetchLocalSearchIndex,
   } from './lib/services/api'
   import type { Kommune, DotsLoadState, LoadingState, MunicipalityCount, Organisasjonsform } from './lib/types'
   import { fylkeFromKommune } from './lib/utils/geo'
@@ -103,6 +104,7 @@
       const [forms, kommuneList] = await Promise.all([
         fetchOrganisasjonsformer(),
         fetchKommuner(geoResponse),
+        prefetchLocalSearchIndex(),
       ])
 
       orgForms = forms

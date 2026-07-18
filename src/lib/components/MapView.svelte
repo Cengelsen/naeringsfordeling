@@ -26,6 +26,7 @@
   import {
     fetchOrganizationDetail,
     fetchOrganizationLocation,
+    lookupOrganizationLocal,
     fetchOrganizationPoints,
     MAX_VIEWPORT_DOTS,
     MIN_DOTS_ZOOM,
@@ -241,6 +242,15 @@
     return resolved
   }
 
+  function showOrganizationDetails(org: Organization, latlng: L.LatLng, note?: string) {
+    if (!map) return
+    const extra = note ? `<br/><em>${note}</em>` : ''
+    L.popup({ maxWidth: 320 })
+      .setLatLng(latlng)
+      .setContent(`${orgPopupHtml(org)}${extra}`)
+      .openOn(map)
+  }
+
   function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
     if (!map) return
 
@@ -256,23 +266,6 @@
         .setLatLng(latlng)
         .setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjon')
         .openOn(map)
-    }
-  }
-
-  async function showOrganizationPopupFromApi(orgnr: string, latlng: L.LatLng, note?: string) {
-    if (!map) return
-
-    const popup = L.popup({ maxWidth: 320 })
-      .setLatLng(latlng)
-      .setContent('Henter…')
-      .openOn(map)
-
-    try {
-      const org = await fetchOrganizationDetail(orgnr)
-      const extra = note ? `<br/><em>${note}</em>` : ''
-      popup.setContent(`${orgPopupHtml(org)}${extra}`)
-    } catch (err) {
-      popup.setContent(err instanceof Error ? err.message : 'Kunne ikke hente organisasjon')
     }
   }
 
@@ -339,19 +332,18 @@
 
     enterOrgFocusMode()
 
-    const pendingPopup = L.popup({ maxWidth: 320 })
-      .setLatLng(map.getCenter())
-      .setContent('Finner adresse…')
-      .openOn(map)
-
     try {
-      const location = await fetchOrganizationLocation(orgnr)
+      const [location, localOrg] = await Promise.all([
+        fetchOrganizationLocation(orgnr),
+        lookupOrganizationLocal(orgnr),
+      ])
+      const org = localOrg ?? (await fetchOrganizationDetail(orgnr))
 
       if (location.lat != null && location.lng != null) {
         const latlng = L.latLng(location.lat, location.lng)
         showOrgMarker(latlng)
         map.flyTo(latlng, ORG_LOCATE_ZOOM, { duration: 0.8 })
-        await showOrganizationPopupFromApi(orgnr, latlng)
+        showOrganizationDetails(org, latlng)
         return
       }
 
@@ -362,8 +354,8 @@
           const latlng = L.latLng(lat, lng)
           showOrgMarker(latlng)
           map.flyTo(latlng, ORG_LOCATE_ZOOM, { duration: 0.8 })
-          await showOrganizationPopupFromApi(
-            orgnr,
+          showOrganizationDetails(
+            org,
             latlng,
             'Kunne ikke geokode adressen – omtrentlig posisjon',
           )
@@ -371,12 +363,16 @@
         }
       }
 
-      pendingPopup.setContent('Fant organisasjonen, men ingen kartposisjon er tilgjengelig')
+      L.popup({ maxWidth: 320 })
+        .setLatLng(map.getCenter())
+        .setContent('Fant organisasjonen, men ingen kartposisjon er tilgjengelig')
+        .openOn(map)
     } catch (err) {
       if (!map) return
-      pendingPopup
+      L.popup({ maxWidth: 320 })
         .setLatLng(map.getCenter())
         .setContent(err instanceof Error ? err.message : 'Kunne ikke finne organisasjon')
+        .openOn(map)
     }
   }
 
