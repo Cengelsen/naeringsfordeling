@@ -10,8 +10,11 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.cache
 data
 public/data/points/
+public/data/points.pmtiles
+public/data/points.mbtiles
 *.local
 
 # Editor directories and files

@@ -28,7 +28,12 @@
     MIN_DOTS_ZOOM,
   } from '../services/api'
   import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
-  import { filterPointsByOrgTypes } from '../map/points'
+  import { canUseStaticTiles, filterPointsByOrgTypes } from '../map/points'
+  import {
+    probeVectorTiles,
+    vectorTilesSourceUrl,
+    type VectorTilesManifest,
+  } from '../map/vectorTiles'
   import {
     createMaplibreDotsLayer,
     type MaplibreDotsController,
@@ -66,16 +71,36 @@
   let loadToken = 0
   let boundsTimer: ReturnType<typeof setTimeout> | undefined
   let kommuneBoundsByNummer = new Map<string, GeoBounds>()
+  let vectorTilesManifest = $state<VectorTilesManifest | null>(null)
+  let vectorTilesDisabled = $state(false)
+
+  const vectorTilesReady = $derived(
+    vectorTilesManifest !== null && !vectorTilesDisabled && canUseStaticTiles(settings),
+  )
 
   const countMap = $derived(new Map(counts.map((c) => [c.kommunenummer, c.count])))
   const maxCount = $derived(Math.max(...counts.map((c) => c.count), 1))
   const totalVisible = $derived(
     settings.visualization === 'dots'
-      ? filterPointsByOrgTypes(allPoints, settings.orgTypes).length
+      ? vectorTilesReady
+        ? vectorTilesManifest?.total ?? 0
+        : filterPointsByOrgTypes(allPoints, settings.orgTypes).length
       : counts.reduce((sum, c) => sum + c.count, 0),
   )
 
   const orgTypeLegendItems = $derived.by(() => {
+    if (vectorTilesReady && vectorTilesManifest) {
+      const manifestTypes = vectorTilesManifest.orgTypes
+      return manifestTypes.map((kode) => {
+        const meta = orgForms.find((f) => f.kode === kode)
+        return {
+          kode,
+          label: meta?.beskrivelse ?? kode,
+          color: colorForOrgType(kode, manifestTypes),
+        }
+      })
+    }
+
     const types = [...new Set(allPoints.map((point) => point.orgType))].sort()
     return types.map((kode) => {
       const meta = orgForms.find((f) => f.kode === kode)
@@ -144,22 +169,67 @@
     }
   }
 
+  function disableVectorTiles(message: string) {
+    vectorTilesDisabled = true
+    removeDotsController()
+    scheduleDotsReload(0)
+    updateDotsState({
+      loading: false,
+      phase: 'idle',
+      message: `Vektorfliser utilgjengelige (${message}) – bruker database`,
+    })
+  }
+
   function ensureDotsController() {
-    if (!map || dotsController) return
+    if (!map) return
+
+    const vectorMode = vectorTilesReady
+    const vectorUrl = vectorMode ? vectorTilesSourceUrl() : null
+    const orgTypesForColors = vectorTilesManifest?.orgTypes ?? orgForms.map((form) => form.kode)
+
+    if (dotsController && dotsControllerUsesVector === vectorMode) {
+      dotsController.setVisibleOrgTypes(settings.orgTypes)
+      return
+    }
+
+    dotsController?.remove()
+    dotsControllerUsesVector = vectorMode
 
     dotsController = createMaplibreDotsLayer(map, {
       dotsDetailMinZoom: settings.dotsDetailMinZoom,
       dotsClustering: settings.dotsClustering !== false,
+      vectorTilesUrl: vectorUrl,
+      orgTypesForColors,
       onPointClick: showOrganizationPopup,
+      onVectorTilesError: disableVectorTiles,
     })
   }
+
+  let dotsControllerUsesVector = false
 
   function removeDotsController() {
     dotsController?.remove()
     dotsController = null
+    dotsControllerUsesVector = false
     points = []
     allPoints = []
     dotsCache.clear()
+  }
+
+  function applyVectorTilesState() {
+    ensureDotsController()
+    dotsController?.setVisibleOrgTypes(settings.orgTypes)
+    dotsController?.setStale(false)
+    dotsController?.bringToFront()
+    updateDotsState({
+      loading: false,
+      phase: 'idle',
+      organizations: vectorTilesManifest?.total ?? 0,
+      geocoded: vectorTilesManifest?.total ?? 0,
+      skipped: 0,
+      kommuner: geojson?.features.length ?? 0,
+      message: null,
+    })
   }
 
   function kommunerInBounds(): string[] {
@@ -269,6 +339,11 @@
 
   async function loadDots() {
     if (!map || settings.visualization !== 'dots') return
+
+    if (vectorTilesReady) {
+      applyVectorTilesState()
+      return
+    }
 
     ensureDotsController()
 
@@ -517,6 +592,14 @@
   }
 
   onMount(() => {
+    void probeVectorTiles().then(({ available, manifest }) => {
+      if (!available || !manifest) return
+      vectorTilesManifest = manifest
+      if (settings.visualization === 'dots') {
+        scheduleDotsReload(0)
+      }
+    })
+
     map = L.map(mapContainer, {
       zoomControl: false,
       preferCanvas: true,
@@ -578,7 +661,9 @@
     settings.selectedKommune
 
     dotsCache.clear()
-    dotsController?.setClustering(settings.dotsClustering !== false)
+    if (dotsController && dotsControllerUsesVector !== vectorTilesReady) {
+      removeDotsController()
+    }
     scheduleDotsReload()
   })
 
@@ -619,7 +704,7 @@
     {#if settings.visualization === 'dots'}
       {totalVisible.toLocaleString('nb-NO')} prikk{totalVisible === 1 ? '' : 'er'} ·
       {dotsState.skipped > 0 ? `${dotsState.skipped.toLocaleString('nb-NO')} uten adresse · ` : ''}
-      SQLite-database
+      {vectorTilesReady ? 'vektorfliser' : 'SQLite-database'}
     {:else}
       {totalVisible.toLocaleString('nb-NO')} organisasjoner i visningen
     {/if}

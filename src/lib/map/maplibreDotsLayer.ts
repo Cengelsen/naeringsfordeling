@@ -5,6 +5,7 @@ import type { GeoJSONSource } from 'maplibre-gl'
 import '@maplibre/maplibre-gl-leaflet'
 import type { OrganizationPoint } from '../types'
 import { orgTypeColorExpression } from '../utils/orgTypeColors'
+import { ensurePmtilesProtocol, VECTOR_TILES_LAYER } from './vectorTiles'
 import { jitterCoordinates } from './jitter'
 
 const SOURCE_ID = 'org-dots'
@@ -28,11 +29,6 @@ function pointRadiusExpression(detailMinZoom: number): maplibregl.ExpressionSpec
   ]
 }
 
-const EMPTY_COLLECTION: FeatureCollection<Point> = {
-  type: 'FeatureCollection',
-  features: [],
-}
-
 const TRANSPARENT_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {},
@@ -50,7 +46,10 @@ const TRANSPARENT_STYLE: maplibregl.StyleSpecification = {
 export interface MaplibreDotsLayerOptions {
   dotsDetailMinZoom: number
   dotsClustering: boolean
+  vectorTilesUrl?: string | null
+  orgTypesForColors?: string[]
   onPointClick: (orgnr: string, latlng: L.LatLng) => void
+  onVectorTilesError?: (message: string) => void
 }
 
 export interface MaplibreDotsController {
@@ -95,17 +94,22 @@ export function createMaplibreDotsLayer(
   map: L.Map,
   options: MaplibreDotsLayerOptions,
 ): MaplibreDotsController {
+  const vectorMode = Boolean(options.vectorTilesUrl)
   let ready = false
   let styleReady = false
   let stale = false
   let clusteringEnabled = options.dotsClustering
-  let currentTypes: string[] = []
+  let currentTypes = options.orgTypesForColors ?? []
   let visibleOrgTypes: string[] = []
   let currentPoints: OrganizationPoint[] = []
   let pendingPoints: OrganizationPoint[] | null = null
-  let clickLayers = clusteringEnabled ? [POINT_LAYER_ID, CLUSTER_LAYER_ID] : [POINT_LAYER_ID]
+  let clickLayers = vectorMode ? [POINT_LAYER_ID] : clusteringEnabled ? [POINT_LAYER_ID, CLUSTER_LAYER_ID] : [POINT_LAYER_ID]
 
   const clusterMaxZoom = Math.max(0, options.dotsDetailMinZoom - 1)
+
+  if (vectorMode) {
+    ensurePmtilesProtocol()
+  }
 
   const glLayer = L.maplibreGL({
     style: TRANSPARENT_STYLE,
@@ -117,6 +121,7 @@ export function createMaplibreDotsLayer(
   const container = glLayer.getContainer()
   container.style.zIndex = '650'
   container.style.pointerEvents = 'none'
+  container.style.background = 'transparent'
 
   const mlMap = glLayer.getMaplibreMap()
   mlMap.dragPan.disable()
@@ -132,19 +137,19 @@ export function createMaplibreDotsLayer(
         ? (['in', ['get', 'orgType'], ['literal', visibleOrgTypes]] as maplibregl.FilterSpecification)
         : null
 
-    if (clusteringEnabled) {
-      const unclustered: maplibregl.FilterSpecification = ['!', ['has', 'point_count']]
-      return typeFilter ? (['all', unclustered, typeFilter] as maplibregl.FilterSpecification) : unclustered
+    if (vectorMode || !clusteringEnabled) {
+      return typeFilter ?? true
     }
 
-    return typeFilter ?? true
+    const unclustered: maplibregl.FilterSpecification = ['!', ['has', 'point_count']]
+    return typeFilter ? (['all', unclustered, typeFilter] as maplibregl.FilterSpecification) : unclustered
   }
 
   function applyTypeVisibility() {
     if (!mlMap.getLayer(POINT_LAYER_ID)) return
     mlMap.setFilter(POINT_LAYER_ID, pointLayerFilter())
 
-    if (clusteringEnabled) {
+    if (!vectorMode && clusteringEnabled) {
       const hideClusters = visibleOrgTypes.length > 0 ? 'none' : 'visible'
       if (mlMap.getLayer(CLUSTER_LAYER_ID)) {
         mlMap.setLayoutProperty(CLUSTER_LAYER_ID, 'visibility', hideClusters)
@@ -192,7 +197,8 @@ export function createMaplibreDotsLayer(
       id: POINT_LAYER_ID,
       type: 'circle',
       source: SOURCE_ID,
-      minzoom: Math.max(0, options.dotsDetailMinZoom - 2),
+      ...(vectorMode ? { 'source-layer': VECTOR_TILES_LAYER } : {}),
+      minzoom: vectorMode ? 0 : Math.max(0, options.dotsDetailMinZoom - 2),
       filter: pointLayerFilter(),
       paint: {
         'circle-color':
@@ -218,7 +224,20 @@ export function createMaplibreDotsLayer(
 
     removeDataLayers()
     clusteringEnabled = clustered
-    clickLayers = clustered ? [POINT_LAYER_ID, CLUSTER_LAYER_ID] : [POINT_LAYER_ID]
+    clickLayers = vectorMode ? [POINT_LAYER_ID] : clustered ? [POINT_LAYER_ID, CLUSTER_LAYER_ID] : [POINT_LAYER_ID]
+
+    if (vectorMode && options.vectorTilesUrl) {
+      mlMap.addSource(SOURCE_ID, {
+        type: 'vector',
+        url: options.vectorTilesUrl,
+      })
+      addPointLayer()
+      applyPointColors(currentTypes)
+      applyTypeVisibility()
+      applyOpacity()
+      ready = true
+      return
+    }
 
     mlMap.addSource(SOURCE_ID, {
       type: 'geojson',
@@ -280,6 +299,8 @@ export function createMaplibreDotsLayer(
   }
 
   function updateSource(points: OrganizationPoint[]) {
+    if (vectorMode) return
+
     currentPoints = points
     currentTypes = [...new Set(points.map((point) => point.orgType))].sort()
     const source = mlMap.getSource(SOURCE_ID) as GeoJSONSource | undefined
@@ -299,6 +320,12 @@ export function createMaplibreDotsLayer(
       pendingPoints = null
     }
   }
+
+  mlMap.on('error', (event) => {
+    if (!vectorMode) return
+    const message = event.error?.message ?? 'Vector tile source failed'
+    options.onVectorTilesError?.(message)
+  })
 
   mlMap.on('load', initStyle)
   mlMap.once('styledata', initStyle)
@@ -370,6 +397,7 @@ export function createMaplibreDotsLayer(
 
   return {
     setPoints(points) {
+      if (vectorMode) return
       if (!ready) {
         pendingPoints = points
         currentPoints = points
@@ -378,7 +406,7 @@ export function createMaplibreDotsLayer(
       updateSource(points)
     },
     setClustering(enabled) {
-      if (enabled === clusteringEnabled && ready) return
+      if (vectorMode || (enabled === clusteringEnabled && ready)) return
       clusteringEnabled = enabled
       if (!styleReady) return
       ready = false

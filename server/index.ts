@@ -10,6 +10,7 @@ import {
   buildFilterQuery,
   limitForZoom,
   parseFilters,
+  rtreeBboxParams,
 } from './filters.js'
 import { toCompactPoint, roundCoord, type CompactPoint } from '../scripts/lib/points.js'
 
@@ -28,10 +29,56 @@ app.use('/*', cors())
 app.use(compress())
 
 function organizationQuery(filters: ReturnType<typeof parseFilters>, geocodedOnly = true) {
-  const { conditions, params } = buildFilterQuery(filters, geocodedOnly)
-  appendAreaFilters(filters, conditions, params)
-  appendBboxFilter(filters.bbox, conditions, params)
-  return { conditions, params }
+  const { conditions, params } = buildFilterQuery(filters, geocodedOnly, 'o')
+  appendAreaFilters(filters, conditions, params, 'o')
+
+  if (filters.bbox) {
+    return { conditions, params, bbox: filters.bbox, useRtree: true as const }
+  }
+
+  return { conditions, params, useRtree: false as const }
+}
+
+function queryOrganizationPoints(
+  filters: ReturnType<typeof parseFilters>,
+  limit: number,
+) {
+  const query = organizationQuery(filters)
+
+  if (query.useRtree) {
+    const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
+    return db
+      .prepare(
+        `SELECT o.orgnr, o.org_type, o.lat, o.lng
+         FROM organizations o
+         INNER JOIN orgs_rtree r ON r.id = o.rowid
+         WHERE r.maxLng >= ? AND r.minLng <= ?
+           AND r.maxLat >= ? AND r.minLat <= ?
+           AND ${query.conditions.join(' AND ')}
+         LIMIT ?`,
+      )
+      .all(minLng, maxLng, minLat, maxLat, ...query.params, limit) as Array<{
+      orgnr: string
+      org_type: string
+      lat: number
+      lng: number
+    }>
+  }
+
+  appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
+  return db
+    .prepare(
+      `SELECT o.orgnr, o.org_type, o.lat, o.lng
+       FROM organizations o
+       WHERE ${query.conditions.join(' AND ')}
+       LIMIT ?`,
+    )
+    .all(...query.params, limit) as Array<{
+    orgnr: string
+    org_type: string
+    lat: number
+    lng: number
+  }>
 }
 
 app.get('/api/health', (c) => {
@@ -101,21 +148,7 @@ app.get('/api/organizations/points', (c) => {
     Number.isFinite(explicitLimit) ? explicitLimit : undefined,
   )
   const compact = c.req.query('format') === 'compact'
-  const { conditions, params } = organizationQuery(filters)
-
-  const rows = db
-    .prepare(
-      `SELECT orgnr, org_type, lat, lng
-       FROM organizations
-       WHERE ${conditions.join(' AND ')}
-       LIMIT ?`,
-    )
-    .all(...params, limit) as Array<{
-    orgnr: string
-    org_type: string
-    lat: number
-    lng: number
-  }>
+  const rows = queryOrganizationPoints(filters, limit)
 
   if (compact) {
     const points: CompactPoint[] = rows.map((row) =>
@@ -189,17 +222,9 @@ app.get('/api/organizations', (c) => {
     filters.zoom,
     Number.isFinite(explicitLimit) ? explicitLimit : undefined,
   )
-  const { conditions, params } = organizationQuery(filters)
+  const query = organizationQuery(filters)
 
-  const rows = db
-    .prepare(
-      `SELECT orgnr, navn, org_type, org_type_label, address_text, postnummer,
-              kommunenummer, lat, lng
-       FROM organizations
-       WHERE ${conditions.join(' AND ')}
-       LIMIT ?`,
-    )
-    .all(...params, limit) as Array<{
+  let rows: Array<{
     orgnr: string
     navn: string
     org_type: string
@@ -210,6 +235,33 @@ app.get('/api/organizations', (c) => {
     lat: number
     lng: number
   }>
+
+  if (query.useRtree) {
+    const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
+    rows = db
+      .prepare(
+        `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.address_text, o.postnummer,
+                o.kommunenummer, o.lat, o.lng
+         FROM organizations o
+         INNER JOIN orgs_rtree r ON r.id = o.rowid
+         WHERE r.maxLng >= ? AND r.minLng <= ?
+           AND r.maxLat >= ? AND r.minLat <= ?
+           AND ${query.conditions.join(' AND ')}
+         LIMIT ?`,
+      )
+      .all(minLng, maxLng, minLat, maxLat, ...query.params, limit) as typeof rows
+  } else {
+    appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
+    rows = db
+      .prepare(
+        `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.address_text, o.postnummer,
+                o.kommunenummer, o.lat, o.lng
+         FROM organizations o
+         WHERE ${query.conditions.join(' AND ')}
+         LIMIT ?`,
+      )
+      .all(...query.params, limit) as typeof rows
+  }
 
   const organizations = rows.map((row) => ({
     orgnr: row.orgnr,

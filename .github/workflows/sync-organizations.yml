@@ -101,3 +101,35 @@ jobs:
           files: data/organizations.db
           make_latest: true
           overwrite_files: true
+
+      - name: Install tippecanoe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsqlite3-dev zlib1g-dev
+          git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+          make -C /tmp/tippecanoe -j"$(nproc)"
+          sudo make -C /tmp/tippecanoe install
+
+      - name: Install PMTiles CLI
+        run: |
+          curl -L https://github.com/protomaps/go-pmtiles/releases/download/v1.31.1/go-pmtiles_1.31.1_Linux_x86_64.tar.gz \
+            | sudo tar xz -C /usr/local/bin pmtiles
+
+      - name: Export vector tiles
+        run: yarn export-vector-tiles
+
+      - name: Publish vector tiles release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: points
+          name: Organization point tiles
+          body: |
+            Pre-built PMTiles vector tiles for default map filters.
+
+            Run: ${{ github.run_id }}
+            Time: ${{ github.run_started_at }}
+          files: |
+            public/data/points.pmtiles
+            public/data/points/manifest.json
+          make_latest: true
+          overwrite_files: true

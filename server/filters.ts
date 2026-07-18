@@ -5,22 +5,23 @@ export interface MapFilters {
   vatRegisteredOnly: boolean
 }
 
-export function buildFilterQuery(filters: MapFilters, geocodedOnly = false) {
-  const conditions = ['deleted = 0']
+export function buildFilterQuery(filters: MapFilters, geocodedOnly = false, tableAlias = '') {
+  const prefix = tableAlias ? `${tableAlias}.` : ''
+  const conditions = [`${prefix}deleted = 0`]
   const params: Array<string | number> = []
 
   if (geocodedOnly) {
-    conditions.push('lat IS NOT NULL', 'lng IS NOT NULL')
+    conditions.push(`${prefix}lat IS NOT NULL`, `${prefix}lng IS NOT NULL`)
   }
 
   if (filters.orgTypes.length > 0) {
-    conditions.push(`org_type IN (${filters.orgTypes.map(() => '?').join(',')})`)
+    conditions.push(`${prefix}org_type IN (${filters.orgTypes.map(() => '?').join(',')})`)
     params.push(...filters.orgTypes)
   }
 
-  if (filters.excludeKonkurs) conditions.push('konkurs = 0')
-  if (filters.excludeUnderAvvikling) conditions.push('under_avvikling = 0')
-  if (filters.vatRegisteredOnly) conditions.push('vat_registered = 1')
+  if (filters.excludeKonkurs) conditions.push(`${prefix}konkurs = 0`)
+  if (filters.excludeUnderAvvikling) conditions.push(`${prefix}under_avvikling = 0`)
+  if (filters.vatRegisteredOnly) conditions.push(`${prefix}vat_registered = 1`)
 
   return { conditions, params }
 }
@@ -71,20 +72,21 @@ export function limitForZoom(zoom?: number, explicitLimit?: number): number {
   return 50000
 }
 
-export function appendAreaFilters(filters: ApiFilters, conditions: string[], params: Array<string | number>) {
+export function appendAreaFilters(filters: ApiFilters, conditions: string[], params: Array<string | number>, tableAlias = '') {
+  const prefix = tableAlias ? `${tableAlias}.` : ''
   if (filters.kommunenummer) {
     const values = filters.kommunenummer.split(',').map((value) => value.trim()).filter(Boolean)
     if (values.length === 1) {
-      conditions.push('kommunenummer = ?')
+      conditions.push(`${prefix}kommunenummer = ?`)
       params.push(values[0])
     } else if (values.length > 1) {
-      conditions.push(`kommunenummer IN (${values.map(() => '?').join(',')})`)
+      conditions.push(`${prefix}kommunenummer IN (${values.map(() => '?').join(',')})`)
       params.push(...values)
     }
   }
 
   if (filters.fylke) {
-    conditions.push('substr(kommunenummer, 1, 2) = ?')
+    conditions.push(`substr(${prefix}kommunenummer, 1, 2) = ?`)
     params.push(filters.fylke)
   }
 }
@@ -93,10 +95,23 @@ export function appendBboxFilter(
   bbox: [number, number, number, number] | undefined,
   conditions: string[],
   params: Array<string | number>,
+  tableAlias = '',
 ) {
   if (!bbox) return
 
+  const prefix = tableAlias ? `${tableAlias}.` : ''
   const [minLng, minLat, maxLng, maxLat] = bbox
-  conditions.push('lat >= ?', 'lat <= ?', 'lng >= ?', 'lng <= ?')
+  conditions.push(
+    `${prefix}lat >= ?`,
+    `${prefix}lat <= ?`,
+    `${prefix}lng >= ?`,
+    `${prefix}lng <= ?`,
+  )
   params.push(minLat, maxLat, minLng, maxLng)
+}
+
+/** R-tree intersection params for bbox [minLng, minLat, maxLng, maxLat]. */
+export function rtreeBboxParams(bbox: [number, number, number, number]) {
+  const [minLng, minLat, maxLng, maxLat] = bbox
+  return [minLng, maxLng, minLat, maxLat]
 }

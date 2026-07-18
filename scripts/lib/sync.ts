@@ -11,7 +11,7 @@ import {
   sampleAddressForKey,
   upsertEntity,
 } from './organizations.js'
-import { getSyncState, getStats, setSyncState } from './db.js'
+import { getSyncState, getStats, rebuildOrgsRtree, setSyncState } from './db.js'
 
 const LAST_UPDATE_ID_KEY = 'last_oppdateringsid'
 const LAST_SYNC_AT_KEY = 'last_sync_at'
@@ -439,6 +439,7 @@ export async function runBuildDatabase(db: Database.Database, options: BuildDbOp
   }
 
   setSyncState(db, LAST_SYNC_AT_KEY, new Date().toISOString())
+  rebuildOrgsRtree(db)
 
   const stats = getStats(db)
   console.log('\nFerdig. Database status:')

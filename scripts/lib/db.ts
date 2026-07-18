@@ -75,7 +75,45 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_org_coords
       ON organizations(lat, lng)
       WHERE deleted = 0 AND lat IS NOT NULL;
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS orgs_rtree USING rtree(
+      id,
+      minLng, maxLng,
+      minLat, maxLat
+    );
   `)
+
+  ensureOrgsRtree(db)
+}
+
+/** Rebuild the spatial R-tree index for O(log n) bbox queries. */
+export function rebuildOrgsRtree(db: Database.Database) {
+  db.exec('DELETE FROM orgs_rtree')
+  db.prepare(
+    `INSERT INTO orgs_rtree (id, minLng, maxLng, minLat, maxLat)
+     SELECT rowid, lng, lng, lat, lat
+     FROM organizations
+     WHERE deleted = 0 AND lat IS NOT NULL AND lng IS NOT NULL`,
+  ).run()
+}
+
+function ensureOrgsRtree(db: Database.Database) {
+  const orgCount = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM organizations
+         WHERE deleted = 0 AND lat IS NOT NULL AND lng IS NOT NULL`,
+      )
+      .get() as { count: number }
+  ).count
+
+  const rtreeCount = (db.prepare('SELECT COUNT(*) AS count FROM orgs_rtree').get() as { count: number })
+    .count
+
+  if (orgCount > 0 && rtreeCount !== orgCount) {
+    rebuildOrgsRtree(db)
+  }
 }
 
 export function getSyncState(db: Database.Database, key: string): string | null {
@@ -93,7 +131,7 @@ export function setSyncState(db: Database.Database, key: string, value: string) 
 }
 
 export function getStats(db: Database.Database) {
-  return db
+  const stats = db
     .prepare(
       `SELECT
          COUNT(*) AS total,
@@ -108,4 +146,8 @@ export function getStats(db: Database.Database) {
     geocoded: number
     pending_geocode: number
   }
+
+  const rtree = db.prepare('SELECT COUNT(*) AS count FROM orgs_rtree').get() as { count: number }
+
+  return { ...stats, rtree: rtree.count }
 }
