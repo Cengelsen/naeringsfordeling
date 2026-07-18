@@ -45,7 +45,8 @@ jobs:
 
           curl -fsSL \
             -o public/data/kommuner.geojson \
-            https://raw.githubusercontent.com/robhop/fylker-og-kommuner/main/Kommuner-M.geojson
+            https://raw.githubusercontent.com/robhop/fylker-og-kommuner/main/Kommuner-S.geojson
+          gzip -9 -f -k public/data/kommuner.geojson
 
           if gh release view database >/dev/null 2>&1; then
             gh release download database --pattern 'organizations.db' --dir data --clobber

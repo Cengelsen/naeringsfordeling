@@ -18,6 +18,7 @@
     "export-points": "tsx scripts/export-point-tiles.ts",
     "export-vector-tiles": "tsx scripts/export-vector-tiles.ts",
     "download-db": "bash scripts/download-db.sh",
+    "download-kommuner": "bash scripts/download-kommuner.sh",
     "download-points": "bash scripts/download-points.sh",
     "export-static-api": "tsx scripts/export-static-api.ts"
   },
