@@ -648,10 +648,16 @@
     map.on('moveend', scheduleDotsReloadOnMove)
     map.on('zoomend', scheduleDotsReloadOnZoom)
 
+    const resizeObserver = new ResizeObserver(() => {
+      map?.invalidateSize({ animate: false })
+    })
+    resizeObserver.observe(mapContainer)
+
     updateVisualization()
 
     return () => {
       clearTimeout(boundsTimer)
+      resizeObserver.disconnect()
       map?.off('moveend', scheduleDotsReloadOnMove)
       map?.off('zoomend', scheduleDotsReloadOnZoom)
       removeDotsController()

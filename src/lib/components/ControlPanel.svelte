@@ -57,7 +57,7 @@
   })
 </script>
 
-<aside class="panel">
+<aside class="panel" aria-label="Kontrollpanel">
   <header class="panel-header">
     <h1>Næringsfordeling</h1>
     <p class="subtitle">Organisasjoner i Norge · SQLite + OpenStreetMap</p>

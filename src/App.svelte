@@ -72,6 +72,7 @@
   }
 
   let filterKey = $state('')
+  let panelCollapsed = $state(false)
 
   function currentFilterKey() {
     return JSON.stringify({
@@ -125,16 +126,40 @@
   init()
 </script>
 
-<main class="layout">
-  <ControlPanel
-    {orgForms}
-    {kommuner}
-    {loading}
-    {dotsState}
-    {totalCount}
-    onRefresh={loadCounts}
-  />
+<main class="layout" class:panel-collapsed={panelCollapsed}>
+  <div class="panel-slot">
+    <ControlPanel
+      {orgForms}
+      {kommuner}
+      {loading}
+      {dotsState}
+      {totalCount}
+      onRefresh={loadCounts}
+    />
+  </div>
   <div class="map-area">
+    <button
+      type="button"
+      class="panel-toggle"
+      onclick={() => (panelCollapsed = !panelCollapsed)}
+      aria-expanded={!panelCollapsed}
+      aria-label={panelCollapsed ? 'Utvid panel' : 'Minimer panel'}
+      title={panelCollapsed ? 'Utvid panel' : 'Minimer panel'}
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        {#if panelCollapsed}
+          <path
+            fill="currentColor"
+            d="M9.29 6.71a1 1 0 0 0 0 1.41L13.17 12l-3.88 3.88a1 1 0 1 0 1.41 1.41l4.59-4.59a1 1 0 0 0 0-1.41L10.7 6.7a1 1 0 0 0-1.41.01z"
+          />
+        {:else}
+          <path
+            fill="currentColor"
+            d="M14.71 6.71a1 1 0 0 0-1.41 0L8.71 11.3a1 1 0 0 0 0 1.41l4.59 4.59a1 1 0 0 0 1.41-1.41L11.83 12l3.88-3.88a1 1 0 0 0 0-1.41z"
+          />
+        {/if}
+      </svg>
+    </button>
     {#if geojson}
       <MapView
         {geojson}
@@ -177,11 +202,47 @@
     grid-template-columns: minmax(320px, 380px) 1fr;
     height: 100vh;
     overflow: hidden;
+    transition: grid-template-columns 0.2s ease;
+  }
+
+  .panel-slot {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .layout.panel-collapsed {
+    grid-template-columns: 0fr 1fr;
   }
 
   .map-area {
+    position: relative;
     min-width: 0;
     height: 100%;
+  }
+
+  .panel-toggle {
+    position: absolute;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 1000;
+    display: grid;
+    place-items: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    margin: 0;
+    padding: 0;
+    border: 1px solid #334155;
+    border-radius: 0.45rem;
+    background: #0f172a;
+    color: #e2e8f0;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+
+  .panel-toggle:hover {
+    background: #1e293b;
+    color: #f8fafc;
   }
 
   .map-placeholder {
@@ -198,6 +259,11 @@
     .layout {
       grid-template-columns: 1fr;
       grid-template-rows: auto 1fr;
+    }
+
+    .layout.panel-collapsed {
+      grid-template-columns: 1fr;
+      grid-template-rows: 0 1fr;
     }
   }
 </style>
