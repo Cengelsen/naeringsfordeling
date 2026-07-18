@@ -46,3 +46,24 @@ export function groupPointsByLocation(points: OrganizationPoint[]): LocationGrou
 export function orgnrsFromGroup(group: LocationGroup): string[] {
   return group.orgs.map((org) => org.orgnr)
 }
+
+export interface OrgTypeSegment {
+  orgType: string
+  count: number
+  fraction: number
+}
+
+export function orgTypeSegments(group: LocationGroup): OrgTypeSegment[] {
+  const counts = new Map<string, number>()
+  for (const org of group.orgs) {
+    counts.set(org.orgType, (counts.get(org.orgType) ?? 0) + 1)
+  }
+
+  return [...counts.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([orgType, count]) => ({
+      orgType,
+      count,
+      fraction: count / group.orgCount,
+    }))
+}

@@ -203,19 +203,23 @@
   }
 
   function addressPopupHtml(orgs: Organization[]): string {
+    const colorTypes = [...new Set(allPoints.map((point) => point.orgType))].sort()
     const addressLine =
       orgs[0]?.addressText && orgs[0]?.postnummer
         ? `<p class="address-popup-header"><strong>${orgs[0].addressText}, ${orgs[0].postnummer}</strong></p>`
         : ''
     const items = orgs
-      .map(
-        (org) =>
-          `<div class="address-popup-item">
-            <strong>${org.navn}</strong><br/>
-            ${org.orgTypeLabel} (${org.orgType})<br/>
-            Org.nr ${org.orgnr}
-          </div>`,
-      )
+      .map((org) => {
+        const color = colorForOrgType(org.orgType, colorTypes)
+        return `<div class="address-popup-item">
+            <span class="address-popup-swatch" style="background:${color}"></span>
+            <div>
+              <strong>${org.navn}</strong><br/>
+              ${org.orgTypeLabel} (${org.orgType})<br/>
+              Org.nr ${org.orgnr}
+            </div>
+          </div>`
+      })
       .join('')
 
     return `${addressLine}<p class="address-popup-summary">${orgs.length} organisasjoner på denne adressen</p><div class="address-popup-list">${items}</div>`
@@ -237,7 +241,25 @@
     return resolved
   }
 
-  async function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
+  function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
+    if (!map) return
+
+    try {
+      const org = resolveOrganizationsFromPoints([orgnr])[0]!
+      const extra = note ? `<br/><em>${note}</em>` : ''
+      L.popup({ maxWidth: 320 })
+        .setLatLng(latlng)
+        .setContent(`${orgPopupHtml(org)}${extra}`)
+        .openOn(map)
+    } catch (err) {
+      L.popup({ maxWidth: 320 })
+        .setLatLng(latlng)
+        .setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjon')
+        .openOn(map)
+    }
+  }
+
+  async function showOrganizationPopupFromApi(orgnr: string, latlng: L.LatLng, note?: string) {
     if (!map) return
 
     const popup = L.popup({ maxWidth: 320 })
@@ -274,7 +296,7 @@
 
   function handleMarkerClick(orgnrs: string[], latlng: L.LatLng) {
     if (orgnrs.length === 1) {
-      void showOrganizationPopup(orgnrs[0]!, latlng)
+      showOrganizationPopup(orgnrs[0]!, latlng)
     } else {
       showAddressPopup(orgnrs, latlng)
     }
@@ -329,7 +351,7 @@
         const latlng = L.latLng(location.lat, location.lng)
         showOrgMarker(latlng)
         map.flyTo(latlng, ORG_LOCATE_ZOOM, { duration: 0.8 })
-        await showOrganizationPopup(orgnr, latlng)
+        await showOrganizationPopupFromApi(orgnr, latlng)
         return
       }
 
@@ -340,7 +362,7 @@
           const latlng = L.latLng(lat, lng)
           showOrgMarker(latlng)
           map.flyTo(latlng, ORG_LOCATE_ZOOM, { duration: 0.8 })
-          await showOrganizationPopup(
+          await showOrganizationPopupFromApi(
             orgnr,
             latlng,
             'Kunne ikke geokode adressen – omtrentlig posisjon',

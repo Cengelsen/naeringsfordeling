@@ -8,6 +8,12 @@ import { orgTypeColorExpression } from '../utils/orgTypeColors'
 import { ensurePmtilesProtocol, VECTOR_TILES_LAYER } from './vectorTiles'
 import { groupPointsByLocation, locationKey, orgnrsFromGroup } from './addressGroups'
 import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
+import {
+  colorMixKey,
+  coloredSegments,
+  createSplitSquareImageData,
+  SPLIT_SQUARE_IMAGE_SIZE,
+} from './splitSquareMarker'
 
 const SOURCE_ID = 'org-dots'
 const CLUSTER_LAYER_ID = 'org-clusters'
@@ -31,19 +37,69 @@ function pointRadiusExpression(detailMinZoom: number): maplibregl.ExpressionSpec
   ]
 }
 
-function multiMarkerSizeExpression(detailMinZoom: number): maplibregl.ExpressionSpecification {
+function multiMarkerIconSizeExpression(detailMinZoom: number): maplibregl.ExpressionSpecification {
   const mlDetailZoom = Math.max(0, detailMinZoom - 1)
+  const scale = SPLIT_SQUARE_IMAGE_SIZE / 16
   return [
     'interpolate',
     ['linear'],
     ['zoom'],
     mlDetailZoom,
-    14,
+    0.55 * scale,
     mlDetailZoom + 3,
-    18,
+    0.7 * scale,
     mlDetailZoom + 6,
-    22,
+    0.85 * scale,
   ]
+}
+
+function pointsToGeoJson(points: OrganizationPoint[], colorTypes: string[]): FeatureCollection<Point> {
+  const groups = groupPointsByLocation(points)
+
+  const features = groups.map((group) => {
+    const orgnrs = orgnrsFromGroup(group)
+    const properties: Record<string, string | number> = {
+      orgnr: orgnrs[0]!,
+      orgType: group.orgType,
+      orgCount: group.orgCount,
+      orgnrs: orgnrs.join(','),
+    }
+
+    if (group.orgCount > 1) {
+      properties.colorMixKey = colorMixKey(coloredSegments(group, colorTypes))
+    }
+
+    return {
+      type: 'Feature' as const,
+      geometry: {
+        type: 'Point' as const,
+        coordinates: [group.lng, group.lat],
+      },
+      properties,
+    }
+  })
+
+  return {
+    type: 'FeatureCollection',
+    features,
+  }
+}
+
+function syncMultiSquareImages(
+  mlMap: maplibregl.Map,
+  points: OrganizationPoint[],
+  colorTypes: string[],
+) {
+  for (const group of groupPointsByLocation(points)) {
+    if (group.orgCount <= 1) continue
+
+    const key = colorMixKey(coloredSegments(group, colorTypes))
+    if (mlMap.hasImage(key)) continue
+
+    mlMap.addImage(key, createSplitSquareImageData(coloredSegments(group, colorTypes)), {
+      pixelRatio: 2,
+    })
+  }
 }
 
 const TRANSPARENT_STYLE: maplibregl.StyleSpecification = {
@@ -76,32 +132,6 @@ export interface MaplibreDotsController {
   setStale(stale: boolean): void
   bringToFront(): void
   remove(): void
-}
-
-function pointsToGeoJson(points: OrganizationPoint[]): FeatureCollection<Point> {
-  const groups = groupPointsByLocation(points)
-
-  const features = groups.map((group) => {
-    const orgnrs = orgnrsFromGroup(group)
-    return {
-      type: 'Feature' as const,
-      geometry: {
-        type: 'Point' as const,
-        coordinates: [group.lng, group.lat],
-      },
-      properties: {
-        orgnr: orgnrs[0],
-        orgType: group.orgType,
-        orgCount: group.orgCount,
-        orgnrs: orgnrs.join(','),
-      },
-    }
-  })
-
-  return {
-    type: 'FeatureCollection',
-    features,
-  }
 }
 
 export function createMaplibreDotsLayer(
@@ -206,9 +236,6 @@ export function createMaplibreDotsLayer(
     if (mlMap.getLayer(POINT_LAYER_ID)) {
       mlMap.setPaintProperty(POINT_LAYER_ID, 'circle-color', colorExpr)
     }
-    if (mlMap.getLayer(MULTI_POINT_LAYER_ID)) {
-      mlMap.setPaintProperty(MULTI_POINT_LAYER_ID, 'text-color', colorExpr)
-    }
   }
 
   function applyOpacity() {
@@ -220,7 +247,7 @@ export function createMaplibreDotsLayer(
       mlMap.setPaintProperty(POINT_LAYER_ID, 'circle-opacity', pointOpacity)
     }
     if (mlMap.getLayer(MULTI_POINT_LAYER_ID)) {
-      mlMap.setPaintProperty(MULTI_POINT_LAYER_ID, 'text-opacity', pointOpacity)
+      mlMap.setPaintProperty(MULTI_POINT_LAYER_ID, 'icon-opacity', pointOpacity)
     }
     if (mlMap.getLayer(CLUSTER_LAYER_ID)) {
       mlMap.setPaintProperty(CLUSTER_LAYER_ID, 'circle-opacity', clusterOpacity)
@@ -272,17 +299,13 @@ export function createMaplibreDotsLayer(
       minzoom: Math.max(0, options.dotsDetailMinZoom - 2),
       filter: pointLayerFilter(false),
       layout: {
-        'text-field': '■',
-        'text-size': multiMarkerSizeExpression(options.dotsDetailMinZoom),
-        'text-allow-overlap': true,
-        'text-ignore-placement': true,
+        'icon-image': ['get', 'colorMixKey'],
+        'icon-size': multiMarkerIconSizeExpression(options.dotsDetailMinZoom),
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
       },
       paint: {
-        'text-color':
-          currentTypes.length > 0 ? orgTypeColorExpression(currentTypes) : '#64748b',
-        'text-halo-color': '#0f172a',
-        'text-halo-width': 1,
-        'text-opacity': 0.88,
+        'icon-opacity': 0.88,
       },
     })
   }
@@ -313,7 +336,7 @@ export function createMaplibreDotsLayer(
 
     mlMap.addSource(SOURCE_ID, {
       type: 'geojson',
-      data: pointsToGeoJson(currentPoints),
+      data: pointsToGeoJson(currentPoints, currentTypes),
       ...(clustered
         ? { cluster: true, clusterMaxZoom, clusterRadius: 50 }
         : {}),
@@ -364,6 +387,7 @@ export function createMaplibreDotsLayer(
     }
 
     addSinglePointLayer()
+    syncMultiSquareImages(mlMap, currentPoints, currentTypes)
     addMultiPointLayer()
     applyPointColors(currentTypes)
     applyTypeVisibility()
@@ -378,7 +402,8 @@ export function createMaplibreDotsLayer(
     currentTypes = [...new Set(points.map((point) => point.orgType))].sort()
     const source = mlMap.getSource(SOURCE_ID) as GeoJSONSource | undefined
     if (source) {
-      source.setData(pointsToGeoJson(points))
+      syncMultiSquareImages(mlMap, points, currentTypes)
+      source.setData(pointsToGeoJson(points, currentTypes))
       applyPointColors(currentTypes)
       applyOpacity()
     }

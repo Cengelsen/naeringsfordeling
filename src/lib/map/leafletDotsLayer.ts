@@ -3,6 +3,7 @@ import type { OrganizationPoint } from '../types'
 import { colorForOrgType } from '../utils/orgTypeColors'
 import { groupPointsByLocation, orgnrsFromGroup } from './addressGroups'
 import type { MaplibreDotsController, MaplibreDotsLayerOptions } from './maplibreDotsLayer'
+import { coloredSegments, conicGradientCss } from './splitSquareMarker'
 
 const MAX_LEAFLET_DOTS = 4000
 
@@ -35,18 +36,18 @@ export function createLeafletDotsLayer(
   function addSquareMarker(
     lat: number,
     lng: number,
-    color: string,
+    group: ReturnType<typeof groupPointsByLocation>[number],
     orgnrs: string[],
-    orgCount: number,
   ) {
     const size = squareSize()
     const opacity = stale ? 0.45 : 0.85
+    const background = conicGradientCss(coloredSegments(group, colorTypes))
     const marker = L.marker([lat, lng], {
       icon: L.divIcon({
         className: 'org-dot-square-wrap',
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
-        html: `<div class="org-dot-square" style="width:${size}px;height:${size}px;background:${color};border:1.5px solid #0f172a;opacity:${opacity};box-sizing:border-box" title="${orgCount} organisasjoner"></div>`,
+        html: `<div class="org-dot-square" style="width:${size}px;height:${size}px;background:${background};border:1.5px solid #0f172a;opacity:${opacity};box-sizing:border-box" title="${group.orgCount} organisasjoner"></div>`,
       }),
     })
 
@@ -96,7 +97,7 @@ export function createLeafletDotsLayer(
 
         marker.addTo(layer)
       } else {
-        addSquareMarker(group.lat, group.lng, color, orgnrs, group.orgCount)
+        addSquareMarker(group.lat, group.lng, group, orgnrs)
       }
     }
   }
