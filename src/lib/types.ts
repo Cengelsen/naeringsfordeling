@@ -72,8 +72,28 @@ export interface Organization {
   addressText: string
   postnummer: string
   kommunenummer: string
-  lat: number
-  lng: number
+  lat: number | null
+  lng: number | null
+}
+
+export interface OrganizationSearchHit {
+  orgnr: string
+  navn: string
+  orgType: string
+  orgTypeLabel: string
+  kommunenummer: string
+  lat: number | null
+  lng: number | null
+}
+
+export type OrganizationLocationSource = 'database' | 'cache' | 'geocoded' | 'none'
+
+export interface OrganizationLocation {
+  orgnr: string
+  lat: number | null
+  lng: number | null
+  kommunenummer: string
+  source: OrganizationLocationSource
 }
 
 /** Compact point payload for map rendering */

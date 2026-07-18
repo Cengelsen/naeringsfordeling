@@ -14,6 +14,7 @@
   import {
     buildFylkeGeojson,
     fylkeFromKommune,
+    geoBoundsCenter,
     geoBoundsIntersects,
     kommuneBoundsIndex,
     kommuneFeatures,
@@ -24,6 +25,7 @@
   import { colorForOrgType } from '../utils/orgTypeColors'
   import {
     fetchOrganizationDetail,
+    fetchOrganizationLocation,
     fetchOrganizationPoints,
     MAX_VIEWPORT_DOTS,
     MIN_DOTS_ZOOM,
@@ -39,15 +41,21 @@
   import Legend from './Legend.svelte'
   import OrgTypeLegend from './OrgTypeLegend.svelte'
 
+  interface LocateRequest {
+    orgnr: string
+    seq: number
+  }
+
   interface Props {
     geojson: FeatureCollection | null
     counts: MunicipalityCount[]
     settings: MapSettings
     orgForms: Organisasjonsform[]
+    locateRequest?: LocateRequest | null
     onDotsStateChange?: (state: DotsLoadState) => void
   }
 
-  let { geojson, counts, settings, orgForms, onDotsStateChange }: Props = $props()
+  let { geojson, counts, settings, orgForms, locateRequest = null, onDotsStateChange }: Props = $props()
 
   let mapContainer: HTMLDivElement
   let map: L.Map | null = null
@@ -72,6 +80,10 @@
   let vectorTilesDisabled = $state(false)
   let webglUnavailable = $state(false)
   let webglBannerDismissed = $state(false)
+  let orgFocusActive = $state(false)
+  let orgMarker: L.CircleMarker | null = null
+
+  const ORG_LOCATE_ZOOM = 18
 
   const vectorTilesReady = $derived(
     vectorTilesManifest !== null &&
@@ -190,7 +202,7 @@
          ${org.addressText}, ${org.postnummer}`
   }
 
-  async function showOrganizationPopup(orgnr: string, latlng: L.LatLng) {
+  async function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
     if (!map) return
 
     const popup = L.popup({ maxWidth: 320 })
@@ -200,9 +212,88 @@
 
     try {
       const org = await fetchOrganizationDetail(orgnr)
-      popup.setContent(orgPopupHtml(org))
+      const extra = note ? `<br/><em>${note}</em>` : ''
+      popup.setContent(`${orgPopupHtml(org)}${extra}`)
     } catch (err) {
       popup.setContent(err instanceof Error ? err.message : 'Kunne ikke hente organisasjon')
+    }
+  }
+
+  function clearOrgMarker() {
+    orgMarker?.remove()
+    orgMarker = null
+  }
+
+  function enterOrgFocusMode() {
+    orgFocusActive = true
+    if (geoLayer) {
+      geoLayer.remove()
+      geoLayer = null
+    }
+    removeDotsController()
+  }
+
+  function exitOrgFocusMode() {
+    if (!orgFocusActive) return
+    orgFocusActive = false
+    clearOrgMarker()
+    updateVisualization()
+  }
+
+  function showOrgMarker(latlng: L.LatLng) {
+    clearOrgMarker()
+    orgMarker = L.circleMarker(latlng, {
+      radius: 9,
+      color: '#0369a1',
+      fillColor: '#38bdf8',
+      fillOpacity: 0.95,
+      weight: 2,
+    }).addTo(map!)
+  }
+
+  async function navigateToOrganization(orgnr: string) {
+    if (!map) return
+
+    enterOrgFocusMode()
+
+    const pendingPopup = L.popup({ maxWidth: 320 })
+      .setLatLng(map.getCenter())
+      .setContent('Finner adresse…')
+      .openOn(map)
+
+    try {
+      const location = await fetchOrganizationLocation(orgnr)
+
+      if (location.lat != null && location.lng != null) {
+        const latlng = L.latLng(location.lat, location.lng)
+        showOrgMarker(latlng)
+        map.flyTo(latlng, ORG_LOCATE_ZOOM, { duration: 0.8 })
+        await showOrganizationPopup(orgnr, latlng)
+        return
+      }
+
+      if (location.kommunenummer) {
+        const bounds = kommuneBoundsByNummer.get(location.kommunenummer)
+        if (bounds) {
+          const [lat, lng] = geoBoundsCenter(bounds)
+          const latlng = L.latLng(lat, lng)
+          showOrgMarker(latlng)
+          map.flyTo(latlng, ORG_LOCATE_ZOOM, { duration: 0.8 })
+          await showOrganizationPopup(
+            orgnr,
+            latlng,
+            'Kunne ikke geokode adressen – omtrentlig posisjon',
+          )
+          return
+        }
+      }
+
+      pendingPopup.setContent('Fant organisasjonen, men ingen kartposisjon er tilgjengelig')
+    } catch (err) {
+      if (!map) return
+      pendingPopup
+        .setLatLng(map.getCenter())
+        .setContent(err instanceof Error ? err.message : 'Kunne ikke finne organisasjon')
     }
   }
 
@@ -386,7 +477,7 @@
   }
 
   async function loadDots() {
-    if (!map || settings.visualization !== 'dots') return
+    if (!map || settings.visualization !== 'dots' || orgFocusActive) return
 
     if (vectorTilesReady) {
       applyVectorTilesState()
@@ -476,7 +567,7 @@
   const DOTS_FILTER_RELOAD_DELAY_MS = 300
 
   function scheduleDotsReload(delay = DOTS_FILTER_RELOAD_DELAY_MS) {
-    if (settings.visualization !== 'dots') return
+    if (settings.visualization !== 'dots' || orgFocusActive) return
     clearTimeout(boundsTimer)
     boundsTimer = setTimeout(() => {
       loadDots()
@@ -598,6 +689,15 @@
   function updateVisualization() {
     if (!map) return
 
+    if (orgFocusActive) {
+      if (geoLayer) {
+        geoLayer.remove()
+        geoLayer = null
+      }
+      removeDotsController()
+      return
+    }
+
     if (settings.visualization === 'choropleth') {
       removeDotsController()
       renderChoropleth()
@@ -656,6 +756,7 @@
       map?.off('moveend', scheduleDotsReloadOnMove)
       map?.off('zoomend', scheduleDotsReloadOnZoom)
       removeDotsController()
+      clearOrgMarker()
       map?.remove()
       map = null
     }
@@ -696,33 +797,51 @@
     settings.orgTypes
     untrack(() => applyOrgTypeVisibility())
   })
+
+  $effect(() => {
+    settings.visualization
+    settings.districtLevel
+    settings.selectedFylke
+    settings.selectedKommune
+    untrack(() => {
+      if (orgFocusActive) exitOrgFocusMode()
+    })
+  })
+
+  $effect(() => {
+    const request = locateRequest
+    if (!request || !map) return
+    untrack(() => {
+      void navigateToOrganization(request.orgnr)
+    })
+  })
 </script>
 
 <div class="map-shell">
   <div class="map" bind:this={mapContainer}></div>
 
-  {#if settings.visualization === 'dots' && orgTypeLegendItems.length > 0}
+  {#if !orgFocusActive && settings.visualization === 'dots' && orgTypeLegendItems.length > 0}
     <div class="legend-wrap">
       <OrgTypeLegend items={orgTypeLegendItems} />
     </div>
-  {:else if settings.showLegend && settings.visualization !== 'dots'}
+  {:else if !orgFocusActive && settings.showLegend && settings.visualization !== 'dots'}
     <div class="legend-wrap">
       <Legend scheme={settings.colorScheme} max={maxCount} />
     </div>
   {/if}
 
-  {#if settings.visualization === 'dots' && dotsState.loading}
+  {#if !orgFocusActive && settings.visualization === 'dots' && dotsState.loading}
     <div class="dots-status loading">
       <strong>
         {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Oppdaterer kart…'}
       </strong>
       <span>{dotsState.message ?? ''}</span>
     </div>
-  {:else if settings.visualization === 'dots' && dotsState.message}
+  {:else if !orgFocusActive && settings.visualization === 'dots' && dotsState.message}
     <div class="dots-status">
       <span>{dotsState.message}</span>
     </div>
-  {:else if settings.visualization === 'dots' && webglUnavailable && !webglBannerDismissed}
+  {:else if !orgFocusActive && settings.visualization === 'dots' && webglUnavailable && !webglBannerDismissed}
     <div class="dots-status webgl-banner">
       <strong>WebGL er deaktivert</strong>
       <span>
@@ -737,7 +856,9 @@
   {/if}
 
   <div class="attribution">
-    {#if settings.visualization === 'dots'}
+    {#if orgFocusActive}
+      Organisasjon · OpenStreetMap
+    {:else if settings.visualization === 'dots'}
       {totalVisible.toLocaleString('nb-NO')} prikk{totalVisible === 1 ? '' : 'er'} ·
       {dotsState.skipped > 0 ? `${dotsState.skipped.toLocaleString('nb-NO')} uten adresse · ` : ''}
       {vectorTilesReady ? 'vektorfliser' : webglUnavailable ? 'Leaflet-fallback' : 'SQLite-database'}

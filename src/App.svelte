@@ -73,6 +73,13 @@
 
   let filterKey = $state('')
   let panelCollapsed = $state(false)
+  let locateSeq = $state(0)
+  let locateRequest = $state<{ orgnr: string; seq: number } | null>(null)
+
+  function locateOrganization(orgnr: string) {
+    locateSeq += 1
+    locateRequest = { orgnr, seq: locateSeq }
+  }
 
   function currentFilterKey() {
     return JSON.stringify({
@@ -134,6 +141,7 @@
       {loading}
       {dotsState}
       {totalCount}
+      onLocateOrganization={locateOrganization}
     />
   </div>
   <div class="map-area">
@@ -165,6 +173,7 @@
         counts={visibleCounts}
         settings={mapSettings}
         {orgForms}
+        {locateRequest}
         onDotsStateChange={(state) => {
           dotsState = state
         }}

@@ -108,6 +108,10 @@ export function geoBoundsIntersects(a: GeoBounds, b: GeoBounds): boolean {
   )
 }
 
+export function geoBoundsCenter(bounds: GeoBounds): [lat: number, lng: number] {
+  return [(bounds.minLat + bounds.maxLat) / 2, (bounds.minLng + bounds.maxLng) / 2]
+}
+
 function extendBounds(bounds: GeoBounds, lat: number, lng: number) {
   bounds.minLat = Math.min(bounds.minLat, lat)
   bounds.maxLat = Math.max(bounds.maxLat, lat)

@@ -13,6 +13,7 @@ import {
   rtreeBboxParams,
 } from './filters.js'
 import { toCompactPoint, roundCoord, type CompactPoint } from '../scripts/lib/points.js'
+import { resolveOrganizationLocation } from './location.js'
 
 const dbPath = process.env.DATABASE_PATH ?? DEFAULT_DB_PATH
 
@@ -171,6 +172,79 @@ app.get('/api/organizations/points', (c) => {
     count: rows.length,
     truncated: rows.length >= limit,
   })
+})
+
+app.get('/api/organizations/search', (c) => {
+  const raw = c.req.query('q')?.trim() ?? ''
+  if (raw.length < 2) {
+    return c.json({ results: [] })
+  }
+
+  const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 8) || 8, 1), 20)
+  const digits = raw.replace(/\D/g, '')
+
+  type SearchRow = {
+    orgnr: string
+    navn: string
+    org_type: string
+    org_type_label: string
+    kommunenummer: string | null
+    lat: number | null
+    lng: number | null
+  }
+
+  const mapRow = (row: SearchRow) => ({
+    orgnr: row.orgnr,
+    navn: row.navn,
+    orgType: row.org_type,
+    orgTypeLabel: row.org_type_label,
+    kommunenummer: row.kommunenummer ?? '',
+    lat: row.lat,
+    lng: row.lng,
+  })
+
+  if (digits.length === 9) {
+    const row = db
+      .prepare(
+        `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
+         FROM organizations
+         WHERE deleted = 0 AND orgnr = ?`,
+      )
+      .get(digits) as SearchRow | undefined
+
+    return c.json({ results: row ? [mapRow(row)] : [] })
+  }
+
+  const pattern = `%${raw.replace(/[%_]/g, '')}%`
+  const prefix = `${raw.replace(/[%_]/g, '')}%`
+  const rows = db
+    .prepare(
+      `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
+       FROM organizations
+       WHERE deleted = 0 AND navn LIKE ? COLLATE NOCASE
+       ORDER BY
+         CASE WHEN navn LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END,
+         LENGTH(navn),
+         navn
+       LIMIT ?`,
+    )
+    .all(pattern, prefix, limit) as SearchRow[]
+
+  return c.json({ results: rows.map(mapRow) })
+})
+
+app.get('/api/organizations/:orgnr/locate', async (c) => {
+  const orgnr = c.req.param('orgnr').replace(/\D/g, '')
+  if (orgnr.length !== 9) {
+    return c.json({ error: 'Ugyldig organisasjonsnummer' }, 400)
+  }
+
+  const location = await resolveOrganizationLocation(db, orgnr)
+  if (!location) {
+    return c.json({ error: 'Organisasjon ikke funnet' }, 404)
+  }
+
+  return c.json({ location })
 })
 
 app.get('/api/organizations/:orgnr', (c) => {

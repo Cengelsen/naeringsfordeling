@@ -4,7 +4,9 @@ import type {
   MapFilters,
   MunicipalityCount,
   Organization,
+  OrganizationLocation,
   OrganizationPoint,
+  OrganizationSearchHit,
   Organisasjonsform,
 } from '../types'
 import {
@@ -172,6 +174,21 @@ export async function fetchOrganizationPoints(
 export async function fetchOrganizationDetail(orgnr: string): Promise<Organization> {
   const data = await apiFetch<{ organization: Organization }>(`/api/organizations/${orgnr}`)
   return data.organization
+}
+
+export async function fetchOrganizationLocation(orgnr: string): Promise<OrganizationLocation> {
+  const data = await apiFetch<{ location: OrganizationLocation }>(
+    `/api/organizations/${orgnr}/locate`,
+  )
+  return data.location
+}
+
+export async function searchOrganizations(query: string, limit = 8): Promise<OrganizationSearchHit[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) })
+  const data = await apiFetch<{ results: OrganizationSearchHit[] }>(
+    `/api/organizations/search?${params.toString()}`,
+  )
+  return data.results
 }
 
 /** @deprecated Use fetchOrganizationPoints for dots view */
