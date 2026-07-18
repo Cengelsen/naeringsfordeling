@@ -19,6 +19,7 @@ import {
 import { fetchViewportPointTiles } from '../map/pointTiles'
 import { assetUrl } from '../utils/assets'
 import { fetchStaticJson } from '../utils/staticJson'
+import { buildOrgSearchIndex, searchOrgSearchIndex, type OrgSearchIndex } from '../search/orgSearchIndex'
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
 const STATIC_API = import.meta.env.VITE_STATIC_API === 'true'
@@ -62,7 +63,7 @@ type GeocodedPointRow = [
 let municipalityBreakdownPromise: Promise<MunicipalityBreakdownRow[]> | null = null
 let organizationsPromise: Promise<Record<string, Organization>> | null = null
 let searchIndexPromise: Promise<OrganizationSearchHit[]> | null = null
-let searchIndexByOrgnrPromise: Promise<Map<string, OrganizationSearchHit>> | null = null
+let orgSearchIndexPromise: Promise<OrgSearchIndex> | null = null
 let geocodedPointsPromise: Promise<GeocodedPointRow[]> | null = null
 let geocodedPointsByKommunePromise: Promise<Map<string, GeocodedPointRow[]>> | null = null
 
@@ -206,21 +207,19 @@ async function loadSearchIndex(): Promise<OrganizationSearchHit[]> {
   return searchIndexPromise
 }
 
+async function loadOrgSearchIndex(): Promise<OrgSearchIndex> {
+  orgSearchIndexPromise ??= loadSearchIndex().then(buildOrgSearchIndex)
+  return orgSearchIndexPromise
+}
+
 async function loadSearchIndexByOrgnr(): Promise<Map<string, OrganizationSearchHit>> {
-  searchIndexByOrgnrPromise ??= loadSearchIndex().then((rows) => {
-    const map = new Map<string, OrganizationSearchHit>()
-    for (const row of rows) {
-      map.set(normalizeOrgnr(row.orgnr), row)
-    }
-    return map
-  })
-  return searchIndexByOrgnrPromise
+  return (await loadOrgSearchIndex()).byOrgnr
 }
 
 /** Warm the local search index (static deployment). */
 export function prefetchLocalSearchIndex(): Promise<void> {
   if (!STATIC_API) return Promise.resolve()
-  return loadSearchIndex().then(() => undefined)
+  return loadOrgSearchIndex().then(() => undefined)
 }
 
 export async function lookupOrganizationLocal(orgnr: string): Promise<Organization | null> {
@@ -249,37 +248,12 @@ function aggregateMunicipalityCounts(
     .sort((a, b) => a.kommunenummer.localeCompare(b.kommunenummer))
 }
 
-function searchStaticOrganizations(query: string, limit: number, index: OrganizationSearchHit[]) {
-  const raw = query.trim()
-  if (raw.length < 2) return []
-
-  const digits = raw.replace(/\D/g, '')
-
-  if (digits.length === 9) {
-    const hit = index.find((row) => row.orgnr === digits)
-    return hit ? [hit] : []
-  }
-
-  if (digits.length >= 3) {
-    return index
-      .filter((row) => row.orgnr.startsWith(digits))
-      .sort((left, right) => left.orgnr.localeCompare(right.orgnr))
-      .slice(0, limit)
-  }
-
-  const lower = raw.toLowerCase()
-  return index
-    .filter(
-      (row) =>
-        row.navn.toLowerCase().includes(lower) || row.orgnr.includes(digits),
-    )
-    .sort((a, b) => {
-      const aPrefix = a.navn.toLowerCase().startsWith(lower) ? 0 : 1
-      const bPrefix = b.navn.toLowerCase().startsWith(lower) ? 0 : 1
-      if (aPrefix !== bPrefix) return aPrefix - bPrefix
-      return a.navn.length - b.navn.length || a.navn.localeCompare(b.navn, 'nb')
-    })
-    .slice(0, limit)
+function searchStaticOrganizations(
+  query: string,
+  limit: number,
+  index: OrgSearchIndex,
+): OrganizationSearchHit[] {
+  return searchOrgSearchIndex(index, query, limit)
 }
 
 export const MIN_DOTS_ZOOM = 9
@@ -497,7 +471,7 @@ export async function fetchOrganizationLocation(orgnr: string): Promise<Organiza
 
 export async function searchOrganizations(query: string, limit = 8): Promise<OrganizationSearchHit[]> {
   if (STATIC_API) {
-    const index = await loadSearchIndex()
+    const index = await loadOrgSearchIndex()
     return searchStaticOrganizations(query, limit, index)
   }
 

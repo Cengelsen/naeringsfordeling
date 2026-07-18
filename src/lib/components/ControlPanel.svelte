@@ -32,6 +32,10 @@
   let orgLookupOpen = $state(false)
   let orgLookupActiveIndex = $state(-1)
 
+  const ORG_LOOKUP_DEBOUNCE_MS = 450
+  let orgLookupTimer: ReturnType<typeof setTimeout> | undefined
+  let orgLookupSeq = 0
+
   const fylker = $derived.by(() => {
     const codes = new Set(kommuner.map((k) => fylkeFromKommune(k.nummer)))
     return [...codes]
@@ -64,38 +68,62 @@
     )
   })
 
-  $effect(() => {
+  function clearOrgLookupResults() {
+    orgLookupResults = []
+    orgLookupOpen = false
+    orgLookupError = null
+    orgLookupLoading = false
+    orgLookupActiveIndex = -1
+  }
+
+  function scheduleOrgLookupSearch() {
+    if (orgLookupTimer) clearTimeout(orgLookupTimer)
+
     const query = orgLookupQuery.trim()
     if (query.length < 2) {
-      orgLookupResults = []
-      orgLookupOpen = false
-      orgLookupError = null
-      orgLookupLoading = false
-      orgLookupActiveIndex = -1
+      clearOrgLookupResults()
       return
     }
 
+    orgLookupTimer = setTimeout(() => {
+      orgLookupTimer = undefined
+      void runOrgLookupSearch(query)
+    }, ORG_LOOKUP_DEBOUNCE_MS)
+  }
+
+  async function runOrgLookupSearch(query: string) {
+    const seq = ++orgLookupSeq
     orgLookupLoading = true
     orgLookupError = null
-    const timer = setTimeout(async () => {
-      try {
-        const results = await searchOrganizations(query)
-        orgLookupResults = results
-        orgLookupOpen = results.length > 0
-        orgLookupActiveIndex = -1
-        orgLookupError = results.length === 0 ? 'Ingen treff' : null
-      } catch (err) {
-        orgLookupError = err instanceof Error ? err.message : 'Søk feilet'
-        orgLookupResults = []
-        orgLookupOpen = false
-        orgLookupActiveIndex = -1
-      } finally {
-        orgLookupLoading = false
-      }
-    }, 280)
 
-    return () => clearTimeout(timer)
-  })
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve())
+    })
+
+    if (seq !== orgLookupSeq || orgLookupQuery.trim() !== query) return
+
+    try {
+      const results = await searchOrganizations(query)
+      if (seq !== orgLookupSeq || orgLookupQuery.trim() !== query) return
+
+      orgLookupResults = results
+      orgLookupOpen = results.length > 0
+      orgLookupActiveIndex = -1
+      orgLookupError = results.length === 0 ? 'Ingen treff' : null
+    } catch (err) {
+      if (seq !== orgLookupSeq) return
+      orgLookupError = err instanceof Error ? err.message : 'Søk feilet'
+      orgLookupResults = []
+      orgLookupOpen = false
+      orgLookupActiveIndex = -1
+    } finally {
+      if (seq === orgLookupSeq) orgLookupLoading = false
+    }
+  }
+
+  function onOrgLookupInput() {
+    scheduleOrgLookupSearch()
+  }
 
   function selectOrgLookupResult(hit: OrganizationSearchHit) {
     orgLookupQuery = hit.navn
@@ -153,6 +181,7 @@
         type="search"
         placeholder="Org.nr eller navn…"
         bind:value={orgLookupQuery}
+        oninput={onOrgLookupInput}
         autocomplete="off"
         role="combobox"
         aria-expanded={orgLookupOpen}
