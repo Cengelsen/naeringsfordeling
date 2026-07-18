@@ -41,6 +41,7 @@
     "hono": "^4.12.30",
     "leaflet": "^1.9.4",
     "maplibre-gl": "^5.24.0",
-    "pmtiles": "^4.4.1"
+    "pmtiles": "^4.4.1",
+    "polyclip-ts": "^0.16.8"
   }
 }

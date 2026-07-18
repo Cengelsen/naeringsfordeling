@@ -1,4 +1,4 @@
-import type { ColorScheme, MapSettings, VisualizationMode } from '../types'
+import type { ColorScheme, DistrictLevel, MapSettings, VisualizationMode } from '../types'
 
 export const defaultSettings: MapSettings = {
   orgTypes: [],
@@ -6,19 +6,15 @@ export const defaultSettings: MapSettings = {
   excludeUnderAvvikling: true,
   vatRegisteredOnly: false,
   visualization: 'choropleth',
+  districtLevel: 'kommune',
   colorScheme: 'blues',
   showLegend: true,
   selectedFylke: '',
   selectedKommune: '',
   dotsDetailMinZoom: 12,
-  dotsClustering: true,
 }
 
 export const mapSettings = $state<MapSettings>({ ...defaultSettings })
-
-export function resetSettings() {
-  Object.assign(mapSettings, defaultSettings)
-}
 
 export function toggleOrgType(kode: string) {
   if (mapSettings.orgTypes.includes(kode)) {
@@ -32,10 +28,13 @@ export function setVisualization(mode: VisualizationMode) {
   mapSettings.visualization = mode
 }
 
-export function setColorScheme(scheme: ColorScheme) {
-  mapSettings.colorScheme = scheme
+export function setDistrictLevel(level: DistrictLevel) {
+  mapSettings.districtLevel = level
+  if (level === 'fylke') {
+    mapSettings.selectedKommune = ''
+  }
 }
 
-export function setDotsClustering(enabled: boolean) {
-  mapSettings.dotsClustering = enabled
+export function setColorScheme(scheme: ColorScheme) {
+  mapSettings.colorScheme = scheme
 }

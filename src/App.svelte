@@ -134,7 +134,6 @@
       {loading}
       {dotsState}
       {totalCount}
-      onRefresh={loadCounts}
     />
   </div>
   <div class="map-area">

@@ -24,19 +24,20 @@ export interface MapFilters {
   vatRegisteredOnly: boolean
 }
 
-export type VisualizationMode = 'choropleth' | 'bubbles' | 'dots'
+export type VisualizationMode = 'choropleth' | 'dots'
+export type DistrictLevel = 'fylke' | 'kommune'
 export type ColorScheme = 'blues' | 'oranges' | 'greens' | 'purples'
 
 export interface MapSettings extends MapFilters {
   visualization: VisualizationMode
+  /** Aggregation level when visualization is choropleth (Distrikter) */
+  districtLevel: DistrictLevel
   colorScheme: ColorScheme
   showLegend: boolean
   selectedFylke: string
   selectedKommune: string
-  /** Map zoom at which individual address dots replace clusters */
+  /** Map zoom at which individual address dots use detail styling */
   dotsDetailMinZoom: number
-  /** Group nearby dots into count bubbles when zoomed out */
-  dotsClustering: boolean
 }
 
 export interface MunicipalityCount {
@@ -87,6 +88,11 @@ export interface KommuneFeatureProperties {
   kommunenummer: string
   kommunenavn: string
   name?: string
+}
+
+export interface FylkeFeatureProperties {
+  fylkesnummer: string
+  fylkesnavn: string
 }
 
 export interface BrregEntity {

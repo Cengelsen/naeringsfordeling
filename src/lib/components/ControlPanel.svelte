@@ -2,16 +2,15 @@
   import type { Kommune, DotsLoadState, LoadingState, Organisasjonsform } from '../types'
   import {
     mapSettings,
-    resetSettings,
     setColorScheme,
-    setDotsClustering,
+    setDistrictLevel,
     setVisualization,
     toggleOrgType,
   } from '../stores/settings.svelte'
   import { MIN_DOTS_ZOOM } from '../services/api'
   import { fylkeFromKommune, fylkeName } from '../utils/geo'
 
-  import type { ColorScheme, VisualizationMode } from '../types'
+  import type { ColorScheme, DistrictLevel, VisualizationMode } from '../types'
 
   interface Props {
     orgForms: Organisasjonsform[]
@@ -19,10 +18,9 @@
     loading: LoadingState
     dotsState: DotsLoadState
     totalCount: number
-    onRefresh: () => void
   }
 
-  let { orgForms, kommuner, loading, dotsState, totalCount, onRefresh }: Props = $props()
+  let { orgForms, kommuner, loading, dotsState, totalCount }: Props = $props()
 
   let orgSearch = $state('')
   let showAllOrgForms = $state(false)
@@ -48,6 +46,9 @@
 
   const selectedOrgCount = $derived(mapSettings.orgTypes.length)
   const isDotsView = $derived(mapSettings.visualization === 'dots')
+  const isFylkeLevel = $derived(
+    !isDotsView && mapSettings.districtLevel === 'fylke',
+  )
 
   const filteredKommuner = $derived.by(() => {
     if (!mapSettings.selectedFylke) return kommuner
@@ -69,8 +70,8 @@
       <span class="stat-label">{isDotsView ? 'Prikker' : 'Organisasjoner'}</span>
     </div>
     <div class="stat">
-      <span class="stat-value">{kommuner.length}</span>
-      <span class="stat-label">Kommuner</span>
+      <span class="stat-value">{isFylkeLevel ? fylker.length : kommuner.length}</span>
+      <span class="stat-label">{isFylkeLevel ? 'Fylker' : 'Kommuner'}</span>
     </div>
   </section>
 
@@ -90,8 +91,8 @@
 
   <section class="section">
     <h2>Visualisering</h2>
-    <div class="segmented three">
-      {#each [['choropleth', 'Kart'], ['bubbles', 'Bobler'], ['dots', 'Adresser']] as const as [mode, label] (mode)}
+    <div class="segmented">
+      {#each [['choropleth', 'Distrikter'], ['dots', 'Adresser']] as const as [mode, label] (mode)}
         <button
           type="button"
           class:active={mapSettings.visualization === mode}
@@ -104,25 +105,34 @@
 
     {#if isDotsView}
       <p class="hint">
-        Zoom inn (nivå {MIN_DOTS_ZOOM}+) eller velg fylke/kommune for å vise geokodede adresser.
+        Zoom inn (nivå {MIN_DOTS_ZOOM}+) for å vise geokodede adresser.
       </p>
-    {/if}
+    {:else}
+      <div class="segmented nested">
+        {#each [['fylke', 'Fylker'], ['kommune', 'Kommuner']] as const as [level, label] (level)}
+          <button
+            type="button"
+            class:active={mapSettings.districtLevel === level}
+            onclick={() => setDistrictLevel(level as DistrictLevel)}
+          >
+            {label}
+          </button>
+        {/each}
+      </div>
 
-    <label class="field">
-      <span>Fargepalett</span>
-      <select
-        value={mapSettings.colorScheme}
-        onchange={(e) => setColorScheme(e.currentTarget.value as ColorScheme)}
-        disabled={isDotsView}
-      >
-        <option value="blues">Blå</option>
-        <option value="oranges">Oransje</option>
-        <option value="greens">Grønn</option>
-        <option value="purples">Lilla</option>
-      </select>
-    </label>
+      <label class="field">
+        <span>Fargepalett</span>
+        <select
+          value={mapSettings.colorScheme}
+          onchange={(e) => setColorScheme(e.currentTarget.value as ColorScheme)}
+        >
+          <option value="blues">Blå</option>
+          <option value="oranges">Oransje</option>
+          <option value="greens">Grønn</option>
+          <option value="purples">Lilla</option>
+        </select>
+      </label>
 
-    {#if !isDotsView}
       <label class="checkbox">
         <input type="checkbox" bind:checked={mapSettings.showLegend} />
         Vis forklaring
@@ -137,7 +147,7 @@
         <div class="webgl-notice">
           <p>
             <strong>WebGL er deaktivert</strong> i nettleseren. Kartprikker vises i forenklet
-            modus (uten klynger/vektorfliser).
+            modus (uten vektorfliser).
           </p>
           <p>For full adressevisning i LibreWolf/Firefox:</p>
           <ol>
@@ -148,24 +158,6 @@
           </ol>
         </div>
       {/if}
-      <label class="checkbox">
-        <input
-          type="checkbox"
-          checked={mapSettings.dotsClustering !== false}
-          onchange={(e) => setDotsClustering(e.currentTarget.checked)}
-          disabled={dotsState.webglUnavailable}
-        />
-        Grupper prikker i bobler når du er zoomet ut
-      </label>
-      <p class="hint">
-        {#if dotsState.webglUnavailable}
-          Klynging krever WebGL og er utilgjengelig inntil det er aktivert.
-        {:else if mapSettings.dotsClustering !== false}
-          Prikker slås sammen til bobler til du zoomer inn på gate-nivå.
-        {:else}
-          Alle prikker i kartutsnittet vises enkeltvis, uten bobler.
-        {/if}
-      </p>
       {#if dotsState.loading}
         <p class="hint loading-hint">
           {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Oppdaterer kart…'}
@@ -180,27 +172,29 @@
         </p>
       {/if}
     </section>
+  {:else}
+    {#if !isFylkeLevel}
+      <section class="section">
+        <h2>Kommune</h2>
+        <select bind:value={mapSettings.selectedKommune}>
+          <option value="">Alle / kartutsnitt</option>
+          {#each filteredKommuner as kommune (kommune.nummer)}
+            <option value={kommune.nummer}>{kommune.navn}</option>
+          {/each}
+        </select>
+      </section>
+    {/if}
+
+    <section class="section">
+      <h2>Fylke</h2>
+      <select bind:value={mapSettings.selectedFylke}>
+        <option value="">Hele Norge</option>
+        {#each fylker as fylke (fylke.kode)}
+          <option value={fylke.kode}>{fylke.navn}</option>
+        {/each}
+      </select>
+    </section>
   {/if}
-
-  <section class="section">
-    <h2>Kommune</h2>
-    <select bind:value={mapSettings.selectedKommune}>
-      <option value="">Alle / kartutsnitt</option>
-      {#each filteredKommuner as kommune (kommune.nummer)}
-        <option value={kommune.nummer}>{kommune.navn}</option>
-      {/each}
-    </select>
-  </section>
-
-  <section class="section">
-    <h2>Fylke</h2>
-    <select bind:value={mapSettings.selectedFylke}>
-      <option value="">Hele Norge</option>
-      {#each fylker as fylke (fylke.kode)}
-        <option value={fylke.kode}>{fylke.navn}</option>
-      {/each}
-    </select>
-  </section>
 
   <section class="section">
     <h2>Organisasjonstype</h2>
@@ -254,13 +248,6 @@
       Kun MVA-registrerte
     </label>
   </section>
-
-  <footer class="panel-footer">
-    <button type="button" class="primary" onclick={onRefresh} disabled={loading.loading}>
-      Oppdater data
-    </button>
-    <button type="button" class="secondary" onclick={resetSettings}>Tilbakestill</button>
-  </footer>
 </aside>
 
 <style>
@@ -370,17 +357,20 @@
     margin-bottom: 0.75rem;
   }
 
-  .segmented.three {
-    grid-template-columns: repeat(3, 1fr);
+  .segmented.nested {
+    margin-bottom: 0.85rem;
+  }
+
+  .segmented.nested button {
+    font-size: 0.8rem;
+    padding: 0.45rem 0.65rem;
   }
 
   .loading-hint {
     color: #7dd3fc;
   }
 
-  .segmented button,
-  .primary,
-  .secondary {
+  .segmented button {
     border: 1px solid #334155;
     background: #1e293b;
     color: #e2e8f0;
@@ -391,9 +381,7 @@
     transition: background 0.15s, border-color 0.15s;
   }
 
-  .segmented button:hover,
-  .primary:hover:not(:disabled),
-  .secondary:hover {
+  .segmented button:hover {
     background: #334155;
   }
 
@@ -515,23 +503,5 @@
     font-size: 0.8rem;
     cursor: pointer;
     display: block;
-  }
-
-  .panel-footer {
-    margin-top: auto;
-    padding: 1rem 1.25rem 1.25rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .primary {
-    background: #0284c7;
-    border-color: #0369a1;
-  }
-
-  .primary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
   }
 </style>

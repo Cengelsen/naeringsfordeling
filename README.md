@@ -9,7 +9,7 @@ All data synkroniseres nattlig fra BRREG til en **SQLite-database** via GitHub A
 - Interaktivt kart over hele Norge med kommuner
 - Filtrering på organisasjonstype (AS, ENK, BRL, osv.)
 - Filtrering på fylke, kommune, konkurs, avvikling og MVA-registrering
-- Tre visualiseringsmoduser: fargekart (koroplet), bobler og adresser (prikker)
+- To visualiseringsmoduser: distrikter (fylker/kommuner) og adresser (prikker)
 - **Nightly sync** via GitHub Actions til SQLite + forhåndsbygde PMTiles
 - Prikker lastes primært fra vektorfliser; API/SQLite brukes som fallback
 
@@ -190,10 +190,9 @@ Hvis brukeren skrur av konkurs-/avviklingsfilter eller krever kun MVA-registrert
 
 **GeoJSON-modus** (API eller JSON-tiles):
 
-- Source med valgfri `cluster: true` (`clusterRadius: 50`, `clusterMaxZoom = dotsDetailMinZoom - 1`)
-- Lag: `org-clusters`, `org-cluster-count`, `org-points`
+- Source uten clustering; lag `org-points`
 - Samme koordinat får litt jitter slik at overlappende punkter skilles
-- Klikk: `queryRenderedFeatures` (10 px) → popup via `/api/organizations/:orgnr`, eller cluster-expansion
+- Klikk: `queryRenderedFeatures` (10 px) → popup via `/api/organizations/:orgnr`
 
 Vite setter `Accept-Ranges: bytes` på `.pmtiles` slik at klienten kan hente fliser med HTTP range requests i `yarn dev` / `yarn preview`.
 

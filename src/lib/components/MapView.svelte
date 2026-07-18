@@ -10,13 +10,14 @@
     OrganizationPoint,
     Organisasjonsform,
   } from '../types'
-  import { colorForValue } from '../utils/colors'
+  import { colorForValue, kommuneScaleMax, roundUpTo10k } from '../utils/colors'
   import {
-    centroid,
+    buildFylkeGeojson,
     fylkeFromKommune,
     geoBoundsIntersects,
     kommuneBoundsIndex,
     kommuneFeatures,
+    type FylkeFeature,
     type GeoBounds,
     type KommuneFeature,
   } from '../utils/geo'
@@ -51,7 +52,6 @@
   let mapContainer: HTMLDivElement
   let map: L.Map | null = null
   let geoLayer: L.GeoJSON | null = null
-  let bubbleLayer: L.LayerGroup | null = null
   let dotsController: DotsLayerController | null = null
   let points = $state<OrganizationPoint[]>([])
   let allPoints = $state<OrganizationPoint[]>([])
@@ -81,7 +81,28 @@
   )
 
   const countMap = $derived(new Map(counts.map((c) => [c.kommunenummer, c.count])))
-  const maxCount = $derived(Math.max(...counts.map((c) => c.count), 1))
+
+  const fylkeCountMap = $derived.by(() => {
+    const map = new Map<string, number>()
+    for (const { kommunenummer, count } of counts) {
+      const fylke = fylkeFromKommune(kommunenummer)
+      map.set(fylke, (map.get(fylke) ?? 0) + count)
+    }
+    return map
+  })
+
+  const isFylkeLevel = $derived(
+    settings.visualization === 'choropleth' && settings.districtLevel === 'fylke',
+  )
+
+  const maxCount = $derived.by(() => {
+    if (isFylkeLevel) {
+      return roundUpTo10k(Math.max(...fylkeCountMap.values(), 1))
+    }
+
+    return kommuneScaleMax(counts.map((c) => c.count))
+  })
+
   const totalVisible = $derived(
     settings.visualization === 'dots'
       ? vectorTilesReady
@@ -89,6 +110,16 @@
         : filterPointsByOrgTypes(allPoints, settings.orgTypes).length
       : counts.reduce((sum, c) => sum + c.count, 0),
   )
+
+  const fylkeGeojson = $derived(geojson ? buildFylkeGeojson(geojson) : null)
+
+  function kommuneCount(kommunenummer: string): number {
+    return countMap.get(kommunenummer) ?? 0
+  }
+
+  function fylkeCount(fylkesnummer: string): number {
+    return fylkeCountMap.get(fylkesnummer) ?? 0
+  }
 
   const orgTypeLegendItems = $derived.by(() => {
     if (vectorTilesReady && vectorTilesManifest) {
@@ -114,12 +145,19 @@
     })
   })
 
-  function isVisible(kommunenummer: string): boolean {
+  function isKommuneVisible(kommunenummer: string): boolean {
     if (settings.selectedKommune) {
       return kommunenummer === settings.selectedKommune
     }
     if (settings.selectedFylke) {
       return fylkeFromKommune(kommunenummer) === settings.selectedFylke
+    }
+    return true
+  }
+
+  function isFylkeVisible(fylkesnummer: string): boolean {
+    if (settings.selectedFylke) {
+      return fylkesnummer === settings.selectedFylke
     }
     return true
   }
@@ -139,12 +177,9 @@
 
   function dataFiltersKey(): string {
     return [
-      settings.selectedFylke,
-      settings.selectedKommune,
       settings.excludeKonkurs,
       settings.excludeUnderAvvikling,
       settings.vatRegisteredOnly,
-      settings.dotsClustering,
     ].join('|')
   }
 
@@ -198,7 +233,7 @@
 
     const { controller, usedWebgl } = createDotsLayer(map, {
       dotsDetailMinZoom: settings.dotsDetailMinZoom,
-      dotsClustering: settings.dotsClustering !== false,
+      dotsClustering: false,
       vectorTilesUrl: vectorUrl,
       orgTypesForColors,
       onPointClick: showOrganizationPopup,
@@ -246,27 +281,17 @@
     const bounds = mapGeoBounds(map.getBounds())
     const zoom = map.getZoom()
 
-    if (settings.selectedKommune) return [settings.selectedKommune]
+    if (zoom < MIN_DOTS_ZOOM) {
+      return []
+    }
 
     const matches: string[] = []
     for (const feature of kommuneFeatures(geojson)) {
       const kommunenummer = feature.properties.kommunenummer
-      if (!isVisible(kommunenummer)) continue
-
       const featureBounds = kommuneBoundsByNummer.get(kommunenummer)
       if (featureBounds && geoBoundsIntersects(bounds, featureBounds)) {
         matches.push(kommunenummer)
       }
-    }
-
-    if (settings.selectedFylke && matches.length === 0) {
-      return kommuneFeatures(geojson)
-        .map((f) => f.properties.kommunenummer)
-        .filter((n) => fylkeFromKommune(n) === settings.selectedFylke)
-    }
-
-    if (zoom < MIN_DOTS_ZOOM && !settings.selectedFylke) {
-      return []
     }
 
     return matches
@@ -307,7 +332,7 @@
       skipped: 0,
       kommuner,
       message: truncated
-        ? 'Viser maks antall organisasjoner for utsnittet – zoom inn eller velg kommune'
+        ? 'Viser maks antall organisasjoner for utsnittet – zoom inn for flere detaljer'
         : null,
     })
   }
@@ -333,7 +358,7 @@
       kommunenumre: targetKommuner,
       filters: dataFiltersKey(),
       zoom,
-      clustering: settings.dotsClustering !== false,
+      clustering: false,
     })
 
     if (dotsCache.getMemory(key)) return
@@ -347,9 +372,7 @@
         const result = await fetchOrganizationPoints(settings, {
           bbox: expanded,
           kommunenumre: targetKommuner,
-          selectedFylke: settings.selectedFylke,
-          zoom: settings.dotsClustering !== false ? zoom : undefined,
-          limit: settings.dotsClustering !== false ? undefined : MAX_VIEWPORT_DOTS,
+          limit: MAX_VIEWPORT_DOTS,
         })
         await dotsCache.set(key, {
           points: result.points,
@@ -377,15 +400,7 @@
     const bounds = map.getBounds()
     const bbox = mapBbox(bounds)
 
-    const clustering = settings.dotsClustering !== false
-    const useViewportBbox = !clustering
-
-    if (
-      clustering &&
-      targetKommuner.length === 0 &&
-      !settings.selectedKommune &&
-      !settings.selectedFylke
-    ) {
+    if (targetKommuner.length === 0) {
       points = []
       allPoints = []
       dotsController?.setPoints([])
@@ -406,7 +421,7 @@
       kommunenumre: targetKommuner,
       filters: dataFiltersKey(),
       zoom,
-      clustering: settings.dotsClustering !== false,
+      clustering: false,
     })
 
     const cached = await dotsCache.get(cacheKey)
@@ -427,11 +442,9 @@
 
     try {
       const result = await fetchOrganizationPoints(settings, {
-        bbox: useViewportBbox || !(settings.selectedKommune || settings.selectedFylke) ? bbox : undefined,
+        bbox,
         kommunenumre: targetKommuner,
-        selectedFylke: settings.selectedFylke,
-        zoom: useViewportBbox ? undefined : zoom,
-        limit: useViewportBbox ? MAX_VIEWPORT_DOTS : undefined,
+        limit: MAX_VIEWPORT_DOTS,
       })
 
       if (token !== loadToken) return
@@ -478,10 +491,10 @@
     scheduleDotsReload(0)
   }
 
-  function styleFeature(feature?: KommuneFeature) {
+  function styleKommuneFeature(feature?: KommuneFeature) {
     const kommunenummer = feature?.properties.kommunenummer ?? ''
-    const visible = isVisible(kommunenummer)
-    const count = visible ? (countMap.get(kommunenummer) ?? 0) : 0
+    const visible = isKommuneVisible(kommunenummer)
+    const count = visible ? kommuneCount(kommunenummer) : 0
 
     if (settings.visualization === 'dots') {
       return {
@@ -502,18 +515,25 @@
     }
   }
 
-  function bindFeatureEvents(layer: L.Layer, feature: KommuneFeature) {
-    const props = feature.properties
-    const count = countMap.get(props.kommunenummer) ?? 0
-    layer.bindPopup(
-      `<strong>${props.kommunenavn ?? props.name}</strong><br/>
-       Kommune ${props.kommunenummer}<br/>
-       <strong>${count.toLocaleString('nb-NO')}</strong> organisasjoner`,
-    )
+  function styleFylkeFeature(feature?: FylkeFeature) {
+    const fylkesnummer = feature?.properties.fylkesnummer ?? ''
+    const visible = isFylkeVisible(fylkesnummer)
+    const count = visible ? fylkeCount(fylkesnummer) : 0
+
+    return {
+      fillColor: colorForValue(count, maxCount, settings.colorScheme),
+      weight: visible ? 1 : 0.3,
+      opacity: visible ? 1 : 0.35,
+      color: '#475569',
+      fillOpacity: visible ? 0.78 : 0.15,
+    }
+  }
+
+  function bindHoverHighlight(layer: L.Layer) {
     layer.on({
       mouseover: (e) => {
         const target = e.target as L.Path
-        target.setStyle({ weight: 2, color: '#0ea5e9' })
+        target.setStyle({ weight: 2.5, color: '#0ea5e9', opacity: 1 })
         target.bringToFront()
       },
       mouseout: (e) => {
@@ -522,61 +542,47 @@
     })
   }
 
-  function clearAggregateLayers() {
-    bubbleLayer?.remove()
-    bubbleLayer = null
+  function bindKommuneEvents(layer: L.Layer, feature: KommuneFeature) {
+    const props = feature.properties
+    const count = kommuneCount(props.kommunenummer)
+    layer.bindPopup(
+      `<strong>${props.kommunenavn ?? props.name}</strong><br/>
+       Kommune ${props.kommunenummer}<br/>
+       <strong>${count.toLocaleString('nb-NO')}</strong> organisasjoner`,
+    )
+    bindHoverHighlight(layer)
+  }
+
+  function bindFylkeEvents(layer: L.Layer, feature: FylkeFeature) {
+    const props = feature.properties
+    const count = fylkeCount(props.fylkesnummer)
+    layer.bindPopup(
+      `<strong>${props.fylkesnavn}</strong><br/>
+       Fylke ${props.fylkesnummer}<br/>
+       <strong>${count.toLocaleString('nb-NO')}</strong> organisasjoner`,
+    )
+    bindHoverHighlight(layer)
   }
 
   function renderChoropleth() {
     if (!map || !geojson) return
-    clearAggregateLayers()
     removeDotsController()
 
     if (geoLayer) geoLayer.remove()
 
-    geoLayer = L.geoJSON(geojson, {
-      style: (feature) => styleFeature(feature as KommuneFeature),
-      onEachFeature: (feature, layer) => bindFeatureEvents(layer, feature as KommuneFeature),
-    }).addTo(map)
-  }
-
-  function bubbleRadius(count: number): number {
-    if (count <= 0) return 0
-    return Math.max(4, Math.min(28, Math.sqrt(count / maxCount) * 28))
-  }
-
-  function renderBubbles() {
-    if (!map || !geojson) return
-    geoLayer?.remove()
-    geoLayer = null
-    removeDotsController()
-
-    if (bubbleLayer) bubbleLayer.remove()
-
-    bubbleLayer = L.layerGroup().addTo(map)
-
-    for (const feature of kommuneFeatures(geojson)) {
-      const kommunenummer = feature.properties.kommunenummer
-      if (!isVisible(kommunenummer)) continue
-
-      const count = countMap.get(kommunenummer) ?? 0
-      if (count <= 0) continue
-
-      const [lat, lng] = centroid(feature)
-      const circle = L.circleMarker([lat, lng], {
-        radius: bubbleRadius(count),
-        fillColor: colorForValue(count, maxCount, settings.colorScheme),
-        color: '#1e293b',
-        weight: 1,
-        fillOpacity: 0.75,
-      })
-
-      circle.bindPopup(
-        `<strong>${feature.properties.kommunenavn ?? feature.properties.name}</strong><br/>
-         ${count.toLocaleString('nb-NO')} organisasjoner`,
-      )
-      circle.addTo(bubbleLayer)
+    if (isFylkeLevel) {
+      if (!fylkeGeojson) return
+      geoLayer = L.geoJSON(fylkeGeojson, {
+        style: (feature) => styleFylkeFeature(feature as FylkeFeature),
+        onEachFeature: (feature, layer) => bindFylkeEvents(layer, feature as FylkeFeature),
+      }).addTo(map)
+      return
     }
+
+    geoLayer = L.geoJSON(geojson, {
+      style: (feature) => styleKommuneFeature(feature as KommuneFeature),
+      onEachFeature: (feature, layer) => bindKommuneEvents(layer, feature as KommuneFeature),
+    }).addTo(map)
   }
 
   function renderBaseKommuner() {
@@ -585,12 +591,7 @@
     if (geoLayer) geoLayer.remove()
 
     geoLayer = L.geoJSON(geojson, {
-      style: (feature) => styleFeature(feature as KommuneFeature),
-      onEachFeature: (feature, layer) => {
-        if (settings.visualization !== 'dots') {
-          bindFeatureEvents(layer, feature as KommuneFeature)
-        }
-      },
+      style: (feature) => styleKommuneFeature(feature as KommuneFeature),
     }).addTo(map)
   }
 
@@ -600,12 +601,6 @@
     if (settings.visualization === 'choropleth') {
       removeDotsController()
       renderChoropleth()
-      return
-    }
-
-    if (settings.visualization === 'bubbles') {
-      removeDotsController()
-      renderBubbles()
       return
     }
 
@@ -673,6 +668,7 @@
 
   $effect(() => {
     settings.visualization
+    settings.districtLevel
     settings.colorScheme
     settings.selectedFylke
     settings.selectedKommune
@@ -687,9 +683,6 @@
     settings.excludeKonkurs
     settings.excludeUnderAvvikling
     settings.vatRegisteredOnly
-    settings.dotsClustering
-    settings.selectedFylke
-    settings.selectedKommune
 
     dotsCache.clear()
     if (dotsController && dotsControllerUsesVector !== vectorTilesReady) {

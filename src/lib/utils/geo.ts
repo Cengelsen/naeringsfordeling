@@ -1,7 +1,9 @@
-import type { Feature, FeatureCollection, Geometry } from 'geojson'
-import type { KommuneFeatureProperties } from '../types'
+import type { Feature, FeatureCollection, Geometry, MultiPolygon, Polygon } from 'geojson'
+import { union } from 'polyclip-ts'
+import type { FylkeFeatureProperties, KommuneFeatureProperties } from '../types'
 
 export type KommuneFeature = Feature<Geometry, KommuneFeatureProperties>
+export type FylkeFeature = Feature<Polygon | MultiPolygon, FylkeFeatureProperties>
 
 export function fylkeFromKommune(kommunenummer: string): string {
   return kommunenummer.slice(0, 2)
@@ -34,34 +36,60 @@ export function fylkeName(kode: string): string {
   return FYLKE_NAMES[kode] ?? `Fylke ${kode}`
 }
 
-export function centroid(feature: KommuneFeature): [number, number] {
-  const geometry = feature.geometry
-  let sumLat = 0
-  let sumLng = 0
-  let count = 0
-
-  const addRing = (ring: number[][]) => {
-    for (const [lng, lat] of ring) {
-      sumLng += lng
-      sumLat += lat
-      count += 1
-    }
-  }
-
-  if (geometry.type === 'Polygon') {
-    addRing(geometry.coordinates[0])
-  } else if (geometry.type === 'MultiPolygon') {
-    for (const polygon of geometry.coordinates) {
-      addRing(polygon[0])
-    }
-  }
-
-  if (count === 0) return [0, 0]
-  return [sumLat / count, sumLng / count]
-}
-
 export function kommuneFeatures(geojson: FeatureCollection): KommuneFeature[] {
   return geojson.features as KommuneFeature[]
+}
+
+function geometryToMultiPolygonCoords(geometry: Geometry): Polygon['coordinates'][] {
+  if (geometry.type === 'Polygon') return [geometry.coordinates]
+  if (geometry.type === 'MultiPolygon') return geometry.coordinates
+  return []
+}
+
+/** Dissolve kommune polygons into one feature per fylke (cached per input reference). */
+const fylkeGeojsonCache = new WeakMap<FeatureCollection, FeatureCollection<Polygon | MultiPolygon, FylkeFeatureProperties>>()
+
+export function buildFylkeGeojson(
+  kommunerGeojson: FeatureCollection,
+): FeatureCollection<Polygon | MultiPolygon, FylkeFeatureProperties> {
+  const cached = fylkeGeojsonCache.get(kommunerGeojson)
+  if (cached) return cached
+
+  const byFylke = new Map<string, Polygon['coordinates'][][]>()
+  for (const feature of kommuneFeatures(kommunerGeojson)) {
+    const kode = fylkeFromKommune(feature.properties.kommunenummer)
+    const geoms = byFylke.get(kode) ?? []
+    geoms.push(geometryToMultiPolygonCoords(feature.geometry))
+    byFylke.set(kode, geoms)
+  }
+
+  const features: FylkeFeature[] = []
+  for (const [fylkesnummer, geoms] of byFylke) {
+    if (geoms.length === 0) continue
+    const merged = union(...geoms)
+    if (merged.length === 0) continue
+
+    features.push({
+      type: 'Feature',
+      properties: {
+        fylkesnummer,
+        fylkesnavn: fylkeName(fylkesnummer),
+      },
+      geometry:
+        merged.length === 1
+          ? { type: 'Polygon', coordinates: merged[0] }
+          : { type: 'MultiPolygon', coordinates: merged },
+    })
+  }
+
+  features.sort((a, b) => a.properties.fylkesnummer.localeCompare(b.properties.fylkesnummer))
+
+  const collection: FeatureCollection<Polygon | MultiPolygon, FylkeFeatureProperties> = {
+    type: 'FeatureCollection',
+    features,
+  }
+  fylkeGeojsonCache.set(kommunerGeojson, collection)
+  return collection
 }
 
 export interface GeoBounds {

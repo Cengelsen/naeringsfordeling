@@ -157,7 +157,7 @@ export async function fetchEntity(orgnr: string): Promise<BrregEntity | null> {
     `BRREG enhet ${orgnr}`,
   )
 
-  if (response.status === 404) return null
+  if (response.status === 404 || response.status === 410) return null
   if (!response.ok) {
     throw new Error(`BRREG enhet ${orgnr} feilet (${response.status})`)
   }
