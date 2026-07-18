@@ -59,6 +59,8 @@ export interface DotsLoadState {
   skipped: number
   kommuner: number
   message: string | null
+  /** True when MapLibre could not start (e.g. WebGL disabled in LibreWolf) */
+  webglUnavailable?: boolean
 }
 
 export interface Organization {

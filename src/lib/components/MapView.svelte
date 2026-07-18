@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import L from 'leaflet'
   import type { FeatureCollection } from 'geojson'
   import type {
@@ -34,10 +34,7 @@
     vectorTilesSourceUrl,
     type VectorTilesManifest,
   } from '../map/vectorTiles'
-  import {
-    createMaplibreDotsLayer,
-    type MaplibreDotsController,
-  } from '../map/maplibreDotsLayer'
+  import { createDotsLayer, type DotsLayerController } from '../map/dotsLayer'
   import Legend from './Legend.svelte'
   import OrgTypeLegend from './OrgTypeLegend.svelte'
 
@@ -55,7 +52,7 @@
   let map: L.Map | null = null
   let geoLayer: L.GeoJSON | null = null
   let bubbleLayer: L.LayerGroup | null = null
-  let dotsController: MaplibreDotsController | null = null
+  let dotsController: DotsLayerController | null = null
   let points = $state<OrganizationPoint[]>([])
   let allPoints = $state<OrganizationPoint[]>([])
   let dotsState = $state<DotsLoadState>({
@@ -73,9 +70,14 @@
   let kommuneBoundsByNummer = new Map<string, GeoBounds>()
   let vectorTilesManifest = $state<VectorTilesManifest | null>(null)
   let vectorTilesDisabled = $state(false)
+  let webglUnavailable = $state(false)
+  let webglBannerDismissed = $state(false)
 
   const vectorTilesReady = $derived(
-    vectorTilesManifest !== null && !vectorTilesDisabled && canUseStaticTiles(settings),
+    vectorTilesManifest !== null &&
+      !vectorTilesDisabled &&
+      !webglUnavailable &&
+      canUseStaticTiles(settings),
   )
 
   const countMap = $derived(new Map(counts.map((c) => [c.kommunenummer, c.count])))
@@ -193,9 +195,8 @@
     }
 
     dotsController?.remove()
-    dotsControllerUsesVector = vectorMode
 
-    dotsController = createMaplibreDotsLayer(map, {
+    const { controller, usedWebgl } = createDotsLayer(map, {
       dotsDetailMinZoom: settings.dotsDetailMinZoom,
       dotsClustering: settings.dotsClustering !== false,
       vectorTilesUrl: vectorUrl,
@@ -203,6 +204,14 @@
       onPointClick: showOrganizationPopup,
       onVectorTilesError: disableVectorTiles,
     })
+
+    dotsController = controller
+    dotsControllerUsesVector = usedWebgl && vectorMode
+
+    if (!usedWebgl) {
+      webglUnavailable = true
+      updateDotsState({ webglUnavailable: true })
+    }
   }
 
   let dotsControllerUsesVector = false
@@ -264,8 +273,22 @@
   }
 
   function updateDotsState(partial: Partial<DotsLoadState>) {
-    dotsState = { ...dotsState, ...partial }
-    onDotsStateChange?.(dotsState)
+    const current = untrack(() => dotsState)
+    const next = { ...current, ...partial }
+    if (
+      next.loading === current.loading &&
+      next.phase === current.phase &&
+      next.organizations === current.organizations &&
+      next.geocoded === current.geocoded &&
+      next.skipped === current.skipped &&
+      next.kommuner === current.kommuner &&
+      next.message === current.message &&
+      next.webglUnavailable === current.webglUnavailable
+    ) {
+      return
+    }
+    dotsState = next
+    onDotsStateChange?.(next)
   }
 
   function applyPoints(nextPoints: OrganizationPoint[], truncated: boolean, kommuner: number) {
@@ -291,9 +314,11 @@
 
   function applyOrgTypeVisibility() {
     dotsController?.setVisibleOrgTypes(settings.orgTypes)
+    if (untrack(() => vectorTilesReady)) return
+    const count = filterPointsByOrgTypes(allPoints, settings.orgTypes).length
     updateDotsState({
-      organizations: filterPointsByOrgTypes(allPoints, settings.orgTypes).length,
-      geocoded: filterPointsByOrgTypes(allPoints, settings.orgTypes).length,
+      organizations: count,
+      geocoded: count,
     })
   }
 
@@ -670,14 +695,14 @@
   $effect(() => {
     if (settings.visualization !== 'dots') return
     settings.orgTypes
-    applyOrgTypeVisibility()
+    untrack(() => applyOrgTypeVisibility())
   })
 </script>
 
 <div class="map-shell">
   <div class="map" bind:this={mapContainer}></div>
 
-  {#if settings.visualization === 'dots' && settings.showLegend && orgTypeLegendItems.length > 0}
+  {#if settings.visualization === 'dots' && orgTypeLegendItems.length > 0}
     <div class="legend-wrap">
       <OrgTypeLegend items={orgTypeLegendItems} />
     </div>
@@ -698,13 +723,25 @@
     <div class="dots-status">
       <span>{dotsState.message}</span>
     </div>
+  {:else if settings.visualization === 'dots' && webglUnavailable && !webglBannerDismissed}
+    <div class="dots-status webgl-banner">
+      <strong>WebGL er deaktivert</strong>
+      <span>
+        Adressevisning kjører i forenklet modus. Aktiver WebGL i nettleseren for full ytelse
+        (LibreWolf/Firefox: <code>about:config</code> → <code>webgl.disabled</code> = false),
+        og last siden på nytt.
+      </span>
+      <button type="button" class="banner-dismiss" onclick={() => (webglBannerDismissed = true)}>
+        Skjul
+      </button>
+    </div>
   {/if}
 
   <div class="attribution">
     {#if settings.visualization === 'dots'}
       {totalVisible.toLocaleString('nb-NO')} prikk{totalVisible === 1 ? '' : 'er'} ·
       {dotsState.skipped > 0 ? `${dotsState.skipped.toLocaleString('nb-NO')} uten adresse · ` : ''}
-      {vectorTilesReady ? 'vektorfliser' : 'SQLite-database'}
+      {vectorTilesReady ? 'vektorfliser' : webglUnavailable ? 'Leaflet-fallback' : 'SQLite-database'}
     {:else}
       {totalVisible.toLocaleString('nb-NO')} organisasjoner i visningen
     {/if}
@@ -720,6 +757,9 @@
   }
 
   .map {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
     width: 100%;
     height: 100%;
   }
@@ -729,6 +769,7 @@
     left: 1rem;
     bottom: 2.5rem;
     z-index: 1000;
+    pointer-events: auto;
   }
 
   .dots-status {
@@ -755,8 +796,37 @@
     background: rgba(15, 23, 42, 0.78);
   }
 
+  .dots-status.webgl-banner {
+    pointer-events: auto;
+    gap: 0.45rem;
+    text-align: left;
+    border: 1px solid #334155;
+  }
+
   .dots-status strong {
     color: #7dd3fc;
+  }
+
+  .dots-status code {
+    font-family: ui-monospace, monospace;
+    font-size: 0.78em;
+    color: #fde68a;
+  }
+
+  .banner-dismiss {
+    align-self: flex-end;
+    margin-top: 0.15rem;
+    padding: 0.25rem 0.55rem;
+    border: 1px solid #334155;
+    border-radius: 0.35rem;
+    background: #1e293b;
+    color: #e2e8f0;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+
+  .banner-dismiss:hover {
+    background: #334155;
   }
 
   .attribution {
@@ -779,8 +849,11 @@
     outline: none;
   }
 
-  :global(.leaflet-marker-pane .leaflet-gl-layer) {
+  :global(.leaflet-marker-pane .leaflet-gl-layer),
+  :global(.leaflet-marker-pane .leaflet-gl-layer .maplibregl-map),
+  :global(.leaflet-marker-pane .leaflet-gl-layer .maplibregl-canvas-container),
+  :global(.leaflet-marker-pane .leaflet-gl-layer canvas) {
     z-index: 650 !important;
-    pointer-events: none;
+    pointer-events: none !important;
   }
 </style>

@@ -116,7 +116,18 @@ export function createMaplibreDotsLayer(
     interactive: false,
     attributionControl: false,
     pane: 'markerPane',
-  } as Parameters<typeof L.maplibreGL>[0]).addTo(map)
+  } as Parameters<typeof L.maplibreGL>[0])
+
+  try {
+    glLayer.addTo(map)
+  } catch (error) {
+    try {
+      glLayer.remove()
+    } catch {
+      // Layer may already be partially torn down after WebGL init failure
+    }
+    throw error
+  }
 
   const container = glLayer.getContainer()
   container.style.zIndex = '650'
@@ -124,6 +135,11 @@ export function createMaplibreDotsLayer(
   container.style.background = 'transparent'
 
   const mlMap = glLayer.getMaplibreMap()
+  if (!mlMap) {
+    glLayer.remove()
+    throw new Error('Failed to initialize MapLibre map (WebGL unavailable)')
+  }
+
   mlMap.dragPan.disable()
   mlMap.scrollZoom.disable()
   mlMap.boxZoom.disable()

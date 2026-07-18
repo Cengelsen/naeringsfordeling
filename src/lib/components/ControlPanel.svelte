@@ -122,25 +122,45 @@
       </select>
     </label>
 
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={mapSettings.showLegend} />
-      Vis forklaring
-    </label>
+    {#if !isDotsView}
+      <label class="checkbox">
+        <input type="checkbox" bind:checked={mapSettings.showLegend} />
+        Vis forklaring
+      </label>
+    {/if}
   </section>
 
   {#if isDotsView}
     <section class="section">
       <h2>Adresser</h2>
+      {#if dotsState.webglUnavailable}
+        <div class="webgl-notice">
+          <p>
+            <strong>WebGL er deaktivert</strong> i nettleseren. Kartprikker vises i forenklet
+            modus (uten klynger/vektorfliser).
+          </p>
+          <p>For full adressevisning i LibreWolf/Firefox:</p>
+          <ol>
+            <li>Åpne <code>about:config</code></li>
+            <li>Søk etter <code>webgl.disabled</code></li>
+            <li>Sett verdien til <code>false</code></li>
+            <li>Last siden på nytt</li>
+          </ol>
+        </div>
+      {/if}
       <label class="checkbox">
         <input
           type="checkbox"
           checked={mapSettings.dotsClustering !== false}
           onchange={(e) => setDotsClustering(e.currentTarget.checked)}
+          disabled={dotsState.webglUnavailable}
         />
         Grupper prikker i bobler når du er zoomet ut
       </label>
       <p class="hint">
-        {#if mapSettings.dotsClustering !== false}
+        {#if dotsState.webglUnavailable}
+          Klynging krever WebGL og er utilgjengelig inntil det er aktivert.
+        {:else if mapSettings.dotsClustering !== false}
           Prikker slås sammen til bobler til du zoomer inn på gate-nivå.
         {:else}
           Alle prikker i kartutsnittet vises enkeltvis, uten bobler.
@@ -420,6 +440,44 @@
     margin: -0.35rem 0 0.65rem;
     font-size: 0.8rem;
     color: #94a3b8;
+  }
+
+  .webgl-notice {
+    margin: 0 0 0.85rem;
+    padding: 0.75rem;
+    border: 1px solid #334155;
+    border-radius: 0.5rem;
+    background: #1e293b;
+    font-size: 0.8rem;
+    color: #cbd5e1;
+    line-height: 1.4;
+  }
+
+  .webgl-notice p {
+    margin: 0 0 0.5rem;
+  }
+
+  .webgl-notice p:last-child {
+    margin-bottom: 0;
+  }
+
+  .webgl-notice strong {
+    color: #fde68a;
+  }
+
+  .webgl-notice ol {
+    margin: 0.35rem 0 0;
+    padding-left: 1.2rem;
+  }
+
+  .webgl-notice li {
+    margin-bottom: 0.25rem;
+  }
+
+  .webgl-notice code {
+    font-family: ui-monospace, monospace;
+    font-size: 0.85em;
+    color: #7dd3fc;
   }
 
   .org-list {
