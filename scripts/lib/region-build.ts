@@ -1,0 +1,425 @@
+import { existsSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import type Database from 'better-sqlite3'
+import {
+  DEFAULT_REFERENCE_CACHE_DIR,
+  brregReferenceAvailable,
+  ensureKommunerCache,
+  importBrregEnheterFromCache,
+  importBrregUnderenheterFromCache,
+  loadKommunerCache,
+  readReferenceManifest,
+  referencePath,
+  BRREG_ENHETER_FILE,
+  BRREG_UNDERENHETER_FILE,
+} from './reference-cache.js'
+import {
+  downloadAndImportRegionKartverket,
+  kartverketAddressCount,
+  kartverketBulkAvailable,
+} from './kartverket-bulk.js'
+import {
+  backfillMetadataFromKartverketBulk,
+  geocodeAllFromKartverketBulk,
+} from './local-geocode.js'
+import { getStats, openDatabase, rebuildOrgsRtree, removeDatabaseFiles, setSyncState } from './db.js'
+import { entityKommunenummer, upsertEntity, upsertUnderenhet } from './organizations.js'
+import {
+  importRegionFromNationalDb,
+  listKommunerFromNationalDb,
+  nationalDatabaseAvailable,
+  resolveNationalDbPath,
+  resolveRegionDataSource,
+  type RegionDataSource,
+} from './national-db-slice.js'
+
+export const DEFAULT_REGIONS_DIR = process.env.REGIONS_OUTPUT_DIR ?? 'data/regions'
+
+export interface RegionBuildOptions {
+  /** Two-digit fylkeskode, e.g. "46". */
+  fylke?: string
+  /** Four-digit kommunenummer, e.g. "4601". */
+  kommune?: string
+  outputPath: string
+  fresh?: boolean
+  skipKartverket?: boolean
+  skipBrreg?: boolean
+  skipGeocode?: boolean
+  skipUnderenheter?: boolean
+  reuseDownloads?: boolean
+  refreshDownloads?: boolean
+  /** Root for reference cache (BRREG bulk + Kartverket zips). */
+  referenceCacheDir?: string
+  /** Path to national SQLite (default: data/norway.db). */
+  nationalDbPath?: string
+  /** auto = cache if available, else national DB. */
+  sourceMode?: 'auto' | 'cache' | 'national'
+  /** @deprecated Use referenceCacheDir */
+  cacheDir?: string
+}
+
+export interface RegionDescriptor {
+  kind: 'fylke' | 'kommune'
+  code: string
+  name: string
+  slug: string
+  kommuner: string[]
+}
+
+export function slugifyRegionName(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/æ/g, 'ae')
+    .replace(/ø/g, 'o')
+    .replace(/å/g, 'a')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+export function defaultRegionOutputPath(descriptor: RegionDescriptor, baseDir = DEFAULT_REGIONS_DIR): string {
+  const subdir = descriptor.kind === 'fylke' ? 'fylker' : 'kommuner'
+  return join(baseDir, subdir, `${descriptor.code}-${descriptor.slug}.db`)
+}
+
+export function resolveReferenceCacheDir(options: {
+  referenceCacheDir?: string
+  cacheDir?: string
+}): string {
+  return options.referenceCacheDir ?? options.cacheDir ?? DEFAULT_REFERENCE_CACHE_DIR
+}
+
+export function kartverketCacheDirForReference(referenceCacheDir: string): string {
+  return process.env.KARTVERKET_CACHE_DIR ?? join(referenceCacheDir, 'kartverket')
+}
+
+async function loadKommunerForBuild(
+  referenceCacheDir: string,
+  options: { localOnly?: boolean; nationalDbPath?: string } = {},
+) {
+  const cached = loadKommunerCache(referenceCacheDir)
+  if (cached) return cached
+
+  const nationalPath = resolveNationalDbPath(options.nationalDbPath)
+  if (nationalDatabaseAvailable(nationalPath)) {
+    const fromNational = listKommunerFromNationalDb(nationalPath)
+    if (fromNational.length > 0) {
+      console.log(`  Kommuneliste fra nasjonal database: ${nationalPath}`)
+      return fromNational
+    }
+  }
+
+  if (options.localOnly) {
+    throw new Error(
+      `Mangler kommuneliste i ${referenceCacheDir} og nasjonal database (${nationalPath}). Kjør yarn build-national-db først.`,
+    )
+  }
+
+  return ensureKommunerCache(referenceCacheDir, { reuseDownloads: true })
+}
+
+function resolveRegionDataSourceMode(options: RegionBuildOptions): {
+  source: RegionDataSource
+  nationalDbPath: string
+} {
+  const referenceCacheDir = resolveReferenceCacheDir(options)
+  const nationalDbPath = resolveNationalDbPath(options.nationalDbPath)
+  const cacheAvailable = brregReferenceAvailable(referenceCacheDir)
+  const nationalAvailable = nationalDatabaseAvailable(nationalDbPath)
+
+  if (options.sourceMode === 'cache') {
+    if (!cacheAvailable) {
+      throw new Error(`Mangler BRREG referansecache i ${referenceCacheDir}. Kjør yarn build-national-db først.`)
+    }
+    return { source: 'cache', nationalDbPath }
+  }
+
+  if (options.sourceMode === 'national') {
+    if (!nationalAvailable) {
+      throw new Error(`Mangler nasjonal database: ${nationalDbPath}. Kjør yarn build-national-db først.`)
+    }
+    return { source: 'national', nationalDbPath }
+  }
+
+  return resolveRegionDataSource({
+    referenceCacheDir,
+    nationalDbPath,
+  })
+}
+
+export async function resolveRegionDescriptor(
+  input: { fylke?: string; kommune?: string },
+  referenceCacheDir = DEFAULT_REFERENCE_CACHE_DIR,
+  options: { localOnly?: boolean; nationalDbPath?: string } = {},
+): Promise<RegionDescriptor> {
+  const allKommuner = await loadKommunerForBuild(referenceCacheDir, {
+    localOnly: options.localOnly ?? true,
+    nationalDbPath: options.nationalDbPath,
+  })
+
+  if (input.kommune) {
+    const code = input.kommune.padStart(4, '0')
+    const match = allKommuner.find((k) => k.nummer === code)
+    if (!match) {
+      throw new Error(`Ukjent kommunenummer «${code}».`)
+    }
+    return {
+      kind: 'kommune',
+      code,
+      name: match.navn,
+      slug: slugifyRegionName(match.navn),
+      kommuner: [code],
+    }
+  }
+
+  if (input.fylke) {
+    const code = input.fylke.padStart(2, '0').slice(0, 2)
+    const kommuner = allKommuner
+      .filter((k) => k.nummer.slice(0, 2) === code)
+      .map((k) => k.nummer)
+      .sort()
+
+    if (kommuner.length === 0) {
+      throw new Error(`Ingen kommuner funnet for fylke «${code}».`)
+    }
+
+    const fylkeName = fylkeNameFromKommuner(code, allKommuner)
+    return {
+      kind: 'fylke',
+      code,
+      name: fylkeName,
+      slug: slugifyRegionName(fylkeName),
+      kommuner,
+    }
+  }
+
+  throw new Error('Region krever --fylke=XX eller --kommune=XXXX.')
+}
+
+function fylkeNameFromKommuner(
+  fylkeCode: string,
+  kommuner: Array<{ nummer: string; navn: string }>,
+): string {
+  const FYLKE_NAMES: Record<string, string> = {
+    '03': 'Oslo',
+    '11': 'Rogaland',
+    '15': 'Møre og Romsdal',
+    '18': 'Nordland',
+    '21': 'Svalbard',
+    '31': 'Østfold',
+    '32': 'Akershus',
+    '33': 'Buskerud',
+    '34': 'Innlandet',
+    '39': 'Vestfold',
+    '40': 'Telemark',
+    '42': 'Agder',
+    '46': 'Vestland',
+    '50': 'Trøndelag',
+    '55': 'Troms',
+    '56': 'Finnmark',
+  }
+
+  return FYLKE_NAMES[fylkeCode] ?? `Fylke ${fylkeCode}`
+}
+
+export async function listAllFylker(
+  referenceCacheDir = DEFAULT_REFERENCE_CACHE_DIR,
+  options: { localOnly?: boolean; nationalDbPath?: string } = {},
+): Promise<RegionDescriptor[]> {
+  const kommuner = await loadKommunerForBuild(referenceCacheDir, {
+    localOnly: options.localOnly ?? true,
+    nationalDbPath: options.nationalDbPath,
+  })
+  const codes = [...new Set(kommuner.map((k) => k.nummer.slice(0, 2)))].sort()
+
+  return codes.map((code) => ({
+    kind: 'fylke' as const,
+    code,
+    name: fylkeNameFromKommuner(code, kommuner),
+    slug: slugifyRegionName(fylkeNameFromKommuner(code, kommuner)),
+    kommuner: kommuner.filter((k) => k.nummer.slice(0, 2) === code).map((k) => k.nummer).sort(),
+  }))
+}
+
+export async function listAllKommuner(
+  referenceCacheDir = DEFAULT_REFERENCE_CACHE_DIR,
+  options: { localOnly?: boolean; nationalDbPath?: string } = {},
+): Promise<RegionDescriptor[]> {
+  const kommuner = await loadKommunerForBuild(referenceCacheDir, {
+    localOnly: options.localOnly ?? true,
+    nationalDbPath: options.nationalDbPath,
+  })
+  return kommuner.map((k) => ({
+    kind: 'kommune' as const,
+    code: k.nummer,
+    name: k.navn,
+    slug: slugifyRegionName(k.navn),
+    kommuner: [k.nummer],
+  }))
+}
+
+async function importBrregForKommuner(
+  db: Database.Database,
+  kommuner: string[],
+  skipUnderenheter: boolean,
+  referenceCacheDir: string,
+): Promise<number> {
+  if (!brregReferenceAvailable(referenceCacheDir)) {
+    throw new Error(
+      `Mangler lokal BRREG referansedata i ${referenceCacheDir}. Kjør yarn build-national-db først.`,
+    )
+  }
+
+  const kommuneSet = new Set(kommuner.map((k) => k.padStart(4, '0')))
+  const filterEntity = (entity: Parameters<typeof upsertEntity>[1]) => {
+    const k = entityKommunenummer(entity)
+    return k != null && kommuneSet.has(k)
+  }
+
+  const enheterPath = referencePath(referenceCacheDir, BRREG_ENHETER_FILE)
+  const underenheterPath = referencePath(referenceCacheDir, BRREG_UNDERENHETER_FILE)
+
+  console.log(`  Filtrerer nasjonal BRREG-cache for ${kommuner.length} kommune(r)…`)
+  console.log(`  Enheter fra ${enheterPath}`)
+
+  let imported = 0
+  await importBrregEnheterFromCache(enheterPath, async (entity) => {
+    upsertEntity(db, entity, Boolean(entity.slettedato))
+    imported += 1
+  }, filterEntity)
+  console.log(`  ${imported.toLocaleString('nb-NO')} enheter importert`)
+
+  if (skipUnderenheter) {
+    console.log('  Underenheter hoppet over (--skip-underenheter).')
+  } else if (existsSync(underenheterPath)) {
+    let importedUnder = 0
+    console.log(`  Underenheter fra ${underenheterPath}`)
+    await importBrregUnderenheterFromCache(underenheterPath, async (entity) => {
+      upsertUnderenhet(db, entity, Boolean(entity.slettedato))
+      importedUnder += 1
+    }, filterEntity)
+    imported += importedUnder
+    console.log(`  ${importedUnder.toLocaleString('nb-NO')} underenheter importert`)
+  } else {
+    console.log('  Ingen lokal underenheter-fil i referansecache.')
+  }
+
+  const manifest = readReferenceManifest(referenceCacheDir)
+  if (manifest.last_oppdateringsid) {
+    setSyncState(db, 'last_oppdateringsid', manifest.last_oppdateringsid)
+  }
+  if (manifest.last_oppdateringsid_underenheter) {
+    setSyncState(db, 'last_oppdateringsid_underenheter', manifest.last_oppdateringsid_underenheter)
+  }
+
+  setSyncState(db, 'last_full_sync_at', new Date().toISOString())
+  setSyncState(db, 'last_backfill_at', new Date().toISOString())
+
+  return imported
+}
+
+export function regionLabel(descriptor: RegionDescriptor): string {
+  if (descriptor.kind === 'fylke') {
+    return `fylke ${descriptor.code} ${descriptor.name} (${descriptor.kommuner.length} kommuner)`
+  }
+  return `kommune ${descriptor.code} ${descriptor.name}`
+}
+
+export async function buildRegionDatabase(options: RegionBuildOptions) {
+  const referenceCacheDir = resolveReferenceCacheDir(options)
+  const kartverketCacheDir = kartverketCacheDirForReference(referenceCacheDir)
+  const reuseDownloads = options.reuseDownloads ?? !options.refreshDownloads
+  const { source, nationalDbPath } = resolveRegionDataSourceMode(options)
+
+  const descriptor = await resolveRegionDescriptor(
+    { fylke: options.fylke, kommune: options.kommune },
+    referenceCacheDir,
+    { localOnly: true, nationalDbPath },
+  )
+
+  if (options.fresh && existsSync(options.outputPath)) {
+    console.log(`Sletter eksisterende database: ${options.outputPath}`)
+    removeDatabaseFiles(options.outputPath)
+  }
+
+  mkdirSync(dirname(options.outputPath), { recursive: true })
+  const db = openDatabase(options.outputPath)
+
+  console.log(`Bygger regionsdatabase: ${regionLabel(descriptor)}`)
+  console.log(`  Output: ${options.outputPath}`)
+  console.log(
+    source === 'cache'
+      ? `  Datakilde: referansecache (${referenceCacheDir})`
+      : `  Datakilde: nasjonal SQLite (${nationalDbPath})`,
+  )
+
+  setSyncState(db, 'build_source', 'build-region-db')
+  setSyncState(db, 'region_kind', descriptor.kind)
+  setSyncState(db, 'region_code', descriptor.code)
+  setSyncState(db, 'region_name', descriptor.name)
+  setSyncState(db, 'region_data_source', source)
+
+  if (source === 'national') {
+    console.log('\nSteg 1/2: Kopierer region fra nasjonal database…')
+    const copied = importRegionFromNationalDb(db, nationalDbPath, descriptor.kommuner, {
+      skipUnderenheter: options.skipUnderenheter ?? false,
+    })
+    console.log(`  ${copied.organizations.toLocaleString('nb-NO')} organisasjoner`)
+    console.log(`  ${copied.addressCache.toLocaleString('nb-NO')} adresse-cache-rader`)
+    console.log(`  ${copied.kartverket.toLocaleString('nb-NO')} Kartverket-adresser`)
+    setSyncState(db, 'copied_from_national_db', nationalDbPath)
+  } else {
+    if (!options.skipKartverket) {
+      console.log('\nSteg 1/4: Kartverket Adresse (regional CSV)…')
+      const scope =
+        descriptor.kind === 'kommune'
+          ? { kommune: descriptor.code }
+          : { fylke: descriptor.code }
+      await downloadAndImportRegionKartverket(db, scope, {
+        cacheDir: kartverketCacheDir,
+        reuseDownload: reuseDownloads,
+        clearExisting: true,
+      })
+      setSyncState(db, 'kartverket_bulk_imported_at', new Date().toISOString())
+    } else if (!kartverketBulkAvailable(db)) {
+      throw new Error('Ingen Kartverket-data i databasen. Fjern --skip-kartverket.')
+    }
+
+    if (!options.skipBrreg) {
+      console.log(`\nSteg 2/4: Importerer BRREG for ${descriptor.kommuner.length} kommune(r) fra lokal cache…`)
+      await importBrregForKommuner(
+        db,
+        descriptor.kommuner,
+        options.skipUnderenheter ?? false,
+        referenceCacheDir,
+      )
+    }
+
+    if (!options.skipGeocode) {
+      console.log('\nSteg 3/4: Geokoder organisasjoner mot lokal Kartverket-database…')
+      await geocodeAllFromKartverketBulk(db)
+      await backfillMetadataFromKartverketBulk(db)
+    } else {
+      console.log('\nSteg 3/4: Hopper over geokoding (--skip-geocode).')
+    }
+  }
+
+  console.log(`\nSteg ${source === 'national' ? '2/2' : '4/4'}: Bygger spatialt indeks (R-tree)…`)
+  rebuildOrgsRtree(db)
+  setSyncState(db, 'last_sync_at', new Date().toISOString())
+
+  const stats = getStats(db)
+  const kartverketCount = kartverketAddressCount(db)
+
+  console.log('\nFerdig. Database status:')
+  console.log(`  Fil: ${options.outputPath}`)
+  console.log(`  Region: ${regionLabel(descriptor)}`)
+  console.log(`  Kartverket-adresser: ${kartverketCount.toLocaleString('nb-NO')}`)
+  console.log(`  Organisasjoner totalt: ${stats.total.toLocaleString('nb-NO')}`)
+  console.log(`  Geokodet: ${(stats.geocoded ?? 0).toLocaleString('nb-NO')}`)
+  console.log(`  Venter geokoding: ${(stats.pending_geocode ?? 0).toLocaleString('nb-NO')}`)
+
+  db.close()
+  return { descriptor, stats, kartverketCount }
+}

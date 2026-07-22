@@ -2,13 +2,12 @@
 /**
  * Build a single SQLite database with nationwide BRREG + Kartverket data.
  *
- * 1. Download Kartverket Matrikkelen Adresse (CSV, EPSG:4258) for all of Norway
- * 2. Download BRREG bulk (enheter + underenheter)
- * 3. Geocode organizations against the local Kartverket table (no live API calls)
+ * Reference data (Kartverket CSV zip + BRREG bulk gzip) is cached under
+ * data/cache/reference/ so later builds can run offline without re-downloading.
  */
 import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import {
-  DEFAULT_KARTVERKET_CACHE_DIR,
   describeKartverketCache,
   downloadAndImportNationalKartverket,
   kartverketAddressCount,
@@ -25,11 +24,13 @@ import {
   setSyncState,
 } from './lib/db.js'
 import {
-  downloadBulkEntities,
-  downloadBulkUnderenheter,
-  fetchLatestUpdateId,
-  fetchLatestUpdateIdUnderenheter,
-} from './lib/brreg.js'
+  DEFAULT_REFERENCE_CACHE_DIR,
+  describeReferenceCache,
+  ensureBrregReferenceCache,
+  importBrregEnheterFromCache,
+  importBrregUnderenheterFromCache,
+  writeReferenceManifest,
+} from './lib/reference-cache.js'
 import { upsertEntity, upsertUnderenhet } from './lib/organizations.js'
 
 const NATIONAL_DB_PATH = process.env.NATIONAL_DB_PATH ?? 'data/norway.db'
@@ -37,6 +38,7 @@ const NATIONAL_DB_PATH = process.env.NATIONAL_DB_PATH ?? 'data/norway.db'
 function parseArgs(argv: string[]) {
   const outputArg = argv.find((arg) => arg.startsWith('--output='))?.split('=')[1]
   const cacheDirArg = argv.find((arg) => arg.startsWith('--cache-dir='))?.split('=')[1]
+  const refreshDownloads = argv.includes('--refresh-downloads')
 
   return {
     fresh: argv.includes('--fresh'),
@@ -45,32 +47,44 @@ function parseArgs(argv: string[]) {
     skipKartverket: argv.includes('--skip-kartverket'),
     skipGeocode: argv.includes('--skip-geocode'),
     skipUnderenheter: argv.includes('--skip-underenheter'),
-    reuseDownloads: argv.includes('--reuse-downloads'),
+    refreshDownloads,
+    reuseDownloads: !refreshDownloads,
     metadataOnly: argv.includes('--metadata-only'),
-    cacheDir: cacheDirArg ?? DEFAULT_KARTVERKET_CACHE_DIR,
+    referenceCacheDir: cacheDirArg ?? DEFAULT_REFERENCE_CACHE_DIR,
   }
 }
 
 async function importBrregNationwide(
   db: ReturnType<typeof openDatabase>,
-  skipUnderenheter: boolean,
+  referenceCacheDir: string,
+  options: {
+    skipUnderenheter: boolean
+    reuseDownloads: boolean
+    refreshDownloads: boolean
+  },
 ): Promise<number> {
-  console.log('\nSteg 2/4: Importerer BRREG bulk (hele landet)…')
+  console.log('\nSteg 2/4: Importerer BRREG fra referansecache…')
+
+  const reference = await ensureBrregReferenceCache(referenceCacheDir, {
+    reuseDownloads: options.reuseDownloads,
+    refreshDownloads: options.refreshDownloads,
+    skipUnderenheter: options.skipUnderenheter,
+  })
 
   let imported = 0
-  console.log('  Enheter…')
-  await downloadBulkEntities(async (entity) => {
+  console.log(`  Enheter fra ${reference.enheterPath}…`)
+  await importBrregEnheterFromCache(reference.enheterPath, async (entity) => {
     upsertEntity(db, entity, Boolean(entity.slettedato))
     imported += 1
   })
   console.log(`  ${imported.toLocaleString('nb-NO')} enheter importert`)
 
   let importedUnder = 0
-  if (skipUnderenheter) {
+  if (options.skipUnderenheter) {
     console.log('  Underenheter hoppet over (--skip-underenheter).')
-  } else {
-    console.log('  Underenheter…')
-    await downloadBulkUnderenheter(async (entity) => {
+  } else if (reference.underenheterPath) {
+    console.log(`  Underenheter fra ${reference.underenheterPath}…`)
+    await importBrregUnderenheterFromCache(reference.underenheterPath, async (entity) => {
       upsertUnderenhet(db, entity, Boolean(entity.slettedato))
       importedUnder += 1
     })
@@ -79,14 +93,12 @@ async function importBrregNationwide(
 
   imported += importedUnder
 
-  const latestId = await fetchLatestUpdateId()
-  if (latestId > 0) {
-    setSyncState(db, 'last_oppdateringsid', String(latestId))
+  const manifest = reference.manifest
+  if (manifest.last_oppdateringsid) {
+    setSyncState(db, 'last_oppdateringsid', manifest.last_oppdateringsid)
   }
-
-  const latestUnderId = await fetchLatestUpdateIdUnderenheter()
-  if (latestUnderId > 0) {
-    setSyncState(db, 'last_oppdateringsid_underenheter', String(latestUnderId))
+  if (manifest.last_oppdateringsid_underenheter) {
+    setSyncState(db, 'last_oppdateringsid_underenheter', manifest.last_oppdateringsid_underenheter)
   }
 
   setSyncState(db, 'last_full_sync_at', new Date().toISOString())
@@ -98,6 +110,8 @@ async function importBrregNationwide(
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
+  const kartverketCacheDir =
+    process.env.KARTVERKET_CACHE_DIR ?? join(args.referenceCacheDir, 'kartverket')
 
   if (args.fresh && existsSync(args.output)) {
     console.log(`Sletter eksisterende database: ${args.output}`)
@@ -108,15 +122,19 @@ async function main() {
 
   console.log('Bygger nasjonal SQLite-database')
   console.log(`  Output: ${args.output}`)
-  console.log(`  Kartverket-cache: ${describeKartverketCache(args.cacheDir)}`)
-  console.log('Kilder: BRREG bulk + Kartverket Matrikkelen Adresse (CSV bulk)')
+  console.log(`  Referansecache: ${describeReferenceCache(args.referenceCacheDir)}`)
+  console.log(`  Kartverket-cache: ${describeKartverketCache(kartverketCacheDir)}`)
+  console.log('Kilder: lokale BRREG/Kartverket-filer (nedlastes kun ved manglende cache)')
 
   if (!args.skipKartverket) {
     console.log('\nSteg 1/4: Kartverket Adresse (bulk CSV, hele landet)…')
     await downloadAndImportNationalKartverket(db, {
-      cacheDir: args.cacheDir,
+      cacheDir: kartverketCacheDir,
       reuseDownload: args.reuseDownloads,
       clearExisting: true,
+    })
+    writeReferenceManifest(args.referenceCacheDir, {
+      kartverket_national_cached_at: new Date().toISOString(),
     })
     setSyncState(db, 'kartverket_bulk_imported_at', new Date().toISOString())
   } else {
@@ -131,7 +149,11 @@ async function main() {
   }
 
   if (!args.skipBrreg) {
-    await importBrregNationwide(db, args.skipUnderenheter)
+    await importBrregNationwide(db, args.referenceCacheDir, {
+      skipUnderenheter: args.skipUnderenheter,
+      reuseDownloads: args.reuseDownloads,
+      refreshDownloads: args.refreshDownloads,
+    })
   } else {
     console.log('\nSteg 2/4: Hopper over BRREG-import (--skip-brreg).')
     const total = getStats(db).total
@@ -143,7 +165,7 @@ async function main() {
   }
 
   if (!args.skipGeocode) {
-    console.log('\nSteg 3/4: Geokoder organisasjoner mot lokal Kartverket-database…')
+    console.log('\nSteg 3/4: Geokoder organisasjoner mot lokal Kartverket-database (ingen API)…')
     if (args.metadataOnly) {
       await backfillMetadataFromKartverketBulk(db)
     } else {
@@ -163,6 +185,7 @@ async function main() {
 
   console.log('\nFerdig. Database status:')
   console.log(`  Fil: ${args.output}`)
+  console.log(`  Referansecache: ${args.referenceCacheDir}`)
   console.log(`  Kartverket-adresser: ${kartverketCount.toLocaleString('nb-NO')}`)
   console.log(`  Organisasjoner totalt: ${stats.total.toLocaleString('nb-NO')}`)
   console.log(`  Enheter: ${(stats.enheter ?? 0).toLocaleString('nb-NO')}`)

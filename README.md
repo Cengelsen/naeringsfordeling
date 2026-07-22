@@ -59,6 +59,9 @@ Oversikt over alle `yarn`-kommandoer i [`package.json`](package.json). CLI-flagg
 | `yarn build-db` | Bygg komplett SQLite-database | Se flagg under. |
 | `yarn build-db:dev` | Dev-bygg (forhåndsdefinert) | Tilsvarer `yarn build-db --dev --fresh`. |
 | `yarn build-national-db` | Nasjonal database fra BRREG + Kartverket bulk | Se flagg under. Krever `unzip`. |
+| `yarn build-region-db` | Database for ett fylke eller én kommune | `--fylke=46` eller `--kommune=4601`. |
+| `yarn build-all-fylker` | Bygg database for alle fylker | Tilsvarer `build-all-regions --fylker`. |
+| `yarn build-all-kommuner` | Bygg database for alle kommuner | Tilsvarer `yarn build-all-regions --kommuner`. |
 | `yarn sync` | Inkrementell oppdatering + geokoding | Se flagg under. |
 | `yarn sync:full` | Full BRREG-import + geokoding | Tilsvarer `yarn sync --full`. |
 | `yarn sync:backfill` | Oppgrader eksisterende DB fra BRREG bulk | Tilsvarer `yarn sync --backfill`. |
@@ -140,9 +143,10 @@ Koden er de to første sifrene i kommunenummeret (f.eks. Bergen `4601` → fylke
 | `BRREG_ENTITY_DELAY_MS` | `150` | Pause mellom enkeltoppslag i BRREG. |
 | `API_MAX_RETRIES` | `5` | HTTP-retries ved 429/503. |
 | `API_RETRY_BASE_MS` | `1000` | Initial retry-backoff. |
-| `KARTVERKET_CACHE_DIR` | `data/cache/national-build` | Cache for Kartverket CSV-zip; importeres automatisk ved geokoding hvis tabellen mangler. |
+| `KARTVERKET_CACHE_DIR` | `data/cache/reference/kartverket` | Kartverket CSV-zip; importeres automatisk ved geokoding hvis tabellen mangler. |
+| `REFERENCE_CACHE_DIR` | `data/cache/reference` | Rot for referansedata (BRREG bulk + Kartverket). |
 
-Geokoding (`yarn sync`, `yarn build-db`, server) bruker **lokal Kartverket-database** (`kartverket_addresses` eller zip i cache) når tilgjengelig, og faller tilbake til Kartverket Adresse-API ved miss.
+Geokoding (`yarn sync`, `yarn build-db`, server) sjekker **lokal Kartverket-database** (`kartverket_addresses` eller zip i cache) først, og faller tilbake til Kartverket Adresse-API ved miss. **Bygg-kommandoer** (`build-national-db`, `build-region-db`, …) bruker kun lokal data — ingen API-kall for geokoding eller BRREG når referansecache finnes.
 
 ### Eksport og nedlasting
 
@@ -198,13 +202,29 @@ yarn sync --geocode-only --regeocode-metadata
 
 ### Nasjonal database (BRREG + Kartverket bulk)
 
-`yarn build-national-db` bygger én SQLite-fil med **hele landet** uten live Kartverket-API-kall:
+`yarn build-national-db` bygger én SQLite-fil med **hele landet** uten live API-kall (når referansecache finnes):
 
-1. Laster ned [Matrikkelen Adresse](https://kartkatalog.geonorge.no/) (CSV, EPSG:4258, ~150 MB zip)
-2. Importerer alle adresser til tabellen `kartverket_addresses`
-3. Streamer BRREG bulk (enheter + underenheter)
-4. Geokoder organisasjoner mot lokal Kartverket-database
-5. Bygger R-tree-indeks
+1. Laster ned [Matrikkelen Adresse](https://kartkatalog.geonorge.no/) (CSV, EPSG:4258, ~150 MB zip) **til referansecache**
+2. Laster ned BRREG bulk (enheter + underenheter) **til referansecache**
+3. Importerer adresser til tabellen `kartverket_addresses`
+4. Importerer BRREG fra lokale gzip-filer
+5. Geokoder organisasjoner mot lokal Kartverket-database (ingen API)
+6. Bygger R-tree-indeks
+
+Referansedata lagres under `data/cache/reference/` og gjenbrukes automatisk ved nye bygg:
+
+```
+data/cache/reference/
+  manifest.json
+  brreg/enheter.v2.json.gz
+  brreg/underenheter.v2.json.gz
+  brreg/kommuner.json
+  kartverket/Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV.zip
+  kartverket/fylker/ …
+  kartverket/kommuner/ …
+```
+
+Etter første kjøring kan du bygge nye databaser **offline** med samme referansedata (BRREG + Kartverket).
 
 Standard output: `data/norway.db` (overstyr med `--output=` eller `DATABASE_PATH`).
 
@@ -212,23 +232,70 @@ Standard output: `data/norway.db` (overstyr med `--output=` eller `DATABASE_PATH
 |-------|-------------|
 | `--fresh` | Slett eksisterende output-fil først. |
 | `--output=PATH` | SQLite-fil (standard: `data/norway.db`). |
-| `--reuse-downloads` | Hopp over Kartverket-nedlasting hvis zip finnes i cache. |
-| `--cache-dir=PATH` | Cache for Kartverket-zip (standard: `data/cache/national-build`). |
+| `--refresh-downloads` | Last ned BRREG/Kartverket på nytt selv om cache finnes. |
+| `--cache-dir=PATH` | Rot for referansecache (standard: `data/cache/reference`). |
 | `--skip-kartverket` | Bruk eksisterende `kartverket_addresses` i databasen. |
 | `--skip-brreg` | Hopp over BRREG-import. |
 | `--skip-geocode` | Importer kun rådata. |
 | `--skip-underenheter` | Importer kun hovedenheter fra BRREG. |
 | `--metadata-only` | Oppdater kun geokode-metadata (krever eksisterende koordinater). |
 
-Krever `unzip` på PATH (`dnf install unzip`). Kartverket-cachen kan gjenbrukes mellom kjøringer.
+Krever `unzip` på PATH (`dnf install unzip`).
 
 ```bash
-yarn build-national-db --fresh
-yarn build-national-db --fresh --reuse-downloads   # raskere re-kjøring
+yarn build-national-db --fresh                    # første gang: laster ned referansedata
+yarn build-national-db --fresh                    # senere: gjenbruker cache (offline OK)
+yarn build-national-db --fresh --refresh-downloads   # tving ny nedlasting
 DATABASE_PATH=data/norway.db yarn server
 ```
 
-`--fresh` sletter fortsatt databasen og starter helt på nytt. `--backfill` upserter inn i eksisterende SQLite – koordinater beholdes når adressen er uendret. Uten `--fylke` lastes **hele landet** fra BRREG bulk; med `--fylke=46` oppdateres kun det fylket (samme scope som `--dev --fylke=46`).
+### Fylkes- og kommunedatabaser
+
+`yarn build-region-db` bygger en **komplett** SQLite-fil per fylke eller kommune. Datakilde velges automatisk (ingen BRREG-API-kall):
+
+1. **Nasjonal SQLite** (`data/norway.db`) når den finnes — kopierer organisasjoner, geokoding og Kartverket-adresser for regionen (raskt)
+2. **Referansecache** ellers — regional Kartverket-zip + filtrert BRREG bulk + lokal geokoding
+
+Output (standard):
+
+| Type | Sti |
+|------|-----|
+| Fylke | `data/regions/fylker/46-vestland.db` |
+| Kommune | `data/regions/kommuner/4601-bergen.db` |
+
+Overstyr med `--output=` eller `REGIONS_OUTPUT_DIR`.
+
+**Enkeltregion:**
+
+```bash
+yarn build-national-db --fresh          # engangssteg: norway.db + referansecache
+yarn build-region-db --fylke=46 --fresh # kopierer fra norway.db hvis den finnes
+yarn build-region-db --kommune=4601 --fresh
+DATABASE_PATH=data/regions/fylker/46-vestland.db yarn server
+```
+
+**Alle regioner:**
+
+```bash
+yarn build-all-fylker --skip-existing
+yarn build-all-kommuner --skip-existing   # ~350 DB-filer, tar lang tid
+yarn build-all-regions --kommuner --fylke=46   # alle kommuner i Vestland
+```
+
+| Flagg | Beskrivelse |
+|-------|-------------|
+| `--fylke=XX` / `--kommune=XXXX` | Region (`build-region-db`; nøyaktig én). |
+| `--fylker` / `--kommuner` | Batch-modus (`build-all-regions`; nøyaktig én). |
+| `--fresh` | Slett eksisterende output først. |
+| `--skip-existing` | Hopp over regioner som allerede har DB-fil. |
+| `--from-national` | Tving kopi fra nasjonal SQLite (`--national-db=PATH`, standard `data/norway.db`). |
+| `--from-cache` | Tving bygg fra referansecache (BRREG gzip + regional Kartverket). |
+| `--national-db=PATH` | Nasjonal SQLite for `--from-national` / auto (standard: `data/norway.db`). |
+| `--refresh-downloads` | Last ned regional Kartverket-zip på nytt (kun cache-modus). |
+| `--cache-dir=PATH` | Rot for referansecache (standard: `data/cache/reference`). |
+| `--limit=N` | Bygg bare N regioner (testing). |
+| `--skip-geocode` | Importer uten geokoding (kun cache-modus). |
+| `--skip-underenheter` | Kun hovedenheter. |
 
 Ved behov kan du kjøre GitHub Actions `workflow_dispatch` med **full import** (sletter og bygger på nytt i CI) eller legge til en backfill-jobb senere.
 

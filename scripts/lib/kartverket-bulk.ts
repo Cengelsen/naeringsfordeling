@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type Database from 'better-sqlite3'
 import { fetchWithRetry } from './rate-limit.js'
+import { DEFAULT_REFERENCE_CACHE_DIR } from './reference-cache.js'
 
 const ATOM_FEED_CSV =
   'https://nedlasting.geonorge.no/geonorge/ATOM-feeds/MatrikkelenAdresse_AtomFeedCSV.xml'
@@ -12,7 +13,7 @@ const DEFAULT_NATIONAL_CSV_URL =
   'https://nedlasting.geonorge.no/geonorge/Basisdata/MatrikkelenAdresse/CSV/Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV.zip'
 
 export const DEFAULT_KARTVERKET_CACHE_DIR =
-  process.env.KARTVERKET_CACHE_DIR ?? 'data/cache/national-build'
+  process.env.KARTVERKET_CACHE_DIR ?? join(DEFAULT_REFERENCE_CACHE_DIR, 'kartverket')
 
 function ensureUnzipAvailable() {
   const result = spawnSync('unzip', ['-v'], { stdio: 'ignore' })
@@ -81,17 +82,65 @@ export function matrikkelKeyFromCsv(
 }
 
 export async function resolveNationalCsvDownloadUrl(): Promise<string> {
-  try {
-    const response = await fetchWithRetry(ATOM_FEED_CSV, undefined, 'Kartverket ATOM-feed')
-    const xml = await response.text()
-    const match = xml.match(
-      /href="(https:\/\/nedlasting\.geonorge\.no\/geonorge\/Basisdata\/MatrikkelenAdresse\/CSV\/Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV\.zip)"/,
-    )
-    if (match?.[1]) return match[1]
-  } catch (error) {
-    console.warn('Kunne ikke lese Kartverket ATOM-feed, bruker standard-URL:', error)
+  return resolveRegionCsvDownloadUrl({ national: true }) ?? DEFAULT_NATIONAL_CSV_URL
+}
+
+let atomFeedXmlCache: string | null = null
+
+async function fetchAtomFeedXml(): Promise<string> {
+  if (atomFeedXmlCache) return atomFeedXmlCache
+  const response = await fetchWithRetry(ATOM_FEED_CSV, undefined, 'Kartverket ATOM-feed')
+  atomFeedXmlCache = await response.text()
+  return atomFeedXmlCache
+}
+
+export type KartverketRegionScope =
+  | { national: true }
+  | { fylke: string }
+  | { kommune: string }
+
+function regionZipPattern(scope: KartverketRegionScope): RegExp {
+  if ('national' in scope) {
+    return /href="(https:\/\/nedlasting\.geonorge\.no\/geonorge\/Basisdata\/MatrikkelenAdresse\/CSV\/Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV\.zip)"/
   }
-  return DEFAULT_NATIONAL_CSV_URL
+  if ('kommune' in scope) {
+    const kommune = scope.kommune.padStart(4, '0')
+    return new RegExp(
+      `href="(https://nedlasting\\.geonorge\\.no/geonorge/Basisdata/MatrikkelenAdresse/CSV/Basisdata_${kommune}_[^"]*_4258_MatrikkelenAdresse_CSV\\.zip)"`,
+    )
+  }
+  const fylke = scope.fylke.padStart(2, '0').slice(0, 2)
+  return new RegExp(
+    `href="(https://nedlasting\\.geonorge\\.no/geonorge/Basisdata/MatrikkelenAdresse/CSV/Basisdata_${fylke}_[^"]*_4258_MatrikkelenAdresse_CSV\\.zip)"`,
+  )
+}
+
+export async function resolveRegionCsvDownloadUrl(
+  scope: KartverketRegionScope,
+): Promise<string | null> {
+  try {
+    const xml = await fetchAtomFeedXml()
+    const match = xml.match(regionZipPattern(scope))
+    return match?.[1] ?? null
+  } catch (error) {
+    console.warn('Kunne ikke lese Kartverket ATOM-feed:', error)
+    return null
+  }
+}
+
+export function regionZipCachePath(
+  scope: KartverketRegionScope,
+  cacheDir = DEFAULT_KARTVERKET_CACHE_DIR,
+): string {
+  if ('national' in scope) {
+    return join(cacheDir, 'Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV.zip')
+  }
+  if ('kommune' in scope) {
+    const kommune = scope.kommune.padStart(4, '0')
+    return join(cacheDir, 'kommuner', `${kommune}_4258_MatrikkelenAdresse_CSV.zip`)
+  }
+  const fylke = scope.fylke.padStart(2, '0').slice(0, 2)
+  return join(cacheDir, 'fylker', `${fylke}_4258_MatrikkelenAdresse_CSV.zip`)
 }
 
 async function downloadFile(url: string, destination: string): Promise<void> {
@@ -168,6 +217,81 @@ export interface KartverketImportOptions {
   cacheDir?: string
   reuseDownload?: boolean
   clearExisting?: boolean
+  /** When importing a fylke-zip for a single kommune, keep only this kommunenummer. */
+  kommunenummer?: string
+}
+
+export async function downloadRegionKartverketCsv(
+  scope: KartverketRegionScope,
+  options: Pick<KartverketImportOptions, 'cacheDir' | 'reuseDownload'> = {},
+): Promise<string> {
+  ensureUnzipAvailable()
+  const cacheDir = options.cacheDir ?? DEFAULT_KARTVERKET_CACHE_DIR
+  const reuseDownload = options.reuseDownload ?? true
+  const destination = regionZipCachePath(scope, cacheDir)
+  mkdirSync(dirname(destination), { recursive: true })
+
+  if (reuseDownload && existsSync(destination)) {
+    console.log(`Gjenbruker cached Kartverket-fil: ${destination}`)
+    return destination
+  }
+
+  const url = await resolveRegionCsvDownloadUrl(scope)
+  if (!url) {
+    throw new Error(`Fant ingen Kartverket CSV-URL for ${JSON.stringify(scope)}`)
+  }
+
+  console.log(`Laster ned Kartverket Adresse…`)
+  console.log(`  URL: ${url}`)
+  await downloadFile(url, destination)
+  return destination
+}
+
+/** Download and import Kartverket CSV for a fylke or kommune (with fylke-zip fallback for kommune). */
+export async function downloadAndImportRegionKartverket(
+  db: Database.Database,
+  scope: { fylke?: string; kommune?: string },
+  options: KartverketImportOptions = {},
+): Promise<number> {
+  if (scope.kommune) {
+    const kommune = scope.kommune.padStart(4, '0')
+    const kommuneUrl = await resolveRegionCsvDownloadUrl({ kommune })
+    if (kommuneUrl) {
+      const zipPath = await downloadRegionKartverketCsv(
+        { kommune },
+        { cacheDir: options.cacheDir, reuseDownload: options.reuseDownload },
+      )
+      return streamImportKartverketCsvFromZip(db, zipPath, {
+        ...options,
+        clearExisting: options.clearExisting ?? true,
+      })
+    }
+
+    const fylke = kommune.slice(0, 2)
+    console.log(`Ingen kommune-CSV for ${kommune}, bruker fylke ${fylke}-zip med filter.`)
+    const zipPath = await downloadRegionKartverketCsv(
+      { fylke },
+      { cacheDir: options.cacheDir, reuseDownload: options.reuseDownload },
+    )
+    return streamImportKartverketCsvFromZip(db, zipPath, {
+      ...options,
+      clearExisting: options.clearExisting ?? true,
+      kommunenummer: kommune,
+    })
+  }
+
+  if (scope.fylke) {
+    const zipPath = await downloadRegionKartverketCsv(
+      { fylke: scope.fylke },
+      { cacheDir: options.cacheDir, reuseDownload: options.reuseDownload },
+    )
+    return streamImportKartverketCsvFromZip(db, zipPath, {
+      ...options,
+      clearExisting: options.clearExisting ?? true,
+    })
+  }
+
+  throw new Error('downloadAndImportRegionKartverket krever fylke eller kommune')
 }
 
 export async function downloadNationalKartverketCsv(
@@ -175,10 +299,11 @@ export async function downloadNationalKartverketCsv(
 ): Promise<string> {
   ensureUnzipAvailable()
   const cacheDir = options.cacheDir ?? DEFAULT_KARTVERKET_CACHE_DIR
+  const reuseDownload = options.reuseDownload ?? true
   mkdirSync(cacheDir, { recursive: true })
 
   const destination = join(cacheDir, 'Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV.zip')
-  if (options.reuseDownload && existsSync(destination)) {
+  if (reuseDownload && existsSync(destination)) {
     console.log(`Gjenbruker cached Kartverket-fil: ${destination}`)
     return destination
   }
@@ -193,13 +318,18 @@ export async function downloadNationalKartverketCsv(
 async function streamImportKartverketCsvFromZip(
   db: Database.Database,
   zipPath: string,
-  options: { clearExisting?: boolean } = {},
+  options: KartverketImportOptions = {},
 ): Promise<number> {
   ensureUnzipAvailable()
   ensureKartverketSchema(db)
 
   if (options.clearExisting) {
     db.exec('DELETE FROM kartverket_addresses')
+  }
+
+  const kommunenummerFilter = options.kommunenummer?.padStart(4, '0')
+  if (kommunenummerFilter) {
+    console.log(`  Filtrerer import til kommunenummer ${kommunenummerFilter}`)
   }
 
   const csvEntry = findCsvEntryInZip(zipPath)
@@ -256,6 +386,7 @@ async function streamImportKartverketCsvFromZip(
     const values = parseCsvLine(line)
     const row = rowFromCsv(header, values)
     if (!row) continue
+    if (kommunenummerFilter && String(row.kommunenummer) !== kommunenummerFilter) continue
     batch.push(row)
     if (batch.length >= 5000) flush()
   }

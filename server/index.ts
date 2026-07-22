@@ -5,18 +5,18 @@ import { serve } from '@hono/node-server'
 import { existsSync } from 'node:fs'
 import { openDatabase, DEFAULT_DB_PATH, getStats, effectiveKommunenummerExpr } from '../scripts/lib/db.js'
 import { employeeBand } from '../scripts/lib/employeeBands.js'
+import { limitForZoom, fetchLimitForTarget, stratifiedSamplePoints } from '../scripts/lib/point-sampling.js'
+import { toCompactPoint, roundCoord, type CompactPoint } from '../scripts/lib/points.js'
+import { resolveOrganizationLocation } from './location.js'
 import {
   appendAreaFilters,
   appendBboxFilter,
   buildFilterQuery,
   employeeBandSql,
-  limitForZoom,
   naeringskodeSectionSql,
   parseFilters,
   rtreeBboxParams,
 } from './filters.js'
-import { toCompactPoint, roundCoord, type CompactPoint } from '../scripts/lib/points.js'
-import { resolveOrganizationLocation } from './location.js'
 
 const dbPath = process.env.DATABASE_PATH ?? DEFAULT_DB_PATH
 
@@ -71,15 +71,33 @@ function organizationQuery(filters: ReturnType<typeof parseFilters>, geocodedOnl
   return { conditions, params, useRtree: false as const }
 }
 
+type OrganizationPointRow = {
+  orgnr: string
+  org_type: string
+  org_type_label: string
+  navn: string
+  address_text: string
+  postnummer: string
+  kommunenummer: string
+  lat: number
+  lng: number
+  naeringskode: string | null
+  employee_band: string
+  entity_kind: string
+}
+
 function queryOrganizationPoints(
   filters: ReturnType<typeof parseFilters>,
-  limit: number,
-) {
+  targetLimit: number,
+): { rows: OrganizationPointRow[]; sourceCount: number } {
+  const fetchLimit = fetchLimitForTarget(targetLimit)
   const query = organizationQuery(filters)
+
+  let raw: OrganizationPointRow[]
 
   if (query.useRtree) {
     const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
-    return db
+    raw = db
       .prepare(
         `SELECT ${POINT_SELECT}
          FROM organizations o
@@ -89,44 +107,26 @@ function queryOrganizationPoints(
            AND ${query.conditions.join(' AND ')}
          LIMIT ?`,
       )
-      .all(minLng, maxLng, minLat, maxLat, ...query.params, limit) as Array<{
-      orgnr: string
-      org_type: string
-      org_type_label: string
-      navn: string
-      address_text: string
-      postnummer: string
-      kommunenummer: string
-      lat: number
-      lng: number
-      naeringskode: string | null
-      employee_band: string
-      entity_kind: string
-    }>
+      .all(minLng, maxLng, minLat, maxLat, ...query.params, fetchLimit) as OrganizationPointRow[]
+  } else {
+    appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
+    raw = db
+      .prepare(
+        `SELECT ${POINT_SELECT}
+         FROM organizations o
+         WHERE ${query.conditions.join(' AND ')}
+         LIMIT ?`,
+      )
+      .all(...query.params, fetchLimit) as OrganizationPointRow[]
   }
 
-  appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
-  return db
-    .prepare(
-      `SELECT ${POINT_SELECT}
-       FROM organizations o
-       WHERE ${query.conditions.join(' AND ')}
-       LIMIT ?`,
-    )
-    .all(...query.params, limit) as Array<{
-    orgnr: string
-    org_type: string
-    org_type_label: string
-    navn: string
-    address_text: string
-    postnummer: string
-    kommunenummer: string
-    lat: number
-    lng: number
-    naeringskode: string | null
-    employee_band: string
-    entity_kind: string
-  }>
+  const rows = stratifiedSamplePoints(raw, targetLimit, filters.bbox, {
+    orgType: (row) => row.org_type,
+    lat: (row) => row.lat,
+    lng: (row) => row.lng,
+  })
+
+  return { rows, sourceCount: raw.length }
 }
 
 app.get('/api/health', (c) => {
@@ -221,7 +221,8 @@ app.get('/api/organizations/points', (c) => {
     Number.isFinite(explicitLimit) ? explicitLimit : undefined,
   )
   const compact = c.req.query('format') === 'compact'
-  const rows = queryOrganizationPoints(filters, limit)
+  const { rows, sourceCount } = queryOrganizationPoints(filters, limit)
+  const truncated = sourceCount >= fetchLimitForTarget(limit) || sourceCount > rows.length
 
   if (compact) {
     const points: CompactPoint[] = rows.map((row) =>
@@ -238,7 +239,8 @@ app.get('/api/organizations/points', (c) => {
     return c.json({
       points,
       count: points.length,
-      truncated: points.length >= limit,
+      truncated,
+      sampled: truncated,
     })
   }
 
@@ -258,7 +260,8 @@ app.get('/api/organizations/points', (c) => {
       entityKind: row.entity_kind,
     })),
     count: rows.length,
-    truncated: rows.length >= limit,
+    truncated,
+    sampled: truncated,
   })
 })
 

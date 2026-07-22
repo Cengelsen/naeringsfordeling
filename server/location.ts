@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import { geocodeAddressResolved, ensureLocalKartverketReady } from '../scripts/lib/geocode-resolve.js'
 import {
-  applyCachedCoordinates,
+  applyGeocodeResult,
   getCachedAddress,
   saveAddressCache,
 } from '../scripts/lib/organizations.js'
@@ -65,7 +65,7 @@ export async function resolveOrganizationLocation(
   if (row.address_key) {
     const cached = getCachedAddress(db, row.address_key)
     if (cached && cached !== 'failed') {
-      applyCachedCoordinates(db, row.address_key, cached.lat, cached.lng)
+      applyGeocodeResult(db, row.address_key, cached)
       return locationFromCoords(row.orgnr, row.kommunenummer, cached.lat, cached.lng, 'cache')
     }
   }
@@ -87,7 +87,7 @@ export async function resolveOrganizationLocation(
     if (row.address_key) {
       saveAddressCache(db, row.address_key, coords)
       if (coords) {
-        applyCachedCoordinates(db, row.address_key, coords.lat, coords.lng)
+        applyGeocodeResult(db, row.address_key, coords)
       }
     } else if (coords) {
       db.prepare(`UPDATE organizations SET lat = ?, lng = ? WHERE orgnr = ?`).run(

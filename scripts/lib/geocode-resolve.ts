@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import type { BrregAddress } from './types.js'
 import { geocodeAddress, type GeocodeResult } from './geocode.js'
 import {
+  DEFAULT_KARTVERKET_CACHE_DIR,
   findCachedKartverketZip,
   importKartverketFromCache,
   kartverketBulkAvailable,
@@ -11,13 +12,22 @@ import { lookupKartverketAddress } from './local-geocode.js'
 
 let localReadyChecked = false
 
+export interface GeocodeResolveOptions {
+  /** When false, never call Kartverket Adresse-API (build commands). Default true for sync/server. */
+  allowApi?: boolean
+  kartverketCacheDir?: string
+}
+
 /** Load Kartverket bulk from cached zip into DB if not already present. */
-export async function ensureLocalKartverketReady(db: Database.Database): Promise<boolean> {
+export async function ensureLocalKartverketReady(
+  db: Database.Database,
+  kartverketCacheDir = DEFAULT_KARTVERKET_CACHE_DIR,
+): Promise<boolean> {
   if (kartverketBulkAvailable(db)) {
     return true
   }
 
-  const zipPath = findCachedKartverketZip()
+  const zipPath = findCachedKartverketZip(kartverketCacheDir)
   if (!zipPath) {
     return false
   }
@@ -27,29 +37,45 @@ export async function ensureLocalKartverketReady(db: Database.Database): Promise
     console.log('Importerer adresser til databasen (engangssteg)…')
   }
 
-  await importKartverketFromCache(db)
+  await importKartverketFromCache(db, kartverketCacheDir)
   localReadyChecked = true
   return kartverketBulkAvailable(db)
 }
 
-export function geocodeSourceDescription(db: Database.Database): string {
+export function geocodeSourceDescription(
+  db: Database.Database,
+  options: Pick<GeocodeResolveOptions, 'allowApi' | 'kartverketCacheDir'> = {},
+): string {
+  const allowApi = options.allowApi ?? true
+  const cacheDir = options.kartverketCacheDir ?? DEFAULT_KARTVERKET_CACHE_DIR
+
   if (kartverketBulkAvailable(db)) {
-    return `lokal Kartverket-database (${kartverketAddressCount(db).toLocaleString('nb-NO')} adresser, deretter API ved miss)`
+    return allowApi
+      ? `lokal Kartverket-database (${kartverketAddressCount(db).toLocaleString('nb-NO')} adresser, deretter API ved miss)`
+      : `lokal Kartverket-database (${kartverketAddressCount(db).toLocaleString('nb-NO')} adresser, kun lokal)`
   }
-  if (findCachedKartverketZip()) {
-    return 'lokal Kartverket-fil (importeres ved geokoding, deretter API ved miss)'
+  if (findCachedKartverketZip(cacheDir)) {
+    return allowApi
+      ? 'lokal Kartverket-fil (importeres ved geokoding, deretter API ved miss)'
+      : 'lokal Kartverket-fil (importeres ved geokoding, ingen API)'
   }
-  return 'Kartverket Adresse-API'
+  return allowApi ? 'Kartverket Adresse-API' : 'ingen lokal Kartverket-data (geokoding hoppes over)'
 }
 
-/** Geocode via local bulk register when available, otherwise Kartverket API. */
+/** Geocode via local bulk register when available; API only when explicitly allowed. */
 export async function geocodeAddressResolved(
   db: Database.Database,
   address: BrregAddress,
   line: string,
+  options: GeocodeResolveOptions = {},
 ): Promise<GeocodeResult | null> {
   if (!address.postnummer) return null
   if (address.landkode && address.landkode !== 'NO') return null
+
+  const allowApi = options.allowApi ?? true
+  const cacheDir = options.kartverketCacheDir ?? DEFAULT_KARTVERKET_CACHE_DIR
+
+  await ensureLocalKartverketReady(db, cacheDir)
 
   if (kartverketBulkAvailable(db)) {
     const local = lookupKartverketAddress(db, {
@@ -59,6 +85,8 @@ export async function geocodeAddressResolved(
     })
     if (local) return local
   }
+
+  if (!allowApi) return null
 
   return geocodeAddress(address, line)
 }

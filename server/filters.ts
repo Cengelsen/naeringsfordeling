@@ -137,16 +137,7 @@ export function parseFilters(req: {
   }
 }
 
-export function limitForZoom(zoom?: number, explicitLimit?: number): number {
-  if (explicitLimit != null) {
-    return Math.min(Math.max(1, explicitLimit), 50000)
-  }
-
-  if (zoom == null || zoom < 10) return 5000
-  if (zoom < 12) return 15000
-  if (zoom < 14) return 30000
-  return 50000
-}
+export { limitForZoom, MAX_VIEWPORT_DOTS } from '../scripts/lib/point-sampling.js'
 
 export function appendAreaFilters(
   filters: ApiFilters,

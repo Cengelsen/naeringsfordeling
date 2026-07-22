@@ -1,8 +1,6 @@
 import type Database from 'better-sqlite3'
 import { LIMITS, sleep } from './rate-limit.js'
 import {
-  downloadBulkEntities,
-  downloadBulkUnderenheter,
   fetchEntity,
   fetchKommuneEntities,
   fetchKommuneUnderenheter,
@@ -24,6 +22,12 @@ import {
   geocodeAllFromKartverketBulk,
 } from './local-geocode.js'
 import { kartverketBulkAvailable } from './kartverket-bulk.js'
+import {
+  DEFAULT_REFERENCE_CACHE_DIR,
+  ensureBrregReferenceCache,
+  importBrregEnheterFromCache,
+  importBrregUnderenheterFromCache,
+} from './reference-cache.js'
 import {
   applyGeocodeResult,
   getCachedAddress,
@@ -354,10 +358,15 @@ export async function runBackfillImport(
       skipUnderenheterBackfill: options.skipUnderenheterBackfill,
     })
   } else {
-    console.log('Backfill: streamer BRREG bulk inn i eksisterende database (hele landet, ingen sletting)…')
+    console.log('Backfill: importerer BRREG fra referansecache (hele landet, ingen sletting)…')
 
-    console.log('Backfill enheter fra BRREG bulk…')
-    await downloadBulkEntities(async (entity) => {
+    const reference = await ensureBrregReferenceCache(DEFAULT_REFERENCE_CACHE_DIR, {
+      reuseDownloads: true,
+      skipUnderenheter: options.skipUnderenheterBackfill,
+    })
+
+    console.log(`Backfill enheter fra ${reference.enheterPath}…`)
+    await importBrregEnheterFromCache(reference.enheterPath, async (entity) => {
       upsertEntity(db, entity, Boolean(entity.slettedato))
       imported += 1
     })
@@ -366,9 +375,9 @@ export async function runBackfillImport(
     let importedUnder = 0
     if (options.skipUnderenheterBackfill) {
       console.log('Hopper over underenheter (--skip-underenheter-backfill).')
-    } else {
-      console.log('Backfill underenheter fra BRREG bulk…')
-      await downloadBulkUnderenheter(async (entity) => {
+    } else if (reference.underenheterPath) {
+      console.log(`Backfill underenheter fra ${reference.underenheterPath}…`)
+      await importBrregUnderenheterFromCache(reference.underenheterPath, async (entity) => {
         upsertUnderenhet(db, entity, Boolean(entity.slettedato))
         importedUnder += 1
       })
@@ -377,14 +386,12 @@ export async function runBackfillImport(
 
     imported += importedUnder
 
-    const latestId = await fetchLatestUpdateId()
-    if (latestId > 0) {
-      setSyncState(db, LAST_UPDATE_ID_KEY, String(latestId))
+    const manifest = reference.manifest
+    if (manifest.last_oppdateringsid) {
+      setSyncState(db, LAST_UPDATE_ID_KEY, manifest.last_oppdateringsid)
     }
-
-    const latestUnderId = await fetchLatestUpdateIdUnderenheter()
-    if (latestUnderId > 0) {
-      setSyncState(db, LAST_UPDATE_ID_UNDERENHETER_KEY, String(latestUnderId))
+    if (manifest.last_oppdateringsid_underenheter) {
+      setSyncState(db, LAST_UPDATE_ID_UNDERENHETER_KEY, manifest.last_oppdateringsid_underenheter)
     }
   }
 

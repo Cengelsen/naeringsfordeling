@@ -29,6 +29,8 @@ function pointRadiusExpression(detailMinZoom: number): maplibregl.ExpressionSpec
     'interpolate',
     ['linear'],
     ['zoom'],
+    0,
+    3,
     mlDetailZoom,
     4,
     mlDetailZoom + 3,
@@ -60,11 +62,16 @@ function pointsToGeoJson(points: OrganizationPoint[], colorTypes: string[]): Fea
 
   const features = groups.map((group) => {
     const orgnrs = orgnrsFromGroup(group)
+    const primary = group.orgs[0]
+    const naeringskode = primary?.naeringskode ?? ''
     const properties: Record<string, string | number> = {
       orgnr: orgnrs[0]!,
       orgType: group.orgType,
       orgCount: group.orgCount,
       orgnrs: orgnrs.join(','),
+      entityKind: primary?.entityKind ?? 'enhet',
+      employeeBand: primary?.employeeBand ?? 'unknown',
+      naeringskode: naeringskode.length >= 2 ? naeringskode.slice(0, 2) : naeringskode,
     }
 
     if (group.orgCount > 1) {
@@ -217,25 +224,17 @@ export function createMaplibreDotsLayer(
   function pointLayerFilter(singleOnly: boolean): maplibregl.FilterSpecification {
     const parts: maplibregl.FilterSpecification[] = []
     const typeFilter = propertyInFilter('orgType', dotFilters.orgTypes)
-    const naeringFilter = propertyInFilter('naeringskode', dotFilters.naeringskodeSections)
-    const bandFilter = propertyInFilter('employeeBand', dotFilters.employeeBands)
-    const kindFilter = propertyInFilter('entityKind', dotFilters.entityKinds)
 
     if (typeFilter) parts.push(typeFilter)
-    if (naeringFilter) parts.push(naeringFilter)
-    if (bandFilter) parts.push(bandFilter)
-    if (kindFilter) parts.push(kindFilter)
 
     const countFilter: maplibregl.FilterSpecification = singleOnly
       ? ['==', ['get', 'orgCount'], 1]
       : ['>', ['get', 'orgCount'], 1]
 
     if (vectorMode || !clusteringEnabled) {
-      const base =
-        parts.length > 0
-          ? (['all', ...parts] as maplibregl.FilterSpecification)
-          : true
-      if (vectorMode) return base
+      if (vectorMode) {
+        return parts.length > 0 ? (['all', ...parts] as maplibregl.FilterSpecification) : true
+      }
       return parts.length > 0
         ? (['all', countFilter, ...parts] as maplibregl.FilterSpecification)
         : countFilter
@@ -311,7 +310,7 @@ export function createMaplibreDotsLayer(
       type: 'circle',
       source: SOURCE_ID,
       ...(vectorMode ? { 'source-layer': VECTOR_TILES_LAYER } : {}),
-      minzoom: vectorMode ? 0 : Math.max(0, options.dotsDetailMinZoom - 2),
+      minzoom: 0,
       filter: pointLayerFilter(true),
       paint: {
         'circle-color':
@@ -337,7 +336,7 @@ export function createMaplibreDotsLayer(
       id: MULTI_POINT_LAYER_ID,
       type: 'symbol',
       source: SOURCE_ID,
-      minzoom: Math.max(0, options.dotsDetailMinZoom - 2),
+      minzoom: 0,
       filter: pointLayerFilter(false),
       layout: {
         'icon-image': ['get', 'colorMixKey'],
@@ -446,6 +445,7 @@ export function createMaplibreDotsLayer(
       syncMultiSquareImages(mlMap, points, currentTypes)
       source.setData(pointsToGeoJson(points, currentTypes))
       applyPointColors(currentTypes)
+      applyTypeVisibility()
       applyOpacity()
     }
   }

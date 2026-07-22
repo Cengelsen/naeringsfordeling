@@ -29,8 +29,7 @@
     fetchKonsernstruktur,
     lookupOrganizationLocal,
     fetchOrganizationPoints,
-    MAX_VIEWPORT_DOTS,
-    MIN_DOTS_ZOOM,
+    limitForZoom,
   } from '../services/api'
   import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
   import {
@@ -574,13 +573,8 @@
 
   function kommunerInBounds(): string[] {
     if (!map || !geojson) return []
+
     const bounds = mapGeoBounds(map.getBounds())
-    const zoom = map.getZoom()
-
-    if (zoom < MIN_DOTS_ZOOM) {
-      return []
-    }
-
     const matches: string[] = []
     for (const feature of kommuneFeatures(geojson)) {
       const kommunenummer = feature.properties.kommunenummer
@@ -613,13 +607,14 @@
   }
 
   function applyPoints(nextPoints: OrganizationPoint[], truncated: boolean, kommuner: number) {
+    const visiblePoints = filterPointsByMapFilters(nextPoints, settings)
     allPoints = nextPoints
-    points = nextPoints
-    dotsController?.setPoints(nextPoints)
+    points = visiblePoints
+    dotsController?.setPoints(visiblePoints)
     applyDotFilters()
     dotsController?.setStale(false)
     dotsController?.bringToFront()
-    const visibleCount = filterPointsByMapFilters(nextPoints, settings).length
+    const visibleCount = visiblePoints.length
     updateDotsState({
       loading: false,
       phase: 'idle',
@@ -628,7 +623,7 @@
       skipped: 0,
       kommuner,
       message: truncated
-        ? 'Viser maks antall organisasjoner for utsnittet – zoom inn for flere detaljer'
+        ? 'Viser et utvalg av organisasjoner – zoom inn for flere detaljer'
         : null,
     })
   }
@@ -668,7 +663,8 @@
         const result = await fetchOrganizationPoints(settings, {
           bbox: expanded,
           kommunenumre: targetKommuner,
-          limit: MAX_VIEWPORT_DOTS,
+          zoom,
+          limit: limitForZoom(zoom),
         })
         await dotsCache.set(key, {
           points: result.points,
@@ -707,7 +703,7 @@
         geocoded: 0,
         skipped: 0,
         kommuner: 0,
-        message: `Zoom inn (nivå ${MIN_DOTS_ZOOM}+) for adressevisning`,
+        message: null,
       })
       return
     }
@@ -740,7 +736,8 @@
       const result = await fetchOrganizationPoints(settings, {
         bbox,
         kommunenumre: targetKommuner,
-        limit: MAX_VIEWPORT_DOTS,
+        zoom,
+        limit: limitForZoom(zoom),
       })
 
       if (token !== loadToken) return

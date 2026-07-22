@@ -10,7 +10,7 @@
     toggleNaeringskodeSection,
     toggleOrgType,
   } from '../stores/settings.svelte'
-  import { MIN_DOTS_ZOOM, fetchNaeringskoder, searchOrganizations } from '../services/api'
+  import { fetchNaeringskoder, searchOrganizations } from '../services/api'
   import { fylkeFromKommune, fylkeName } from '../utils/geo'
   import { EMPLOYEE_BANDS, EMPLOYEE_BAND_LABELS } from '../utils/employeeBands'
   import { naeringskodeSectionLabel } from '../utils/naeringskode'
@@ -287,7 +287,7 @@
 
     {#if isDotsView}
       <p class="hint">
-        Zoom inn (nivå {MIN_DOTS_ZOOM}+) for å vise geokodede adresser.
+        Ved lav zoom vises et utvalg som bevarer fordelingen av org.typer. Zoom inn for flere punkter.
       </p>
     {:else}
       <div class="segmented nested">

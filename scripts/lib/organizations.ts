@@ -9,6 +9,12 @@ export function entityAddress(entity: BrregEntity | BrregUnderenhet): BrregAddre
   return entity.forretningsadresse ?? entity.postadresse ?? null
 }
 
+export function entityKommunenummer(entity: BrregEntity | BrregUnderenhet): string | null {
+  const address = entityAddress(entity)
+  if (!address?.kommunenummer) return null
+  return address.kommunenummer.padStart(4, '0')
+}
+
 function baseRecord(
   entity: BrregEntity | BrregUnderenhet,
   entityKind: EntityKind,

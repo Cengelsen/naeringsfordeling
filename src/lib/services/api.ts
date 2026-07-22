@@ -13,13 +13,11 @@ import type {
 import { bandMatchesFilter } from '../utils/employeeBands'
 import { sectionMatchesFilter } from '../utils/naeringskode'
 import {
-  canUseStaticTiles,
   filterPointsInBbox,
   normalizeOrgnr,
   parsePointsResponse,
   type CompactPoint,
 } from '../map/points'
-import { fetchViewportPointTiles } from '../map/pointTiles'
 import { assetUrl } from '../utils/assets'
 import { fetchStaticJson } from '../utils/staticJson'
 import { buildOrgSearchIndex, searchOrgSearchIndex, type OrgSearchIndex } from '../search/orgSearchIndex'
@@ -295,15 +293,19 @@ function searchStaticOrganizations(
   return searchOrgSearchIndex(index, query, limit)
 }
 
-export const MIN_DOTS_ZOOM = 9
-export const DOTS_DETAIL_MIN_ZOOM = 12
-export const MAX_VIEWPORT_DOTS = 50000
+export const MAX_VIEWPORT_DOTS = 50_000
 
 class ApiError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'ApiError'
   }
+}
+
+/** Target point count for the current zoom (matches server-side sampling). */
+export function limitForZoom(zoom: number): number {
+  const z = Math.max(4, Math.min(18, zoom))
+  return Math.min(MAX_VIEWPORT_DOTS, Math.round(250 * 1.38 ** (z - 4)))
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -325,13 +327,6 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return response.json() as Promise<T>
-}
-
-export function limitForZoom(zoom: number): number {
-  if (zoom < 10) return 5000
-  if (zoom < 12) return 15000
-  if (zoom < 14) return 30000
-  return 50000
 }
 
 /** Filters that require server-side data reload (excludes orgTypes). */
@@ -478,23 +473,6 @@ export async function fetchOrganizationPoints(
   filters: MapFilters,
   options: FetchPointsOptions = {},
 ): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
-  const useTiles =
-    !STATIC_API &&
-    canUseStaticTiles(filters) &&
-    options.kommunenumre &&
-    options.kommunenumre.length > 0 &&
-    options.bbox
-
-  if (useTiles) {
-    const tiled = await fetchViewportPointTiles(options.kommunenumre!, options.bbox!)
-    if (tiled && tiled.length > 0) {
-      return {
-        points: tiled,
-        truncated: false,
-      }
-    }
-  }
-
   return fetchOrganizationPointsFromApi(filters, options)
 }
 
