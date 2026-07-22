@@ -322,7 +322,7 @@ BRREG + Kartverket
         ▼
 data/organizations.db
         │
-        ├─ yarn export-vector-tiles ──► NDJSON ──► tippecanoe ──► MBTiles
+        ├─ yarn export-map-tiles ──► LOD NDJSON ──► tippecanoe (4 band) ──► tile-join
         │                                                    │
         │                                                    ▼
         │                                              pmtiles convert
@@ -332,7 +332,8 @@ data/organizations.db
         │
         ├─ yarn export-points ──► public/data/points/{kommune}.json  (valgfritt)
         │
-        └─ yarn server ──► GET /api/organizations/points (R-tree bbox)
+        ├─ yarn server ──► GET /api/viewport-summary (bbox-statistikk)
+        └─ yarn server ──► GET /api/organizations/points (R-tree bbox, fallback)
 
 Frontend (MapView, modus «dots»):
   1. PMTiles + MapLibre vector source   ← foretrukket
@@ -343,15 +344,24 @@ Frontend (MapView, modus «dots»):
 
 Basekartet er Leaflet (OSM-raster). Prikkene tegnes i et transparent MapLibre GL-lag (`@maplibre/maplibre-gl-leaflet`) i Leaflet sitt `markerPane`, slik at Leaflet eier pan/zoom og MapLibre eier GPU-sirkler.
 
-### 1. Vektorfliser (tippecanoe → PMTiles)
+### 1. LOD-kartfliser (tippecanoe → PMTiles)
 
-**Script:** [`scripts/export-vector-tiles.ts`](scripts/export-vector-tiles.ts) (`yarn export-vector-tiles`)
+**Script:** [`scripts/export-map-tiles.ts`](scripts/export-map-tiles.ts) (`yarn export-map-tiles`, alias: `yarn export-vector-tiles`)
+
+Bygger en **zoom-pyramide** med forhåndsaggregerte celleprikker og enkeltadresser:
+
+| Lag | Zoom | Innhold |
+|-----|------|---------|
+| `cells_coarse` | 4–7 | Store celler (~35 km), farge per org.type |
+| `cells_medium` | 7–10 | Mellomstore celler (~9 km) |
+| `cells_fine` | 10–12 | Fine celler (~2 km) |
+| `organizations` | 12–16 | Enkeltadresser (klikkbare) |
 
 **Forutsetninger:**
 
-- [tippecanoe](https://github.com/felt/tippecanoe) på `PATH` (se [Fedora-instruksjoner](#installere-tippecanoe-fedora) under)
+- [tippecanoe](https://github.com/felt/tippecanoe) på `PATH` (inkl. `tile-join`; se [Fedora-instruksjoner](#installere-tippecanoe-fedora) under)
 - [go-pmtiles](https://github.com/protomaps/go-pmtiles) CLI (lastes automatisk ned til `.cache/bin/` hvis den mangler)
-- Ferdig geokodet `data/organizations.db`
+- Ferdig geokodet database (`data/organizations.db` eller regional DB)
 
 #### Installere tippecanoe (Fedora)
 
@@ -382,52 +392,51 @@ Deretter:
 
 ```bash
 yarn download-db          # eller yarn build-db / yarn sync:dev
-yarn export-vector-tiles
+yarn export-map-tiles
+
+# Regional database (f.eks. Vestland):
+DATABASE_PATH=data/regions/fylker/46-vestland.db yarn export-map-tiles
 ```
 
 **Pipeline:**
 
-1. Les geokodede organisasjoner fra SQLite med faste filtre:
-   - `deleted = 0`, `konkurs = 0`, `under_avvikling = 0`
-   - `lat` / `lng` ikke null
-   - *ikke* filtrert på MVA (`vatRegisteredOnly: false`)
-2. Skriv GeoJSON **NDJSON** (én Feature per linje) med properties `orgnr` og `orgType`
-3. Kjør tippecanoe → `public/data/points.mbtiles` (lag-navn: `organizations`)
-4. `pmtiles convert` → `public/data/points.pmtiles`
-5. Slett midlertidig MBTiles
-6. Skriv `public/data/points/manifest.json` med total, org-typer, bake-in filtre og tidspunkt
+1. Les geokodede organisasjoner fra SQLite (standardfiltre: ikke konkurs/avvikling, `entity_kind=enhet`)
+2. Aggreger til tre cellestørrelser (NDJSON med `orgType`, `count`, `cellId`)
+3. Eksporter enkeltpunkter som NDJSON
+4. Kjør tippecanoe per zoom-bånd → `tile-join` → én `points.mbtiles`
+5. `pmtiles convert` → `public/data/points.pmtiles`
+6. Skriv `public/data/points/manifest.json` med `layers[]` og filter-metadata
 
-**Tippecanoe-flagg:**
+**Statistikk vs. tegning:** Kartet viser forhåndsaggregerte prikker ved lav zoom. Paneltallene (`GET /api/viewport-summary`) teller alle organisasjoner i kartutsnittet (geokodede i bbox + uten koordinat i overlappende kommuner). På statisk GitHub Pages brukes omtrentlige tall fra `municipality-breakdown.json`.
 
-| Flagg | Betydning |
-|-------|-----------|
-| `-z14` | Maks zoom 14 |
-| `-P` | Parallell prosessering |
-| `--drop-densest-as-needed` | Dropp tetteste punkter hvis flisen blir for stor |
-| `--coalesce-densest-as-needed` | Slå sammen tette punkter ved behov |
-| `--extend-zooms-if-still-dropping` | Utvid zoomnivåer til alt får plass |
-| `--maximum-tile-bytes=2000000` | ~2 MB budsjett per flise |
-| `--no-tile-compression` | Ukomprimert MVT (enklere HTTP range / PMTiles) |
-| `--force` | Overskriv eksisterende output |
-| `-l organizations` | Vektorlag-navn brukt av MapLibre |
+**Pipeline (legacy enkeltlag):** Eldre manifest uten `layers[]` vises fortsatt som ett `organizations`-lag.
+
+**Tippecanoe (enkeltpunkter):** `--drop-densest-as-needed` brukes kun på `organizations`-laget. Aggregerte celler eksporteres uten dropping.
 
 Miljøvariabler: `DATABASE_PATH`, `POINTS_OUTPUT_DIR` (standard `public/data`).
 
-**Manifest** (eksempel):
+**Manifest** (eksempel med LOD):
 
 ```json
 {
-  "total": 120668,
+  "total": 208501,
   "layer": "organizations",
   "format": "pmtiles",
   "path": "/data/points.pmtiles",
+  "layers": [
+    { "name": "cells_coarse", "minZoom": 4, "maxZoom": 7 },
+    { "name": "cells_medium", "minZoom": 7, "maxZoom": 10 },
+    { "name": "cells_fine", "minZoom": 10, "maxZoom": 12 },
+    { "name": "organizations", "minZoom": 12, "maxZoom": 16 }
+  ],
   "filters": {
     "excludeKonkurs": true,
     "excludeUnderAvvikling": true,
-    "vatRegisteredOnly": false
+    "vatRegisteredOnly": false,
+    "entityKinds": ["enhet"]
   },
   "orgTypes": ["ANNA", "ANS", "AS", "..."],
-  "generatedAt": "2026-07-18T00:00:00.000Z"
+  "generatedAt": "2026-07-22T00:00:00.000Z"
 }
 ```
 

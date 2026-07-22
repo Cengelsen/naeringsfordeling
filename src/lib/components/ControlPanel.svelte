@@ -247,10 +247,35 @@
   </section>
 
   <section class="section stats">
-    <div class="stat">
-      <span class="stat-value">{totalCount.toLocaleString('nb-NO')}</span>
-      <span class="stat-label">{isDotsView ? 'Prikker' : 'Organisasjoner'}</span>
-    </div>
+    {#if isDotsView && dotsState.viewportSummary}
+      <div class="stat">
+        <span class="stat-value">
+          {dotsState.viewportSummary.geocodedInBbox.toLocaleString('nb-NO')}
+        </span>
+        <span class="stat-label">I kartutsnittet</span>
+      </div>
+      {#if dotsState.viewportSummary.ungeocodedInViewport > 0}
+        <div class="stat">
+          <span class="stat-value">
+            {dotsState.viewportSummary.ungeocodedInViewport.toLocaleString('nb-NO')}
+          </span>
+          <span class="stat-label">Uten kartkoordinat</span>
+        </div>
+      {/if}
+      {#if dotsState.renderedFeatureCount != null && dotsState.renderedFeatureCount > 0}
+        <div class="stat">
+          <span class="stat-value">
+            {dotsState.renderedFeatureCount.toLocaleString('nb-NO')}
+          </span>
+          <span class="stat-label">Prikker vist</span>
+        </div>
+      {/if}
+    {:else}
+      <div class="stat">
+        <span class="stat-value">{totalCount.toLocaleString('nb-NO')}</span>
+        <span class="stat-label">{isDotsView ? 'Prikker' : 'Organisasjoner'}</span>
+      </div>
+    {/if}
     <div class="stat">
       <span class="stat-value">{isFylkeLevel ? fylker.length : kommuner.length}</span>
       <span class="stat-label">{isFylkeLevel ? 'Fylker' : 'Kommuner'}</span>
@@ -287,7 +312,7 @@
 
     {#if isDotsView}
       <p class="hint">
-        Ved lav zoom vises et utvalg som bevarer fordelingen av org.typer. Zoom inn for flere punkter.
+        Statistikken gjelder hele kartutsnittet. Ved lav zoom vises forhåndsaggregerte celleprikker; zoom inn for enkeltadresser.
       </p>
     {:else}
       <div class="segmented nested">
@@ -344,6 +369,19 @@
         <p class="hint loading-hint">
           {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Oppdaterer kart…'}
           {dotsState.message ?? ''}
+        </p>
+      {:else if dotsState.viewportSummary}
+        <p class="hint">
+          {dotsState.viewportSummary.geocodedInBbox.toLocaleString('nb-NO')} geokodede i kartutsnittet
+          {#if dotsState.viewportSummary.ungeocodedInViewport > 0}
+            · {dotsState.viewportSummary.ungeocodedInViewport.toLocaleString('nb-NO')} uten kartkoordinat
+          {/if}
+          {#if dotsState.renderedFeatureCount != null && dotsState.renderedFeatureCount > 0}
+            · {dotsState.renderedFeatureCount.toLocaleString('nb-NO')} prikker vist
+          {/if}
+          {#if dotsState.statsApproximate}
+            · omtrentlige tall (statisk modus)
+          {/if}
         </p>
       {:else if dotsState.organizations > 0}
         <p class="hint">

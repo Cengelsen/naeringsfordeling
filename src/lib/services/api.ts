@@ -9,6 +9,7 @@ import type {
   OrganizationPoint,
   OrganizationSearchHit,
   Organisasjonsform,
+  ViewportSummary,
 } from '../types'
 import { bandMatchesFilter } from '../utils/employeeBands'
 import { sectionMatchesFilter } from '../utils/naeringskode'
@@ -246,6 +247,32 @@ export async function lookupOrganizationLocal(orgnr: string): Promise<Organizati
   return hit ? organizationFromSearchHit(hit) : null
 }
 
+function breakdownRowMatchesFilters(row: MunicipalityBreakdownRow, filters: MapFilters): boolean {
+  if (filters.orgTypes.length > 0 && !filters.orgTypes.includes(row.org_type)) return false
+  if (filters.excludeKonkurs && row.konkurs !== 0) return false
+  if (filters.excludeUnderAvvikling && row.under_avvikling !== 0) return false
+  if (filters.vatRegisteredOnly && row.vat_registered !== 1) return false
+  if (!sectionMatchesFilter(row.naeringskode_section ?? null, filters.naeringskodeSections)) {
+    return false
+  }
+  if (
+    !bandMatchesFilter(
+      (row.employee_band ?? 'unknown') as import('../utils/employeeBands').EmployeeBand,
+      filters.employeeBands,
+    )
+  ) {
+    return false
+  }
+  if (
+    filters.entityKinds.length > 0 &&
+    row.entity_kind &&
+    !filters.entityKinds.includes(row.entity_kind as 'enhet' | 'underenhet')
+  ) {
+    return false
+  }
+  return true
+}
+
 function aggregateMunicipalityCounts(
   rows: MunicipalityBreakdownRow[],
   filters: MapFilters,
@@ -253,30 +280,7 @@ function aggregateMunicipalityCounts(
   const totals = new Map<string, number>()
 
   for (const row of rows) {
-    if (filters.orgTypes.length > 0 && !filters.orgTypes.includes(row.org_type)) continue
-    if (filters.excludeKonkurs && row.konkurs !== 0) continue
-    if (filters.excludeUnderAvvikling && row.under_avvikling !== 0) continue
-    if (filters.vatRegisteredOnly && row.vat_registered !== 1) continue
-    if (
-      !sectionMatchesFilter(row.naeringskode_section ?? null, filters.naeringskodeSections)
-    ) {
-      continue
-    }
-    if (
-      !bandMatchesFilter(
-        (row.employee_band ?? 'unknown') as import('../utils/employeeBands').EmployeeBand,
-        filters.employeeBands,
-      )
-    ) {
-      continue
-    }
-    if (
-      filters.entityKinds.length > 0 &&
-      row.entity_kind &&
-      !filters.entityKinds.includes(row.entity_kind as 'enhet' | 'underenhet')
-    ) {
-      continue
-    }
+    if (!breakdownRowMatchesFilters(row, filters)) continue
     totals.set(row.kommunenummer, (totals.get(row.kommunenummer) ?? 0) + row.count)
   }
 
@@ -426,6 +430,73 @@ export interface FetchPointsOptions {
   selectedFylke?: string
   zoom?: number
   limit?: number
+}
+
+export interface FetchViewportSummaryOptions {
+  bbox: [number, number, number, number]
+  zoom?: number
+  kommunenumre?: string[]
+}
+
+async function fetchViewportSummaryStatic(
+  filters: MapFilters,
+  options: FetchViewportSummaryOptions,
+): Promise<ViewportSummary> {
+  const rows = await loadMunicipalityBreakdown()
+  const kommuneSet = new Set(options.kommunenumre ?? [])
+
+  let totalInViewport = 0
+  const byOrgType: Record<string, number> = {}
+
+  for (const row of rows) {
+    if (kommuneSet.size > 0 && !kommuneSet.has(row.kommunenummer)) continue
+    if (!breakdownRowMatchesFilters(row, filters)) continue
+    totalInViewport += row.count
+  }
+
+  let geocodedInBbox = 0
+  const points = await loadGeocodedPoints()
+  for (const row of points) {
+    if (!geocodedPointMatchesFilters(row, filters)) continue
+    if (options.bbox && !geocodedPointInBbox(row, options.bbox)) continue
+    geocodedInBbox += 1
+    const orgType = row[3]
+    byOrgType[orgType] = (byOrgType[orgType] ?? 0) + 1
+  }
+
+  const detailMinZoom = 12
+  const renderMode: ViewportSummary['renderMode'] =
+    options.zoom != null && options.zoom >= detailMinZoom ? 'individual' : 'aggregate'
+
+  return {
+    totalInViewport,
+    geocodedInBbox,
+    ungeocodedInViewport: Math.max(0, totalInViewport - geocodedInBbox),
+    byOrgType,
+    renderMode,
+    kommunerInViewport: kommuneSet.size,
+  }
+}
+
+export async function fetchViewportSummary(
+  filters: MapFilters,
+  options: FetchViewportSummaryOptions,
+): Promise<{ summary: ViewportSummary; approximate: boolean }> {
+  if (STATIC_API) {
+    const summary = await fetchViewportSummaryStatic(filters, options)
+    return { summary, approximate: true }
+  }
+
+  const params = dataFiltersToParams(filters)
+  params.set('bbox', options.bbox.join(','))
+  if (options.zoom != null) {
+    params.set('zoom', String(options.zoom))
+  }
+
+  const data = await apiFetch<{ summary: ViewportSummary }>(
+    `/api/viewport-summary?${params.toString()}`,
+  )
+  return { summary: data.summary, approximate: false }
 }
 
 async function fetchOrganizationPointsFromApi(

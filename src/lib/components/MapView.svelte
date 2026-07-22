@@ -29,6 +29,7 @@
     fetchKonsernstruktur,
     lookupOrganizationLocal,
     fetchOrganizationPoints,
+    fetchViewportSummary,
     limitForZoom,
   } from '../services/api'
   import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
@@ -41,6 +42,9 @@
   import type { DotFilters } from '../map/maplibreDotsLayer'
   import { naeringskodeSectionLabel } from '../utils/naeringskode'
   import {
+    aggregateLayersFromManifest,
+    manifestHasLodLayers,
+    pointsLayerFromManifest,
     probeVectorTiles,
     vectorTilesSourceUrl,
     type VectorTilesManifest,
@@ -82,6 +86,7 @@
   })
 
   let loadToken = 0
+  let summaryToken = 0
   let boundsTimer: ReturnType<typeof setTimeout> | undefined
   let kommuneBoundsByNummer = new Map<string, GeoBounds>()
   let vectorTilesManifest = $state<VectorTilesManifest | null>(null)
@@ -99,6 +104,10 @@
       !vectorTilesDisabled &&
       !webglUnavailable &&
       canUseStaticTiles(settings),
+  )
+
+  const lodTilesReady = $derived(
+    vectorTilesReady && manifestHasLodLayers(vectorTilesManifest),
   )
 
   const countMap = $derived(new Map(counts.map((c) => [c.kommunenummer, c.count])))
@@ -126,9 +135,10 @@
 
   const totalVisible = $derived(
     settings.visualization === 'dots'
-      ? vectorTilesReady
-        ? vectorTilesManifest?.total ?? 0
-        : filterPointsByMapFilters(allPoints, settings).length
+      ? (dotsState.viewportSummary?.geocodedInBbox ??
+        (vectorTilesReady
+          ? vectorTilesManifest?.total ?? 0
+          : filterPointsByMapFilters(allPoints, settings).length))
       : counts.reduce((sum, c) => sum + c.count, 0),
   )
 
@@ -412,6 +422,17 @@
     }
   }
 
+  function handleAggregateClick(info: { orgType: string; count: number; latlng: L.LatLng }) {
+    if (!map) return
+    const label = orgForms.find((form) => form.kode === info.orgType)?.beskrivelse ?? info.orgType
+    L.popup({ maxWidth: 280 })
+      .setLatLng(info.latlng)
+      .setContent(
+        `<strong>${label}</strong><br>${info.count.toLocaleString('nb-NO')} organisasjoner i cellen<br><em>Zoom inn for enkeltadresser</em>`,
+      )
+      .openOn(map)
+  }
+
   function handleMarkerClick(orgnrs: string[], latlng: L.LatLng) {
     if (orgnrs.length === 1) {
       void showOrganizationPopup(orgnrs[0]!, latlng)
@@ -530,8 +551,11 @@
       dotsDetailMinZoom: settings.dotsDetailMinZoom,
       dotsClustering: false,
       vectorTilesUrl: vectorUrl,
+      lodLayers: vectorMode ? aggregateLayersFromManifest(vectorTilesManifest) : [],
+      pointsLayer: vectorMode ? pointsLayerFromManifest(vectorTilesManifest) : null,
       orgTypesForColors,
       onMarkerClick: handleMarkerClick,
+      onAggregateClick: handleAggregateClick,
       onVectorTilesError: disableVectorTiles,
     })
 
@@ -563,12 +587,9 @@
     updateDotsState({
       loading: false,
       phase: 'idle',
-      organizations: vectorTilesManifest?.total ?? 0,
-      geocoded: vectorTilesManifest?.total ?? 0,
-      skipped: 0,
-      kommuner: geojson?.features.length ?? 0,
       message: null,
     })
+    window.setTimeout(() => updateRenderedFeatureCount(), 300)
   }
 
   function kommunerInBounds(): string[] {
@@ -598,12 +619,55 @@
       next.skipped === current.skipped &&
       next.kommuner === current.kommuner &&
       next.message === current.message &&
-      next.webglUnavailable === current.webglUnavailable
+      next.webglUnavailable === current.webglUnavailable &&
+      next.renderedFeatureCount === current.renderedFeatureCount &&
+      next.statsApproximate === current.statsApproximate &&
+      next.viewportSummary?.geocodedInBbox === current.viewportSummary?.geocodedInBbox &&
+      next.viewportSummary?.ungeocodedInViewport === current.viewportSummary?.ungeocodedInViewport &&
+      next.viewportSummary?.renderMode === current.viewportSummary?.renderMode
     ) {
       return
     }
     dotsState = next
     onDotsStateChange?.(next)
+  }
+
+  function updateRenderedFeatureCount() {
+    const count = dotsController?.countRenderedFeatures?.() ?? 0
+    updateDotsState({ renderedFeatureCount: count })
+  }
+
+  async function loadViewportSummary() {
+    if (!map || settings.visualization !== 'dots' || orgFocusActive) return
+
+    const targetKommuner = kommunerInBounds()
+    const zoom = map.getZoom()
+    const bbox = mapBbox(map.getBounds())
+    const token = ++summaryToken
+
+    try {
+      const { summary, approximate } = await fetchViewportSummary(settings, {
+        bbox,
+        zoom,
+        kommunenumre: targetKommuner,
+      })
+      if (token !== summaryToken) return
+
+      updateDotsState({
+        viewportSummary: summary,
+        statsApproximate: approximate,
+        geocoded: summary.geocodedInBbox,
+        organizations: summary.geocodedInBbox,
+        skipped: summary.ungeocodedInViewport,
+        kommuner: summary.kommunerInViewport,
+      })
+      updateRenderedFeatureCount()
+    } catch (err) {
+      if (token !== summaryToken) return
+      updateDotsState({
+        message: err instanceof Error ? err.message : 'Kunne ikke hente statistikk for utsnittet',
+      })
+    }
   }
 
   function applyPoints(nextPoints: OrganizationPoint[], truncated: boolean, kommuner: number) {
@@ -630,7 +694,10 @@
 
   function applyOrgTypeVisibility() {
     applyDotFilters()
-    if (untrack(() => vectorTilesReady)) return
+    if (untrack(() => vectorTilesReady)) {
+      updateRenderedFeatureCount()
+      return
+    }
     const count = filterPointsByMapFilters(allPoints, settings).length
     updateDotsState({
       organizations: count,
@@ -682,6 +749,7 @@
 
     if (vectorTilesReady) {
       applyVectorTilesState()
+      await loadViewportSummary()
       return
     }
 
@@ -720,6 +788,7 @@
     if (cached) {
       applyPoints(cached.points, cached.truncated, targetKommuner.length)
       prefetchExpanded(bbox, targetKommuner, zoom)
+      await loadViewportSummary()
       return
     }
 
@@ -750,6 +819,7 @@
 
       applyPoints(result.points, result.truncated, targetKommuner.length)
       prefetchExpanded(bbox, targetKommuner, zoom)
+      await loadViewportSummary()
     } catch (err) {
       if (token !== loadToken) return
       dotsController?.setStale(false)
@@ -773,6 +843,7 @@
     clearTimeout(boundsTimer)
     boundsTimer = setTimeout(() => {
       loadDots()
+      loadViewportSummary()
     }, delay)
   }
 
@@ -1068,9 +1139,11 @@
     {#if orgFocusActive}
       Organisasjon · OpenStreetMap
     {:else if settings.visualization === 'dots'}
-      {totalVisible.toLocaleString('nb-NO')} prikk{totalVisible === 1 ? '' : 'er'} ·
-      {dotsState.skipped > 0 ? `${dotsState.skipped.toLocaleString('nb-NO')} uten adresse · ` : ''}
-      {vectorTilesReady ? 'vektorfliser' : webglUnavailable ? 'Leaflet-fallback' : 'SQLite-database'}
+      {totalVisible.toLocaleString('nb-NO')} geokodede i utsnittet
+      {#if dotsState.viewportSummary && dotsState.viewportSummary.ungeocodedInViewport > 0}
+        · {dotsState.viewportSummary.ungeocodedInViewport.toLocaleString('nb-NO')} uten kartkoordinat
+      {/if}
+      · {vectorTilesReady ? 'vektorfliser' : webglUnavailable ? 'Leaflet-fallback' : 'SQLite-database'}
     {:else}
       {totalVisible.toLocaleString('nb-NO')} organisasjoner i visningen
     {/if}

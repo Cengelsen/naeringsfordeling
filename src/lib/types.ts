@@ -67,6 +67,18 @@ export interface DotsLoadState {
   message: string | null
   /** True when MapLibre could not start (e.g. WebGL disabled in LibreWolf) */
   webglUnavailable?: boolean
+  viewportSummary?: ViewportSummary | null
+  renderedFeatureCount?: number
+  statsApproximate?: boolean
+}
+
+export interface ViewportSummary {
+  totalInViewport: number
+  geocodedInBbox: number
+  ungeocodedInViewport: number
+  byOrgType: Record<string, number>
+  renderMode: 'aggregate' | 'individual'
+  kommunerInViewport: number
 }
 
 export interface Organization {

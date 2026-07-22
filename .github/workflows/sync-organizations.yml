@@ -128,8 +128,8 @@ jobs:
           curl -L https://github.com/protomaps/go-pmtiles/releases/download/v1.31.1/go-pmtiles_1.31.1_Linux_x86_64.tar.gz \
             | sudo tar xz -C /usr/local/bin pmtiles
 
-      - name: Export vector tiles
-        run: yarn export-vector-tiles
+      - name: Export map tiles (LOD pyramid)
+        run: yarn export-map-tiles
 
       - name: Publish vector tiles release
         uses: softprops/action-gh-release@v2

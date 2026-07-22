@@ -155,5 +155,8 @@ export function createLeafletDotsLayer(
       map.getContainer().style.cursor = ''
       layer.remove()
     },
+    countRenderedFeatures() {
+      return layer.getLayers().length
+    },
   }
 }

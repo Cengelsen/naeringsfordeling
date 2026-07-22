@@ -6,7 +6,7 @@ import '@maplibre/maplibre-gl-leaflet'
 import type { OrganizationPoint } from '../types'
 import type { EmployeeBand } from '../utils/employeeBands'
 import { orgTypeColorExpression } from '../utils/orgTypeColors'
-import { ensurePmtilesProtocol, VECTOR_TILES_LAYER } from './vectorTiles'
+import { ensurePmtilesProtocol, VECTOR_TILES_LAYER, type VectorTilesLayerSpec } from './vectorTiles'
 import { groupPointsByLocation, locationKey, orgnrsFromGroup } from './addressGroups'
 import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
 import {
@@ -22,6 +22,24 @@ const CLUSTER_COUNT_LAYER_ID = 'org-cluster-count'
 const POINT_LAYER_ID = 'org-points'
 const MULTI_POINT_LAYER_ID = 'org-points-multi'
 const CLICK_TOLERANCE_PX = 10
+
+function aggregateLayerId(sourceLayer: string): string {
+  return `org-${sourceLayer}`
+}
+
+function aggregateRadiusExpression(): maplibregl.ExpressionSpecification {
+  return [
+    'interpolate',
+    ['linear'],
+    ['zoom'],
+    4,
+    ['step', ['get', 'count'], 4, 50, 5, 200, 7, 1000, 10],
+    10,
+    ['step', ['get', 'count'], 5, 50, 6, 200, 8, 1000, 11],
+    12,
+    4,
+  ]
+}
 
 function pointRadiusExpression(detailMinZoom: number): maplibregl.ExpressionSpecification {
   const mlDetailZoom = Math.max(0, detailMinZoom - 1)
@@ -136,8 +154,11 @@ export interface MaplibreDotsLayerOptions {
   dotsDetailMinZoom: number
   dotsClustering: boolean
   vectorTilesUrl?: string | null
+  lodLayers?: VectorTilesLayerSpec[]
+  pointsLayer?: VectorTilesLayerSpec | null
   orgTypesForColors?: string[]
   onMarkerClick: (orgnrs: string[], latlng: L.LatLng) => void
+  onAggregateClick?: (info: { orgType: string; count: number; latlng: L.LatLng }) => void
   onVectorTilesError?: (message: string) => void
 }
 
@@ -148,6 +169,7 @@ export interface MaplibreDotsController {
   setClustering(enabled: boolean): void
   setStale(stale: boolean): void
   bringToFront(): void
+  countRenderedFeatures(): number
   remove(): void
 }
 
@@ -156,6 +178,11 @@ export function createMaplibreDotsLayer(
   options: MaplibreDotsLayerOptions,
 ): MaplibreDotsController {
   const vectorMode = Boolean(options.vectorTilesUrl)
+  const lodLayers = options.lodLayers ?? []
+  const pointsLayerSpec = options.pointsLayer ?? null
+  const pointsMinZoom = pointsLayerSpec?.minZoom ?? 0
+  const pointsMaxZoom = pointsLayerSpec?.maxZoom ?? 24
+  const pointsSourceLayer = pointsLayerSpec?.name ?? VECTOR_TILES_LAYER
   let ready = false
   let styleReady = false
   let stale = false
@@ -170,7 +197,10 @@ export function createMaplibreDotsLayer(
   let currentPoints: OrganizationPoint[] = []
   let pendingPoints: OrganizationPoint[] | null = null
   let clickLayers = vectorMode
-    ? [POINT_LAYER_ID]
+    ? [
+        ...lodLayers.map((layer) => aggregateLayerId(layer.name)),
+        POINT_LAYER_ID,
+      ]
     : clusteringEnabled
       ? [MULTI_POINT_LAYER_ID, POINT_LAYER_ID, CLUSTER_LAYER_ID]
       : [MULTI_POINT_LAYER_ID, POINT_LAYER_ID]
@@ -246,7 +276,19 @@ export function createMaplibreDotsLayer(
       : (['all', unclustered, countFilter] as maplibregl.FilterSpecification)
   }
 
+  function aggregateLayerFilter(): maplibregl.FilterSpecification {
+    const typeFilter = propertyInFilter('orgType', dotFilters.orgTypes)
+    return typeFilter ?? true
+  }
+
   function applyTypeVisibility() {
+    for (const spec of lodLayers) {
+      const layerId = aggregateLayerId(spec.name)
+      if (mlMap.getLayer(layerId)) {
+        mlMap.setFilter(layerId, aggregateLayerFilter())
+      }
+    }
+
     if (mlMap.getLayer(POINT_LAYER_ID)) {
       mlMap.setFilter(POINT_LAYER_ID, pointLayerFilter(true))
     }
@@ -273,6 +315,12 @@ export function createMaplibreDotsLayer(
 
   function applyPointColors(types: string[]) {
     const colorExpr = types.length > 0 ? orgTypeColorExpression(types) : '#64748b'
+    for (const spec of lodLayers) {
+      const layerId = aggregateLayerId(spec.name)
+      if (mlMap.getLayer(layerId)) {
+        mlMap.setPaintProperty(layerId, 'circle-color', colorExpr)
+      }
+    }
     if (mlMap.getLayer(POINT_LAYER_ID)) {
       mlMap.setPaintProperty(POINT_LAYER_ID, 'circle-color', colorExpr)
     }
@@ -280,8 +328,16 @@ export function createMaplibreDotsLayer(
 
   function applyOpacity() {
     const pointOpacity = stale ? 0.45 : 0.88
+    const aggregateOpacity = stale ? 0.4 : 0.72
     const clusterOpacity = stale ? 0.55 : 0.92
     const labelOpacity = stale ? 0.65 : 1
+
+    for (const spec of lodLayers) {
+      const layerId = aggregateLayerId(spec.name)
+      if (mlMap.getLayer(layerId)) {
+        mlMap.setPaintProperty(layerId, 'circle-opacity', aggregateOpacity)
+      }
+    }
 
     if (mlMap.getLayer(POINT_LAYER_ID)) {
       mlMap.setPaintProperty(POINT_LAYER_ID, 'circle-opacity', pointOpacity)
@@ -301,7 +357,34 @@ export function createMaplibreDotsLayer(
     for (const id of [POINT_LAYER_ID, MULTI_POINT_LAYER_ID, CLUSTER_LAYER_ID, CLUSTER_COUNT_LAYER_ID]) {
       if (mlMap.getLayer(id)) mlMap.removeLayer(id)
     }
+    for (const spec of lodLayers) {
+      const layerId = aggregateLayerId(spec.name)
+      if (mlMap.getLayer(layerId)) mlMap.removeLayer(layerId)
+    }
     if (mlMap.getSource(SOURCE_ID)) mlMap.removeSource(SOURCE_ID)
+  }
+
+  function addAggregateLayers() {
+    for (const spec of lodLayers) {
+      const layerId = aggregateLayerId(spec.name)
+      mlMap.addLayer({
+        id: layerId,
+        type: 'circle',
+        source: SOURCE_ID,
+        'source-layer': spec.name,
+        minzoom: spec.minZoom,
+        maxzoom: spec.maxZoom,
+        filter: aggregateLayerFilter(),
+        paint: {
+          'circle-color':
+            currentTypes.length > 0 ? orgTypeColorExpression(currentTypes) : '#64748b',
+          'circle-radius': aggregateRadiusExpression(),
+          'circle-stroke-width': 0.5,
+          'circle-stroke-color': '#0f172a',
+          'circle-opacity': 0.72,
+        },
+      })
+    }
   }
 
   function addSinglePointLayer() {
@@ -309,8 +392,9 @@ export function createMaplibreDotsLayer(
       id: POINT_LAYER_ID,
       type: 'circle',
       source: SOURCE_ID,
-      ...(vectorMode ? { 'source-layer': VECTOR_TILES_LAYER } : {}),
-      minzoom: 0,
+      ...(vectorMode ? { 'source-layer': pointsSourceLayer } : {}),
+      minzoom: vectorMode ? pointsMinZoom : 0,
+      maxzoom: vectorMode ? pointsMaxZoom : 24,
       filter: pointLayerFilter(true),
       paint: {
         'circle-color':
@@ -356,7 +440,10 @@ export function createMaplibreDotsLayer(
     removeDataLayers()
     clusteringEnabled = clustered
     clickLayers = vectorMode
-      ? [POINT_LAYER_ID]
+      ? [
+          ...lodLayers.map((layer) => aggregateLayerId(layer.name)),
+          POINT_LAYER_ID,
+        ]
       : clustered
         ? [MULTI_POINT_LAYER_ID, POINT_LAYER_ID, CLUSTER_LAYER_ID]
         : [MULTI_POINT_LAYER_ID, POINT_LAYER_ID]
@@ -366,6 +453,7 @@ export function createMaplibreDotsLayer(
         type: 'vector',
         url: options.vectorTilesUrl,
       })
+      addAggregateLayers()
       addSinglePointLayer()
       applyPointColors(currentTypes)
       applyTypeVisibility()
@@ -539,6 +627,14 @@ export function createMaplibreDotsLayer(
     )
   }
 
+  function handleAggregateFeature(feature: maplibregl.MapGeoJSONFeature) {
+    const orgType = feature.properties?.orgType as string | undefined
+    const count = feature.properties?.count as number | undefined
+    if (!orgType || count == null) return
+    const [lng, lat] = (feature.geometry as Point).coordinates
+    options.onAggregateClick?.({ orgType, count, latlng: L.latLng(lat, lng) })
+  }
+
   function handleLeafletClick(event: L.LeafletMouseEvent) {
     if (!ready) return
 
@@ -546,6 +642,14 @@ export function createMaplibreDotsLayer(
     if (features.length === 0) return
 
     L.DomEvent.stopPropagation(event)
+
+    const aggregateFeature = features.find((feature) =>
+      lodLayers.some((spec) => feature.layer.id === aggregateLayerId(spec.name)),
+    )
+    if (aggregateFeature && map.getZoom() < options.dotsDetailMinZoom) {
+      handleAggregateFeature(aggregateFeature)
+      return
+    }
 
     const pointFeatures = features.filter(
       (feature) =>
@@ -612,6 +716,15 @@ export function createMaplibreDotsLayer(
     bringToFront() {
       const pane = glLayer.getPane()
       if (pane) pane.appendChild(container)
+    },
+    countRenderedFeatures() {
+      if (!ready) return 0
+      const layers = clickLayers.filter((id) => mlMap.getLayer(id))
+      if (layers.length === 0) return 0
+      const bounds = map.getBounds()
+      const sw = mlMap.project([bounds.getWest(), bounds.getSouth()])
+      const ne = mlMap.project([bounds.getEast(), bounds.getNorth()])
+      return mlMap.queryRenderedFeatures([sw, ne], { layers }).length
     },
     remove() {
       map.off('click', handleLeafletClick)

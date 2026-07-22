@@ -8,6 +8,7 @@ import { employeeBand } from '../scripts/lib/employeeBands.js'
 import { limitForZoom, fetchLimitForTarget, stratifiedSamplePoints } from '../scripts/lib/point-sampling.js'
 import { toCompactPoint, roundCoord, type CompactPoint } from '../scripts/lib/points.js'
 import { resolveOrganizationLocation } from './location.js'
+import { queryViewportSummary } from './viewport-summary.js'
 import {
   appendAreaFilters,
   appendBboxFilter,
@@ -211,6 +212,16 @@ app.get('/api/municipality-counts', (c) => {
       count: row.count,
     })),
   })
+})
+
+app.get('/api/viewport-summary', (c) => {
+  const filters = parseFilters(c.req)
+  if (!filters.bbox) {
+    return c.json({ error: 'bbox query parameter is required' }, 400)
+  }
+
+  const summary = queryViewportSummary(db, filters, filters.zoom)
+  return c.json({ summary })
 })
 
 app.get('/api/organizations/points', (c) => {
