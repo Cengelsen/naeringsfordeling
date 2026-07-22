@@ -66,7 +66,7 @@ export function buildFylkeGeojson(
   const features: FylkeFeature[] = []
   for (const [fylkesnummer, geoms] of byFylke) {
     if (geoms.length === 0) continue
-    const merged = union(...geoms)
+    const merged = union(...(geoms as Parameters<typeof union>))
     if (merged.length === 0) continue
 
     features.push({

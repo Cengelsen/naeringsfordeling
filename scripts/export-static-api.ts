@@ -1,7 +1,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
 import { join } from 'node:path'
-import { openDatabase, DEFAULT_DB_PATH } from './lib/db.js'
+import { openDatabase, DEFAULT_DB_PATH, effectiveKommunenummerExpr } from './lib/db.js'
+import { employeeBand, naeringskodeSection } from './lib/employeeBands.js'
 
 const outputDir = process.env.STATIC_API_DIR ?? 'public/data/api'
 
@@ -44,12 +45,24 @@ const kommuner = db
 
 writeJson('kommuner.json', { kommuner })
 
+const kommuneExpr = effectiveKommunenummerExpr()
 const municipalityBreakdown = db
   .prepare(
-    `SELECT kommunenummer, org_type, konkurs, under_avvikling, vat_registered, COUNT(*) AS count
+    `SELECT ${kommuneExpr} AS kommunenummer, org_type, konkurs, under_avvikling, vat_registered,
+            substr(naeringskode, 1, 2) AS naeringskode_section,
+            CASE
+              WHEN har_registrert_antall_ansatte = 0 OR antall_ansatte IS NULL THEN 'unknown'
+              WHEN antall_ansatte = 0 THEN '0'
+              WHEN antall_ansatte <= 4 THEN '1-4'
+              WHEN antall_ansatte <= 19 THEN '5-19'
+              ELSE '20+'
+            END AS employee_band,
+            entity_kind,
+            COUNT(*) AS count
      FROM organizations
-     WHERE deleted = 0 AND kommunenummer IS NOT NULL
-     GROUP BY kommunenummer, org_type, konkurs, under_avvikling, vat_registered`,
+     WHERE deleted = 0 AND ${kommuneExpr} IS NOT NULL
+     GROUP BY kommunenummer, org_type, konkurs, under_avvikling, vat_registered,
+              naeringskode_section, employee_band, entity_kind`,
   )
   .all()
 
@@ -65,6 +78,15 @@ type OrgRow = {
   kommunenummer: string
   lat: number | null
   lng: number | null
+  naeringskode: string | null
+  naeringskode_label: string | null
+  antall_ansatte: number | null
+  har_registrert_antall_ansatte: number
+  entity_kind: string
+  overordnet_enhet: string | null
+  er_i_konsern: number
+  geocode_quality: string | null
+  matrikkel_key: string | null
 }
 
 const organizations: Record<string, ReturnType<typeof mapOrganization>> = {}
@@ -75,7 +97,9 @@ const searchIndex: Array<
 const orgRows = db
   .prepare(
     `SELECT orgnr, navn, org_type, org_type_label, address_text, postnummer,
-            kommunenummer, lat, lng
+            kommunenummer, lat, lng, naeringskode, naeringskode_label,
+            antall_ansatte, har_registrert_antall_ansatte, entity_kind,
+            overordnet_enhet, er_i_konsern, geocode_quality, matrikkel_key
      FROM organizations
      WHERE deleted = 0`,
   )
@@ -92,6 +116,15 @@ function mapOrganization(row: OrgRow) {
     kommunenummer: row.kommunenummer,
     lat: row.lat,
     lng: row.lng,
+    naeringskode: row.naeringskode,
+    naeringskodeLabel: row.naeringskode_label,
+    antallAnsatte: row.antall_ansatte,
+    employeeBand: employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1),
+    entityKind: row.entity_kind,
+    overordnetEnhet: row.overordnet_enhet,
+    erIKonsern: row.er_i_konsern === 1,
+    geocodeQuality: row.geocode_quality,
+    matrikkelKey: row.matrikkel_key,
   }
 }
 
@@ -126,13 +159,17 @@ type GeocodedPointRow = [
   string,
   string,
   string,
+  string,
+  string,
+  string,
 ]
 const geocodedPoints: GeocodedPointRow[] = []
 
 const geocodedRows = db
   .prepare(
     `SELECT orgnr, lng, lat, org_type, org_type_label, navn, address_text, postnummer,
-            kommunenummer, konkurs, under_avvikling, vat_registered
+            kommunenummer, konkurs, under_avvikling, vat_registered,
+            naeringskode, antall_ansatte, har_registrert_antall_ansatte, entity_kind, er_i_konsern
      FROM organizations
      WHERE deleted = 0 AND lat IS NOT NULL AND lng IS NOT NULL`,
   )
@@ -149,6 +186,11 @@ const geocodedRows = db
   konkurs: number
   under_avvikling: number
   vat_registered: number
+  naeringskode: string | null
+  antall_ansatte: number | null
+  har_registrert_antall_ansatte: number
+  entity_kind: string
+  er_i_konsern: number
 }>
 
 for (const row of geocodedRows) {
@@ -165,8 +207,27 @@ for (const row of geocodedRows) {
     row.org_type_label,
     row.address_text ?? '',
     row.postnummer ?? '',
+    naeringskodeSection(row.naeringskode) ?? '',
+    employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1),
+    row.entity_kind,
   ])
 }
+
+writeJson('naeringskoder.json', {
+  naeringskoder: db
+    .prepare(
+      `SELECT substr(naeringskode, 1, 2) AS section,
+              MIN(naeringskode_label) AS label,
+              COUNT(*) AS count
+       FROM organizations
+       WHERE deleted = 0
+         AND naeringskode IS NOT NULL
+         AND length(naeringskode) >= 2
+       GROUP BY section
+       ORDER BY section`,
+    )
+    .all(),
+})
 
 writeJson('geocoded-points.json', { rows: geocodedPoints }, true)
 

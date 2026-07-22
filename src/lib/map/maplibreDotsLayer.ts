@@ -4,6 +4,7 @@ import maplibregl from 'maplibre-gl'
 import type { GeoJSONSource } from 'maplibre-gl'
 import '@maplibre/maplibre-gl-leaflet'
 import type { OrganizationPoint } from '../types'
+import type { EmployeeBand } from '../utils/employeeBands'
 import { orgTypeColorExpression } from '../utils/orgTypeColors'
 import { ensurePmtilesProtocol, VECTOR_TILES_LAYER } from './vectorTiles'
 import { groupPointsByLocation, locationKey, orgnrsFromGroup } from './addressGroups'
@@ -117,6 +118,13 @@ const TRANSPARENT_STYLE: maplibregl.StyleSpecification = {
   ],
 }
 
+export interface DotFilters {
+  orgTypes: string[]
+  naeringskodeSections: string[]
+  employeeBands: EmployeeBand[]
+  entityKinds: ('enhet' | 'underenhet')[]
+}
+
 export interface MaplibreDotsLayerOptions {
   dotsDetailMinZoom: number
   dotsClustering: boolean
@@ -129,6 +137,7 @@ export interface MaplibreDotsLayerOptions {
 export interface MaplibreDotsController {
   setPoints(points: OrganizationPoint[]): void
   setVisibleOrgTypes(orgTypes: string[]): void
+  setDotFilters(filters: DotFilters): void
   setClustering(enabled: boolean): void
   setStale(stale: boolean): void
   bringToFront(): void
@@ -145,7 +154,12 @@ export function createMaplibreDotsLayer(
   let stale = false
   let clusteringEnabled = options.dotsClustering
   let currentTypes = options.orgTypesForColors ?? []
-  let visibleOrgTypes: string[] = []
+  let dotFilters: DotFilters = {
+    orgTypes: [],
+    naeringskodeSections: [],
+    employeeBands: [],
+    entityKinds: [],
+  }
   let currentPoints: OrganizationPoint[] = []
   let pendingPoints: OrganizationPoint[] | null = null
   let clickLayers = vectorMode
@@ -192,24 +206,44 @@ export function createMaplibreDotsLayer(
   mlMap.touchZoomRotate.disable()
   mlMap.keyboard.disable()
 
+  function propertyInFilter(
+    property: string,
+    values: string[],
+  ): maplibregl.FilterSpecification | null {
+    if (values.length === 0) return null
+    return ['in', ['get', property], ['literal', values]]
+  }
+
   function pointLayerFilter(singleOnly: boolean): maplibregl.FilterSpecification {
-    const typeFilter =
-      visibleOrgTypes.length > 0
-        ? (['in', ['get', 'orgType'], ['literal', visibleOrgTypes]] as maplibregl.FilterSpecification)
-        : null
+    const parts: maplibregl.FilterSpecification[] = []
+    const typeFilter = propertyInFilter('orgType', dotFilters.orgTypes)
+    const naeringFilter = propertyInFilter('naeringskode', dotFilters.naeringskodeSections)
+    const bandFilter = propertyInFilter('employeeBand', dotFilters.employeeBands)
+    const kindFilter = propertyInFilter('entityKind', dotFilters.entityKinds)
+
+    if (typeFilter) parts.push(typeFilter)
+    if (naeringFilter) parts.push(naeringFilter)
+    if (bandFilter) parts.push(bandFilter)
+    if (kindFilter) parts.push(kindFilter)
 
     const countFilter: maplibregl.FilterSpecification = singleOnly
       ? ['==', ['get', 'orgCount'], 1]
       : ['>', ['get', 'orgCount'], 1]
 
     if (vectorMode || !clusteringEnabled) {
-      const base = vectorMode ? (typeFilter ?? true) : (['all', countFilter, typeFilter ?? true] as maplibregl.FilterSpecification)
-      return base
+      const base =
+        parts.length > 0
+          ? (['all', ...parts] as maplibregl.FilterSpecification)
+          : true
+      if (vectorMode) return base
+      return parts.length > 0
+        ? (['all', countFilter, ...parts] as maplibregl.FilterSpecification)
+        : countFilter
     }
 
     const unclustered: maplibregl.FilterSpecification = ['!', ['has', 'point_count']]
-    return typeFilter
-      ? (['all', unclustered, countFilter, typeFilter] as maplibregl.FilterSpecification)
+    return parts.length > 0
+      ? (['all', unclustered, countFilter, ...parts] as maplibregl.FilterSpecification)
       : (['all', unclustered, countFilter] as maplibregl.FilterSpecification)
   }
 
@@ -222,7 +256,13 @@ export function createMaplibreDotsLayer(
     }
 
     if (!vectorMode && clusteringEnabled) {
-      const hideClusters = visibleOrgTypes.length > 0 ? 'none' : 'visible'
+      const hideClusters =
+        dotFilters.orgTypes.length > 0 ||
+        dotFilters.naeringskodeSections.length > 0 ||
+        dotFilters.employeeBands.length > 0 ||
+        dotFilters.entityKinds.length > 0
+          ? 'none'
+          : 'visible'
       if (mlMap.getLayer(CLUSTER_LAYER_ID)) {
         mlMap.setLayoutProperty(CLUSTER_LAYER_ID, 'visibility', hideClusters)
       }
@@ -553,7 +593,16 @@ export function createMaplibreDotsLayer(
       setupDataLayers(enabled)
     },
     setVisibleOrgTypes(orgTypes) {
-      visibleOrgTypes = [...orgTypes]
+      dotFilters = { ...dotFilters, orgTypes: [...orgTypes] }
+      if (ready) applyTypeVisibility()
+    },
+    setDotFilters(filters) {
+      dotFilters = {
+        orgTypes: [...filters.orgTypes],
+        naeringskodeSections: [...filters.naeringskodeSections],
+        employeeBands: [...filters.employeeBands],
+        entityKinds: [...filters.entityKinds],
+      }
       if (ready) applyTypeVisibility()
     },
     setStale(nextStale) {

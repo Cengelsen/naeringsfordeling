@@ -2,7 +2,8 @@ import L from 'leaflet'
 import type { OrganizationPoint } from '../types'
 import { colorForOrgType } from '../utils/orgTypeColors'
 import { groupPointsByLocation, orgnrsFromGroup } from './addressGroups'
-import type { MaplibreDotsController, MaplibreDotsLayerOptions } from './maplibreDotsLayer'
+import type { MaplibreDotsController, MaplibreDotsLayerOptions, DotFilters } from './maplibreDotsLayer'
+import { filterPointsByMapFilters } from './points'
 import { coloredSegments, matrixSquareHtml } from './splitSquareMarker'
 
 const MAX_LEAFLET_DOTS = 4000
@@ -17,7 +18,12 @@ export function createLeafletDotsLayer(
 ): MaplibreDotsController {
   const layer = L.layerGroup().addTo(map)
   let currentPoints: OrganizationPoint[] = []
-  let visibleOrgTypes: string[] = []
+  let dotFilters: DotFilters = {
+    orgTypes: [],
+    naeringskodeSections: [],
+    employeeBands: [],
+    entityKinds: [],
+  }
   let colorTypes = options.orgTypesForColors ?? []
   let stale = false
 
@@ -67,11 +73,7 @@ export function createLeafletDotsLayer(
   function rebuild() {
     layer.clearLayers()
 
-    const allowed =
-      visibleOrgTypes.length > 0 ? new Set(visibleOrgTypes) : null
-    const filtered = allowed
-      ? currentPoints.filter((point) => allowed.has(point.orgType))
-      : currentPoints
+    const filtered = filterPointsByMapFilters(currentPoints, dotFilters)
 
     const capped =
       filtered.length > MAX_LEAFLET_DOTS ? filtered.slice(0, MAX_LEAFLET_DOTS) : filtered
@@ -122,7 +124,16 @@ export function createLeafletDotsLayer(
       rebuild()
     },
     setVisibleOrgTypes(orgTypes) {
-      visibleOrgTypes = [...orgTypes]
+      dotFilters = { ...dotFilters, orgTypes: [...orgTypes] }
+      rebuild()
+    },
+    setDotFilters(filters) {
+      dotFilters = {
+        orgTypes: [...filters.orgTypes],
+        naeringskodeSections: [...filters.naeringskodeSections],
+        employeeBands: [...filters.employeeBands],
+        entityKinds: [...filters.entityKinds],
+      }
       rebuild()
     },
     setClustering() {
@@ -134,7 +145,9 @@ export function createLeafletDotsLayer(
     },
     bringToFront() {
       layer.eachLayer((child) => {
-        if (child instanceof L.CircleMarker || child instanceof L.Marker) child.bringToFront()
+        if ('bringToFront' in child && typeof child.bringToFront === 'function') {
+          child.bringToFront()
+        }
       })
     },
     remove() {

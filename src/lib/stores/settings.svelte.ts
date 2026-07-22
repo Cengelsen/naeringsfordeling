@@ -5,6 +5,11 @@ export const defaultSettings: MapSettings = {
   excludeKonkurs: true,
   excludeUnderAvvikling: true,
   vatRegisteredOnly: false,
+  naeringskodeSections: [],
+  employeeBands: [],
+  entityKinds: ['enhet'],
+  konsernMode: false,
+  konsernMembersOnly: false,
   visualization: 'choropleth',
   districtLevel: 'kommune',
   colorScheme: 'blues',
@@ -21,6 +26,31 @@ export function toggleOrgType(kode: string) {
     mapSettings.orgTypes = mapSettings.orgTypes.filter((k) => k !== kode)
   } else {
     mapSettings.orgTypes = [...mapSettings.orgTypes, kode]
+  }
+}
+
+export function toggleNaeringskodeSection(section: string) {
+  if (mapSettings.naeringskodeSections.includes(section)) {
+    mapSettings.naeringskodeSections = mapSettings.naeringskodeSections.filter((s) => s !== section)
+  } else {
+    mapSettings.naeringskodeSections = [...mapSettings.naeringskodeSections, section]
+  }
+}
+
+export function toggleEmployeeBand(band: import('../utils/employeeBands').EmployeeBand) {
+  if (mapSettings.employeeBands.includes(band)) {
+    mapSettings.employeeBands = mapSettings.employeeBands.filter((b) => b !== band)
+  } else {
+    mapSettings.employeeBands = [...mapSettings.employeeBands, band]
+  }
+}
+
+export function toggleEntityKind(kind: 'enhet' | 'underenhet') {
+  if (mapSettings.entityKinds.includes(kind)) {
+    const next = mapSettings.entityKinds.filter((k) => k !== kind)
+    mapSettings.entityKinds = next.length > 0 ? next : ['enhet']
+  } else {
+    mapSettings.entityKinds = [...mapSettings.entityKinds, kind]
   }
 }
 

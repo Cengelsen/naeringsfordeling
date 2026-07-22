@@ -1,6 +1,7 @@
 import type { FeatureCollection } from 'geojson'
 import type {
   Kommune,
+  Konsernstruktur,
   MapFilters,
   MunicipalityCount,
   Organization,
@@ -9,6 +10,8 @@ import type {
   OrganizationSearchHit,
   Organisasjonsform,
 } from '../types'
+import { bandMatchesFilter } from '../utils/employeeBands'
+import { sectionMatchesFilter } from '../utils/naeringskode'
 import {
   canUseStaticTiles,
   filterPointsInBbox,
@@ -31,6 +34,9 @@ interface MunicipalityBreakdownRow {
   konkurs: number
   under_avvikling: number
   vat_registered: number
+  naeringskode_section?: string | null
+  employee_band?: string
+  entity_kind?: string
   count: number
 }
 
@@ -58,6 +64,9 @@ type GeocodedPointRow = [
   string,
   string,
   string,
+  string?,
+  string?,
+  string?,
 ]
 
 let municipalityBreakdownPromise: Promise<MunicipalityBreakdownRow[]> | null = null
@@ -101,10 +110,17 @@ async function loadGeocodedPointsByKommune(): Promise<Map<string, GeocodedPointR
 
 function geocodedPointMatchesFilters(row: GeocodedPointRow, filters: MapFilters): boolean {
   const [, , , orgType, , konkurs, underAvvikling, vatRegistered] = row
+  const naeringskodeSection = row[12] ?? null
+  const employeeBand = (row[13] ?? 'unknown') as import('../utils/employeeBands').EmployeeBand
+  const entityKind = (row[14] ?? 'enhet') as 'enhet' | 'underenhet'
+
   if (filters.orgTypes.length > 0 && !filters.orgTypes.includes(orgType)) return false
   if (filters.excludeKonkurs && konkurs !== 0) return false
   if (filters.excludeUnderAvvikling && underAvvikling !== 0) return false
   if (filters.vatRegisteredOnly && vatRegistered !== 1) return false
+  if (!sectionMatchesFilter(naeringskodeSection, filters.naeringskodeSections)) return false
+  if (!bandMatchesFilter(employeeBand, filters.employeeBands)) return false
+  if (filters.entityKinds.length > 0 && !filters.entityKinds.includes(entityKind)) return false
   return true
 }
 
@@ -148,6 +164,9 @@ async function fetchOrganizationPointsFromStatic(
       orgTypeLabel: row[9],
       addressText: row[10],
       postnummer: row[11],
+      naeringskode: row[12] ?? null,
+      employeeBand: (row[13] ?? 'unknown') as import('../utils/employeeBands').EmployeeBand,
+      entityKind: (row[14] ?? 'enhet') as 'enhet' | 'underenhet',
     })
 
     if (points.length >= limit) {
@@ -240,6 +259,26 @@ function aggregateMunicipalityCounts(
     if (filters.excludeKonkurs && row.konkurs !== 0) continue
     if (filters.excludeUnderAvvikling && row.under_avvikling !== 0) continue
     if (filters.vatRegisteredOnly && row.vat_registered !== 1) continue
+    if (
+      !sectionMatchesFilter(row.naeringskode_section ?? null, filters.naeringskodeSections)
+    ) {
+      continue
+    }
+    if (
+      !bandMatchesFilter(
+        (row.employee_band ?? 'unknown') as import('../utils/employeeBands').EmployeeBand,
+        filters.employeeBands,
+      )
+    ) {
+      continue
+    }
+    if (
+      filters.entityKinds.length > 0 &&
+      row.entity_kind &&
+      !filters.entityKinds.includes(row.entity_kind as 'enhet' | 'underenhet')
+    ) {
+      continue
+    }
     totals.set(row.kommunenummer, (totals.get(row.kommunenummer) ?? 0) + row.count)
   }
 
@@ -301,6 +340,16 @@ export function dataFiltersToParams(filters: MapFilters): URLSearchParams {
   if (!filters.excludeKonkurs) params.set('excludeKonkurs', 'false')
   if (!filters.excludeUnderAvvikling) params.set('excludeUnderAvvikling', 'false')
   if (filters.vatRegisteredOnly) params.set('vatRegisteredOnly', 'true')
+  if (filters.naeringskodeSections.length > 0) {
+    params.set('naeringskodeSections', filters.naeringskodeSections.join(','))
+  }
+  if (filters.employeeBands.length > 0) {
+    params.set('employeeBands', filters.employeeBands.join(','))
+  }
+  if (filters.entityKinds.length > 0) {
+    params.set('entityKinds', filters.entityKinds.join(','))
+  }
+  if (filters.konsernMembersOnly) params.set('konsernMembersOnly', 'true')
   return params
 }
 
@@ -327,6 +376,21 @@ export async function fetchOrganisasjonsformer(): Promise<Organisasjonsform[]> {
   }
   const data = await apiFetch<{ organisasjonsformer: Organisasjonsform[] }>('/api/organisasjonsformer')
   return data.organisasjonsformer
+}
+
+export interface NaeringskodeOption {
+  section: string
+  label: string | null
+  count: number
+}
+
+export async function fetchNaeringskoder(): Promise<NaeringskodeOption[]> {
+  if (STATIC_API) {
+    const data = await staticFetch<{ naeringskoder: NaeringskodeOption[] }>('naeringskoder.json')
+    return data.naeringskoder
+  }
+  const data = await apiFetch<{ naeringskoder: NaeringskodeOption[] }>('/api/naeringskoder')
+  return data.naeringskoder
 }
 
 export async function fetchKommuner(geojson: FeatureCollection | null): Promise<Kommune[]> {
@@ -445,6 +509,25 @@ export async function fetchOrganizationDetail(orgnr: string): Promise<Organizati
 
   const data = await apiFetch<{ organization: Organization }>(`/api/organizations/${orgnr}`)
   return data.organization
+}
+
+export async function fetchKonsernstruktur(orgnr: string): Promise<Konsernstruktur | null> {
+  if (STATIC_API) return null
+
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}/api/organizations/${orgnr}/konsern`)
+  } catch {
+    throw new ApiError('Kan ikke nå databasen for konsernstruktur.')
+  }
+
+  if (response.status === 404) return null
+  if (!response.ok) {
+    throw new ApiError(`Konsern-API feilet (${response.status})`)
+  }
+
+  const data = (await response.json()) as { konsern: Konsernstruktur }
+  return data.konsern
 }
 
 export async function fetchOrganizationLocation(orgnr: string): Promise<OrganizationLocation> {

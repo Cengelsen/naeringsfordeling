@@ -3,12 +3,15 @@ import { compress } from 'hono/compress'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { existsSync } from 'node:fs'
-import { openDatabase, DEFAULT_DB_PATH, getStats } from '../scripts/lib/db.js'
+import { openDatabase, DEFAULT_DB_PATH, getStats, effectiveKommunenummerExpr } from '../scripts/lib/db.js'
+import { employeeBand } from '../scripts/lib/employeeBands.js'
 import {
   appendAreaFilters,
   appendBboxFilter,
   buildFilterQuery,
+  employeeBandSql,
   limitForZoom,
+  naeringskodeSectionSql,
   parseFilters,
   rtreeBboxParams,
 } from './filters.js'
@@ -25,6 +28,34 @@ if (!existsSync(dbPath)) {
 
 const db = openDatabase(dbPath)
 const app = new Hono()
+
+const KONSERN_CACHE_TTL_MS = 60 * 60 * 1000
+const konsernCache = new Map<string, { expiresAt: number; data: unknown }>()
+
+async function fetchKonsernstruktur(orgnr: string) {
+  const cached = konsernCache.get(orgnr)
+  if (cached && cached.expiresAt > Date.now()) return cached.data
+
+  const response = await fetch(
+    `https://data.brreg.no/enhetsregisteret/api/konsernstruktur/${orgnr}`,
+    { headers: { Accept: 'application/json' } },
+  )
+
+  if (response.status === 404) return null
+  if (!response.ok) {
+    throw new Error(`BRREG konsernstruktur feilet (${response.status})`)
+  }
+
+  const data = await response.json()
+  konsernCache.set(orgnr, { expiresAt: Date.now() + KONSERN_CACHE_TTL_MS, data })
+  return data
+}
+
+const POINT_SELECT = `o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_text, o.postnummer,
+                o.kommunenummer, o.lat, o.lng,
+                ${naeringskodeSectionSql('o')} AS naeringskode,
+                ${employeeBandSql('o')} AS employee_band,
+                o.entity_kind`
 
 app.use('/*', cors())
 app.use(compress())
@@ -50,8 +81,7 @@ function queryOrganizationPoints(
     const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
     return db
       .prepare(
-        `SELECT o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_text, o.postnummer,
-                o.kommunenummer, o.lat, o.lng
+        `SELECT ${POINT_SELECT}
          FROM organizations o
          INNER JOIN orgs_rtree r ON r.id = o.rowid
          WHERE r.maxLng >= ? AND r.minLng <= ?
@@ -69,14 +99,16 @@ function queryOrganizationPoints(
       kommunenummer: string
       lat: number
       lng: number
+      naeringskode: string | null
+      employee_band: string
+      entity_kind: string
     }>
   }
 
   appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
   return db
     .prepare(
-      `SELECT o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_text, o.postnummer,
-              o.kommunenummer, o.lat, o.lng
+      `SELECT ${POINT_SELECT}
        FROM organizations o
        WHERE ${query.conditions.join(' AND ')}
        LIMIT ?`,
@@ -91,6 +123,9 @@ function queryOrganizationPoints(
     kommunenummer: string
     lat: number
     lng: number
+    naeringskode: string | null
+    employee_band: string
+    entity_kind: string
   }>
 }
 
@@ -117,6 +152,30 @@ app.get('/api/organisasjonsformer', (c) => {
   return c.json({ organisasjonsformer: rows.map(({ kode, beskrivelse }) => ({ kode, beskrivelse })) })
 })
 
+app.get('/api/naeringskoder', (c) => {
+  const rows = db
+    .prepare(
+      `SELECT substr(naeringskode, 1, 2) AS section,
+              MIN(naeringskode_label) AS label,
+              COUNT(*) AS count
+       FROM organizations
+       WHERE deleted = 0
+         AND naeringskode IS NOT NULL
+         AND length(naeringskode) >= 2
+       GROUP BY section
+       ORDER BY section`,
+    )
+    .all() as Array<{ section: string; label: string | null; count: number }>
+
+  return c.json({
+    naeringskoder: rows.map((row) => ({
+      section: row.section,
+      label: row.label,
+      count: row.count,
+    })),
+  })
+})
+
 app.get('/api/kommuner', (c) => {
   const rows = db
     .prepare(
@@ -136,12 +195,13 @@ app.get('/api/municipality-counts', (c) => {
   const { conditions, params } = buildFilterQuery(filters, false)
   appendAreaFilters(filters, conditions, params)
 
+  const kommuneExpr = effectiveKommunenummerExpr()
   const rows = db
     .prepare(
-      `SELECT kommunenummer, COUNT(*) AS count
+      `SELECT ${kommuneExpr} AS kommunenummer, COUNT(*) AS count
        FROM organizations
-       WHERE ${conditions.join(' AND ')} AND kommunenummer IS NOT NULL
-       GROUP BY kommunenummer`,
+       WHERE ${conditions.join(' AND ')} AND ${kommuneExpr} IS NOT NULL
+       GROUP BY ${kommuneExpr}`,
     )
     .all(...params) as Array<{ kommunenummer: string; count: number }>
 
@@ -170,6 +230,9 @@ app.get('/api/organizations/points', (c) => {
         orgTypeLabel: row.org_type_label,
         addressText: row.address_text ?? '',
         postnummer: row.postnummer ?? '',
+        naeringskode: row.naeringskode ?? undefined,
+        employeeBand: row.employee_band,
+        entityKind: row.entity_kind,
       }),
     )
     return c.json({
@@ -190,6 +253,9 @@ app.get('/api/organizations/points', (c) => {
       kommunenummer: row.kommunenummer,
       lat: roundCoord(row.lat),
       lng: roundCoord(row.lng),
+      naeringskode: row.naeringskode,
+      employeeBand: row.employee_band,
+      entityKind: row.entity_kind,
     })),
     count: rows.length,
     truncated: rows.length >= limit,
@@ -269,12 +335,34 @@ app.get('/api/organizations/:orgnr/locate', async (c) => {
   return c.json({ location })
 })
 
+app.get('/api/organizations/:orgnr/konsern', async (c) => {
+  const orgnr = c.req.param('orgnr').replace(/\D/g, '')
+  if (orgnr.length !== 9) {
+    return c.json({ error: 'Ugyldig organisasjonsnummer' }, 400)
+  }
+
+  try {
+    const data = await fetchKonsernstruktur(orgnr)
+    if (!data) {
+      return c.json({ error: 'Ikke del av konsern' }, 404)
+    }
+    return c.json({ konsern: data })
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : 'Kunne ikke hente konsernstruktur' },
+      502,
+    )
+  }
+})
+
 app.get('/api/organizations/:orgnr', (c) => {
   const orgnr = c.req.param('orgnr')
   const row = db
     .prepare(
       `SELECT orgnr, navn, org_type, org_type_label, address_text, postnummer,
-              kommunenummer, lat, lng
+              kommunenummer, lat, lng, naeringskode, naeringskode_label,
+              antall_ansatte, har_registrert_antall_ansatte, entity_kind,
+              overordnet_enhet, er_i_konsern, geocode_quality, matrikkel_key
        FROM organizations
        WHERE deleted = 0 AND orgnr = ?`,
     )
@@ -289,6 +377,15 @@ app.get('/api/organizations/:orgnr', (c) => {
         kommunenummer: string
         lat: number | null
         lng: number | null
+        naeringskode: string | null
+        naeringskode_label: string | null
+        antall_ansatte: number | null
+        har_registrert_antall_ansatte: number
+        entity_kind: string
+        overordnet_enhet: string | null
+        er_i_konsern: number
+        geocode_quality: string | null
+        matrikkel_key: string | null
       }
     | undefined
 
@@ -307,6 +404,15 @@ app.get('/api/organizations/:orgnr', (c) => {
       kommunenummer: row.kommunenummer,
       lat: row.lat,
       lng: row.lng,
+      naeringskode: row.naeringskode,
+      naeringskodeLabel: row.naeringskode_label,
+      antallAnsatte: row.antall_ansatte,
+      employeeBand: employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1),
+      entityKind: row.entity_kind,
+      overordnetEnhet: row.overordnet_enhet,
+      erIKonsern: row.er_i_konsern === 1,
+      geocodeQuality: row.geocode_quality,
+      matrikkelKey: row.matrikkel_key,
     },
   })
 })

@@ -24,11 +24,22 @@ export function toCompactPoint(
     orgTypeLabel: string
     addressText: string
     postnummer: string
+    naeringskode?: string
+    employeeBand?: string
+    entityKind?: string
   },
 ): CompactPoint {
   const base: CompactPoint = [orgnr, roundCoord(lng), roundCoord(lat), orgType]
   if (details) {
-    base.push(details.navn, details.orgTypeLabel, details.addressText, details.postnummer)
+    base.push(
+      details.navn,
+      details.orgTypeLabel,
+      details.addressText,
+      details.postnummer,
+      details.naeringskode ?? '',
+      details.employeeBand ?? '',
+      details.entityKind ?? 'enhet',
+    )
   }
   return base
 }

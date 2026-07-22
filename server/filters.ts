@@ -1,8 +1,31 @@
+import type { EmployeeBand } from '../scripts/lib/employeeBands.js'
+import type { EntityKind } from '../scripts/lib/types.js'
+
 export interface MapFilters {
   orgTypes: string[]
   excludeKonkurs: boolean
   excludeUnderAvvikling: boolean
   vatRegisteredOnly: boolean
+  naeringskodeSections: string[]
+  employeeBands: EmployeeBand[]
+  entityKinds: EntityKind[]
+  konsernMembersOnly: boolean
+}
+
+export function employeeBandSql(tableAlias = ''): string {
+  const prefix = tableAlias ? `${tableAlias}.` : ''
+  return `CASE
+    WHEN ${prefix}har_registrert_antall_ansatte = 0 OR ${prefix}antall_ansatte IS NULL THEN 'unknown'
+    WHEN ${prefix}antall_ansatte = 0 THEN '0'
+    WHEN ${prefix}antall_ansatte <= 4 THEN '1-4'
+    WHEN ${prefix}antall_ansatte <= 19 THEN '5-19'
+    ELSE '20+'
+  END`
+}
+
+export function naeringskodeSectionSql(tableAlias = ''): string {
+  const prefix = tableAlias ? `${tableAlias}.` : ''
+  return `substr(${prefix}naeringskode, 1, 2)`
 }
 
 export function buildFilterQuery(filters: MapFilters, geocodedOnly = false, tableAlias = '') {
@@ -23,6 +46,31 @@ export function buildFilterQuery(filters: MapFilters, geocodedOnly = false, tabl
   if (filters.excludeUnderAvvikling) conditions.push(`${prefix}under_avvikling = 0`)
   if (filters.vatRegisteredOnly) conditions.push(`${prefix}vat_registered = 1`)
 
+  if (filters.naeringskodeSections.length > 0) {
+    conditions.push(
+      `${naeringskodeSectionSql(tableAlias)} IN (${filters.naeringskodeSections.map(() => '?').join(',')})`,
+    )
+    params.push(...filters.naeringskodeSections)
+  }
+
+  if (filters.employeeBands.length > 0) {
+    conditions.push(
+      `${employeeBandSql(tableAlias)} IN (${filters.employeeBands.map(() => '?').join(',')})`,
+    )
+    params.push(...filters.employeeBands)
+  }
+
+  if (filters.entityKinds.length > 0) {
+    conditions.push(
+      `${prefix}entity_kind IN (${filters.entityKinds.map(() => '?').join(',')})`,
+    )
+    params.push(...filters.entityKinds)
+  }
+
+  if (filters.konsernMembersOnly) {
+    conditions.push(`${prefix}er_i_konsern = 1`)
+  }
+
   return { conditions, params }
 }
 
@@ -33,6 +81,9 @@ export interface ApiFilters extends MapFilters {
   bbox?: [number, number, number, number]
   zoom?: number
 }
+
+const VALID_EMPLOYEE_BANDS = new Set<EmployeeBand>(['0', '1-4', '5-19', '20+', 'unknown'])
+const VALID_ENTITY_KINDS = new Set<EntityKind>(['enhet', 'underenhet'])
 
 export function parseFilters(req: {
   query: (key: string) => string | undefined
@@ -49,11 +100,36 @@ export function parseFilters(req: {
   const zoomRaw = Number(req.query('zoom') ?? '')
   const zoom = Number.isFinite(zoomRaw) ? zoomRaw : undefined
 
+  const entityKindsRaw = req.query('entityKinds')
+  const entityKinds = entityKindsRaw
+    ? entityKindsRaw
+        .split(',')
+        .filter((value): value is EntityKind => VALID_ENTITY_KINDS.has(value as EntityKind))
+    : (['enhet'] as EntityKind[])
+
+  const employeeBandsRaw = req.query('employeeBands')
+  const employeeBands = employeeBandsRaw
+    ? employeeBandsRaw
+        .split(',')
+        .filter((value): value is EmployeeBand => VALID_EMPLOYEE_BANDS.has(value as EmployeeBand))
+    : []
+
+  const naeringskodeSections =
+    req
+      .query('naeringskodeSections')
+      ?.split(',')
+      .map((value) => value.trim())
+      .filter((value) => /^\d{2}$/.test(value)) ?? []
+
   return {
     orgTypes: req.query('orgTypes')?.split(',').filter(Boolean) ?? [],
     excludeKonkurs: req.query('excludeKonkurs') !== 'false',
     excludeUnderAvvikling: req.query('excludeUnderAvvikling') !== 'false',
     vatRegisteredOnly: req.query('vatRegisteredOnly') === 'true',
+    naeringskodeSections,
+    employeeBands,
+    entityKinds,
+    konsernMembersOnly: req.query('konsernMembersOnly') === 'true',
     kommunenummer: req.query('kommunenummer'),
     fylke: req.query('fylke'),
     bbox,
@@ -72,7 +148,12 @@ export function limitForZoom(zoom?: number, explicitLimit?: number): number {
   return 50000
 }
 
-export function appendAreaFilters(filters: ApiFilters, conditions: string[], params: Array<string | number>, tableAlias = '') {
+export function appendAreaFilters(
+  filters: ApiFilters,
+  conditions: string[],
+  params: Array<string | number>,
+  tableAlias = '',
+) {
   const prefix = tableAlias ? `${tableAlias}.` : ''
   if (filters.kommunenummer) {
     const values = filters.kommunenummer.split(',').map((value) => value.trim()).filter(Boolean)

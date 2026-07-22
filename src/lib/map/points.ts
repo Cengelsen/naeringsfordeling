@@ -1,4 +1,6 @@
-import type { Organization, OrganizationPoint } from '../types'
+import type { MapFilters, Organization, OrganizationPoint } from '../types'
+import { bandMatchesFilter } from '../utils/employeeBands'
+import { sectionMatchesFilter } from '../utils/naeringskode'
 import { assetUrl } from '../utils/assets'
 
 /** [orgnr, lng, lat, orgType] or extended with [navn, orgTypeLabel, addressText, postnummer] */
@@ -16,6 +18,11 @@ export function fromCompactPoint(point: CompactPoint): OrganizationPoint {
     base.orgTypeLabel = point[5]
     base.addressText = point[6]
     base.postnummer = point[7]
+  }
+  if (point.length >= 11) {
+    base.naeringskode = point[8] || null
+    base.employeeBand = (point[9] || 'unknown') as import('../utils/employeeBands').EmployeeBand
+    base.entityKind = (point[10] || 'enhet') as 'enhet' | 'underenhet'
   }
   return base
 }
@@ -66,6 +73,32 @@ export function filterPointsByOrgTypes(
   return points.filter((point) => allowed.has(point.orgType))
 }
 
+export function filterPointsByMapFilters(
+  points: OrganizationPoint[],
+  filters: Pick<
+    MapFilters,
+    'orgTypes' | 'naeringskodeSections' | 'employeeBands' | 'entityKinds'
+  >,
+): OrganizationPoint[] {
+  return points.filter((point) => {
+    if (filters.orgTypes.length > 0 && !filters.orgTypes.includes(point.orgType)) return false
+    if (!sectionMatchesFilter(point.naeringskode, filters.naeringskodeSections)) return false
+    if (
+      !bandMatchesFilter(point.employeeBand ?? 'unknown', filters.employeeBands)
+    ) {
+      return false
+    }
+    if (
+      filters.entityKinds.length > 0 &&
+      point.entityKind &&
+      !filters.entityKinds.includes(point.entityKind)
+    ) {
+      return false
+    }
+    return true
+  })
+}
+
 export function parsePointsResponse(data: {
   points: OrganizationPoint[] | CompactPoint[]
 }): OrganizationPoint[] {
@@ -114,10 +147,15 @@ export async function fetchKommunePointTiles(
   return results.flatMap((result) => result ?? [])
 }
 
-export function canUseStaticTiles(filters: {
-  excludeKonkurs: boolean
-  excludeUnderAvvikling: boolean
-  vatRegisteredOnly: boolean
-}): boolean {
-  return filters.excludeKonkurs && filters.excludeUnderAvvikling && !filters.vatRegisteredOnly
+export function canUseStaticTiles(filters: MapFilters): boolean {
+  return (
+    filters.excludeKonkurs &&
+    filters.excludeUnderAvvikling &&
+    !filters.vatRegisteredOnly &&
+    filters.naeringskodeSections.length === 0 &&
+    filters.employeeBands.length === 0 &&
+    filters.entityKinds.length <= 1 &&
+    filters.entityKinds.every((kind) => kind === 'enhet') &&
+    !filters.konsernMembersOnly
+  )
 }

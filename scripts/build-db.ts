@@ -17,6 +17,9 @@ function parseArgs(argv: string[]) {
 
   return {
     fresh: argv.includes('--fresh'),
+    backfill: argv.includes('--backfill'),
+    skipUnderenheterBackfill: argv.includes('--skip-underenheter-backfill'),
+    regeocodeMetadata: argv.includes('--regeocode-metadata'),
     dev,
     devFylke: parseStringArg(argv, 'fylke', 'SYNC_DEV_FYLKE'),
     geocodeAll,
@@ -41,6 +44,9 @@ function parseArgs(argv: string[]) {
 }
 
 function validateArgs(args: ReturnType<typeof parseArgs>) {
+  if (args.fresh && args.backfill) {
+    throw new Error('--fresh og --backfill kan ikke kombineres (--fresh sletter databasen først)')
+  }
   if (args.geocodeAll && !args.dev) {
     throw new Error('--geocode-all krever --dev')
   }
@@ -62,16 +68,23 @@ async function main() {
   const db = openDatabase(dbPath)
 
   console.log(`Bygger SQLite-database: ${dbPath}`)
-  console.log('Kilder: BRREG bulk/oppdateringer + Kartverket Adresse-API')
+  console.log('Kilder: BRREG bulk/oppdateringer + Kartverket (lokal bulk hvis tilgjengelig, ellers API)')
   const modus = args.dev
     ? `dev-import (${devImportLabel(args.devFylke)}${args.geocodeAll ? ', geokoder alle adresser' : `, geokoder ${DEV_GEOCODE_MAX}`})`
-    : args.fresh || !existsSync(dbPath)
-      ? 'full import'
-      : 'oppdater + geokode rest'
+    : args.backfill
+      ? args.devFylke != null || args.dev
+        ? `backfill (${devImportLabel(args.devFylke)})`
+        : 'backfill (hele landet)'
+      : args.fresh || !existsSync(dbPath)
+        ? 'full import'
+        : 'oppdater + geokode rest'
   console.log('Modus:', modus)
 
   await runBuildDatabase(db, {
     fresh: args.fresh,
+    backfill: args.backfill,
+    skipUnderenheterBackfill: args.skipUnderenheterBackfill,
+    regeocodeMetadata: args.regeocodeMetadata,
     dev: args.dev,
     devFylke: args.devFylke,
     geocodeAll: args.geocodeAll,

@@ -26,13 +26,21 @@
   import {
     fetchOrganizationDetail,
     fetchOrganizationLocation,
+    fetchKonsernstruktur,
     lookupOrganizationLocal,
     fetchOrganizationPoints,
     MAX_VIEWPORT_DOTS,
     MIN_DOTS_ZOOM,
   } from '../services/api'
   import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
-  import { canUseStaticTiles, filterPointsByOrgTypes, normalizeOrgnr, organizationFromPoint } from '../map/points'
+  import {
+    canUseStaticTiles,
+    filterPointsByMapFilters,
+    normalizeOrgnr,
+    organizationFromPoint,
+  } from '../map/points'
+  import type { DotFilters } from '../map/maplibreDotsLayer'
+  import { naeringskodeSectionLabel } from '../utils/naeringskode'
   import {
     probeVectorTiles,
     vectorTilesSourceUrl,
@@ -83,6 +91,7 @@
   let webglBannerDismissed = $state(false)
   let orgFocusActive = $state(false)
   let orgMarker: L.CircleMarker | null = null
+  let konsernOverlay: L.LayerGroup | null = null
 
   const ORG_LOCATE_ZOOM = 18
 
@@ -120,7 +129,7 @@
     settings.visualization === 'dots'
       ? vectorTilesReady
         ? vectorTilesManifest?.total ?? 0
-        : filterPointsByOrgTypes(allPoints, settings.orgTypes).length
+        : filterPointsByMapFilters(allPoints, settings).length
       : counts.reduce((sum, c) => sum + c.count, 0),
   )
 
@@ -188,19 +197,120 @@
     return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]
   }
 
+  function dotFiltersFromSettings(): DotFilters {
+    return {
+      orgTypes: settings.orgTypes,
+      naeringskodeSections: settings.naeringskodeSections,
+      employeeBands: settings.employeeBands,
+      entityKinds: settings.entityKinds,
+    }
+  }
+
+  function applyDotFilters() {
+    dotsController?.setDotFilters(dotFiltersFromSettings())
+  }
+
   function dataFiltersKey(): string {
     return [
       settings.excludeKonkurs,
       settings.excludeUnderAvvikling,
       settings.vatRegisteredOnly,
+      settings.naeringskodeSections.join(','),
+      settings.employeeBands.join(','),
+      settings.entityKinds.join(','),
+      settings.konsernMembersOnly,
     ].join('|')
   }
 
-  function orgPopupHtml(org: Organization): string {
+  function formatEmployeeCount(org: Organization): string {
+    if (org.antallAnsatte == null) return 'Antall ansatte: ukjent'
+    return `Antall ansatte: ${org.antallAnsatte.toLocaleString('nb-NO')}`
+  }
+
+  function orgPopupHtml(org: Organization, konsernHtml = ''): string {
+    const naering = org.naeringskode
+      ? `Næring: ${naeringskodeSectionLabel(org.naeringskode.slice(0, 2), org.naeringskodeLabel)}<br/>`
+      : ''
+    const entityKind =
+      org.entityKind === 'underenhet' && org.overordnetEnhet
+        ? `Underenhet · mor ${org.overordnetEnhet}<br/>`
+        : org.entityKind === 'underenhet'
+          ? 'Underenhet<br/>'
+          : ''
+    const geocode =
+      org.geocodeQuality === 'mismatch'
+        ? '<br/><em>Adressekommune avviker fra BRREG</em>'
+        : ''
+
     return `<strong>${org.navn}</strong><br/>
          ${org.orgTypeLabel} (${org.orgType})<br/>
          Org.nr ${org.orgnr}<br/>
-         ${org.addressText}, ${org.postnummer}`
+         ${naering}${formatEmployeeCount(org)}<br/>
+         ${entityKind}${org.addressText}, ${org.postnummer}${geocode}${konsernHtml}`
+  }
+
+  function flattenKonsernOrgnrs(node: import('../types').KonsernNode): string[] {
+    const orgnrs = [node.organisasjonsnummer]
+    for (const child of node.underenheter ?? []) {
+      orgnrs.push(...flattenKonsernOrgnrs(child))
+    }
+    return orgnrs
+  }
+
+  function konsernTreeHtml(node: import('../types').KonsernNode, depth = 0): string {
+    const indent = '&nbsp;'.repeat(depth * 2)
+    const label = node.navn ?? node.organisasjonsnummer
+    const line = `<button type="button" class="konsern-link" data-orgnr="${node.organisasjonsnummer}">${indent}${label} (${node.organisasjonsnummer})</button>`
+    const children = (node.underenheter ?? [])
+      .map((child) => konsernTreeHtml(child, depth + 1))
+      .join('')
+    return `${line}${children}`
+  }
+
+  function clearKonsernOverlay() {
+    konsernOverlay?.remove()
+    konsernOverlay = null
+  }
+
+  function showKonsernOverlay(rootOrgnr: string, memberOrgnrs: string[]) {
+    if (!map) return
+    clearKonsernOverlay()
+
+    const rootPoint = allPoints.find(
+      (point) => normalizeOrgnr(point.orgnr) === normalizeOrgnr(rootOrgnr),
+    )
+    if (!rootPoint) return
+
+    konsernOverlay = L.layerGroup().addTo(map)
+    const rootLatLng = L.latLng(rootPoint.lat, rootPoint.lng)
+
+    for (const orgnr of memberOrgnrs) {
+      if (normalizeOrgnr(orgnr) === normalizeOrgnr(rootOrgnr)) continue
+      const member = allPoints.find(
+        (point) => normalizeOrgnr(point.orgnr) === normalizeOrgnr(orgnr),
+      )
+      if (!member) continue
+
+      L.polyline([rootLatLng, L.latLng(member.lat, member.lng)], {
+        color: '#64748b',
+        weight: 1.5,
+        opacity: 0.55,
+        dashArray: '6 6',
+      }).addTo(konsernOverlay)
+    }
+  }
+
+  function wireKonsernPopupLinks(popup: L.Popup) {
+    const element = popup.getElement()
+    if (!element) return
+
+    element.querySelectorAll<HTMLButtonElement>('.konsern-link').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.preventDefault()
+        const orgnr = button.dataset.orgnr
+        if (orgnr) void navigateToOrganization(orgnr)
+      })
+    })
   }
 
   function addressPopupHtml(orgs: Organization[]): string {
@@ -257,15 +367,30 @@
   async function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
     if (!map) return
 
-    const popup = L.popup({ maxWidth: 320 })
+    const popup = L.popup({ maxWidth: 360, className: 'org-popup' })
       .setLatLng(latlng)
       .setContent('Laster organisasjon…')
       .openOn(map)
+
+    map.once('popupclose', clearKonsernOverlay)
 
     try {
       const org = await resolveOrganization(orgnr)
       const extra = note ? `<br/><em>${note}</em>` : ''
       popup.setContent(`${orgPopupHtml(org)}${extra}`)
+
+      if (settings.konsernMode && org.erIKonsern) {
+        const konsern = await fetchKonsernstruktur(orgnr)
+        if (konsern) {
+          const tree = konsernTreeHtml(konsern as import('../types').KonsernNode)
+          popup.setContent(
+            `${orgPopupHtml(org, `<hr/><p><strong>Konsern</strong></p><div class="konsern-tree">${tree}</div>`)}${extra}`,
+          )
+          wireKonsernPopupLinks(popup)
+          const members = flattenKonsernOrgnrs(konsern as import('../types').KonsernNode)
+          showKonsernOverlay(orgnr, members)
+        }
+      }
     } catch (err) {
       popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjon')
     }
@@ -284,7 +409,6 @@
       orgs.sort((a, b) => a.navn.localeCompare(b.navn, 'nb'))
       popup.setContent(addressPopupHtml(orgs))
     } catch (err) {
-      popup.setMaxWidth(320)
       popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjoner')
     }
   }
@@ -397,7 +521,7 @@
     const orgTypesForColors = vectorTilesManifest?.orgTypes ?? orgForms.map((form) => form.kode)
 
     if (dotsController && dotsControllerUsesVector === vectorMode) {
-      dotsController.setVisibleOrgTypes(settings.orgTypes)
+      applyDotFilters()
       return
     }
 
@@ -434,7 +558,7 @@
 
   function applyVectorTilesState() {
     ensureDotsController()
-    dotsController?.setVisibleOrgTypes(settings.orgTypes)
+    applyDotFilters()
     dotsController?.setStale(false)
     dotsController?.bringToFront()
     updateDotsState({
@@ -492,10 +616,10 @@
     allPoints = nextPoints
     points = nextPoints
     dotsController?.setPoints(nextPoints)
-    dotsController?.setVisibleOrgTypes(settings.orgTypes)
+    applyDotFilters()
     dotsController?.setStale(false)
     dotsController?.bringToFront()
-    const visibleCount = filterPointsByOrgTypes(nextPoints, settings.orgTypes).length
+    const visibleCount = filterPointsByMapFilters(nextPoints, settings).length
     updateDotsState({
       loading: false,
       phase: 'idle',
@@ -510,9 +634,9 @@
   }
 
   function applyOrgTypeVisibility() {
-    dotsController?.setVisibleOrgTypes(settings.orgTypes)
+    applyDotFilters()
     if (untrack(() => vectorTilesReady)) return
-    const count = filterPointsByOrgTypes(allPoints, settings.orgTypes).length
+    const count = filterPointsByMapFilters(allPoints, settings).length
     updateDotsState({
       organizations: count,
       geocoded: count,
@@ -865,6 +989,10 @@
     settings.excludeKonkurs
     settings.excludeUnderAvvikling
     settings.vatRegisteredOnly
+    settings.naeringskodeSections
+    settings.employeeBands
+    settings.entityKinds
+    settings.konsernMembersOnly
 
     dotsCache.clear()
     if (dotsController && dotsControllerUsesVector !== vectorTilesReady) {
@@ -876,6 +1004,9 @@
   $effect(() => {
     if (settings.visualization !== 'dots') return
     settings.orgTypes
+    settings.naeringskodeSections
+    settings.employeeBands
+    settings.entityKinds
     untrack(() => applyOrgTypeVisibility())
   })
 
@@ -1040,6 +1171,30 @@
     padding: 0.4rem 0.65rem;
     border-radius: 0.35rem;
     font-size: 0.78rem;
+  }
+
+  :global(.konsern-tree) {
+    margin-top: 0.35rem;
+    max-height: 180px;
+    overflow: auto;
+    text-align: left;
+  }
+
+  :global(.konsern-link) {
+    display: block;
+    width: 100%;
+    margin: 0.15rem 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: #0369a1;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  :global(.konsern-link:hover) {
+    text-decoration: underline;
   }
 
   :global(.leaflet-container) {

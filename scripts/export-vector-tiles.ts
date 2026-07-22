@@ -3,7 +3,8 @@ import { createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from 
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { openDatabase, DEFAULT_DB_PATH } from './lib/db.js'
+import { openDatabase, DEFAULT_DB_PATH, effectiveKommunenummerExpr } from './lib/db.js'
+import { employeeBand, naeringskodeSection } from './lib/employeeBands.js'
 
 const TIPPECANOE_ARGS = [
   '-z14',
@@ -80,7 +81,8 @@ async function main() {
 
   const rows = db
     .prepare(
-      `SELECT orgnr, org_type, lat, lng
+      `SELECT orgnr, org_type, lat, lng, naeringskode, antall_ansatte,
+              har_registrert_antall_ansatte, entity_kind
        FROM organizations
        WHERE deleted = 0
          AND konkurs = 0
@@ -88,7 +90,16 @@ async function main() {
          AND lat IS NOT NULL
          AND lng IS NOT NULL`,
     )
-    .iterate() as Iterable<{ orgnr: string; org_type: string; lat: number; lng: number }>
+    .iterate() as Iterable<{
+    orgnr: string
+    org_type: string
+    lat: number
+    lng: number
+    naeringskode: string | null
+    antall_ansatte: number | null
+    har_registrert_antall_ansatte: number
+    entity_kind: string
+  }>
 
   mkdirSync(outputDir, { recursive: true })
   mkdirSync(join(outputDir, 'points'), { recursive: true })
@@ -111,6 +122,9 @@ async function main() {
         properties: {
           orgnr: row.orgnr,
           orgType: row.org_type,
+          naeringskode: naeringskodeSection(row.naeringskode) ?? '',
+          employeeBand: employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1),
+          entityKind: row.entity_kind,
         },
       })}\n`,
     )

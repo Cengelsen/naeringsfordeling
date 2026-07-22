@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { openDatabase, DEFAULT_DB_PATH } from './lib/db.js'
-import { DEV_GEOCODE_MAX, devGeocodeOptions, runSync } from './lib/sync.js'
+import { DEV_GEOCODE_MAX, devGeocodeOptions, devImportLabel, runSync } from './lib/sync.js'
 
 function parseStringArg(argv: string[], name: string, envKey: string): string | undefined {
   const prefix = `--${name}=`
@@ -15,6 +15,9 @@ function parseArgs(argv: string[]) {
 
   return {
     full: argv.includes('--full'),
+    backfill: argv.includes('--backfill'),
+    skipUnderenheterBackfill: argv.includes('--skip-underenheter-backfill'),
+    regeocodeMetadata: argv.includes('--regeocode-metadata'),
     dev,
     devFylke: parseStringArg(argv, 'fylke', 'SYNC_DEV_FYLKE'),
     geocodeAll,
@@ -40,6 +43,9 @@ function parseArgs(argv: string[]) {
 }
 
 function validateArgs(args: ReturnType<typeof parseArgs>) {
+  if (args.full && args.backfill) {
+    throw new Error('--full og --backfill er redundant – bruk bare --backfill')
+  }
   if (args.geocodeAll && !args.dev && !args.geocodeOnly) {
     throw new Error('--geocode-all krever --dev eller --geocode-only')
   }
@@ -62,13 +68,20 @@ async function main() {
       ? args.devFylke
         ? `dev-import (fylke ${args.devFylke}${args.geocodeAll ? ', alle adresser' : ''})`
         : 'dev-import'
-      : args.full
-        ? 'full import'
-        : 'inkrementell'
+      : args.backfill
+        ? args.devFylke != null || args.dev
+          ? `backfill (${devImportLabel(args.devFylke)})`
+          : 'backfill (hele landet)'
+        : args.full
+          ? 'full import'
+          : 'inkrementell'
   console.log(`Modus: ${mode}`)
 
   await runSync(db, {
     full: args.full,
+    backfill: args.backfill,
+    skipUnderenheterBackfill: args.skipUnderenheterBackfill,
+    regeocodeMetadata: args.regeocodeMetadata,
     dev: args.dev,
     devFylke: args.devFylke,
     geocodeAll: args.geocodeAll,

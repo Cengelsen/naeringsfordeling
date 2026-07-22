@@ -89,6 +89,10 @@
       excludeKonkurs: mapSettings.excludeKonkurs,
       excludeUnderAvvikling: mapSettings.excludeUnderAvvikling,
       vatRegisteredOnly: mapSettings.vatRegisteredOnly,
+      naeringskodeSections: [...mapSettings.naeringskodeSections].sort(),
+      employeeBands: [...mapSettings.employeeBands].sort(),
+      entityKinds: [...mapSettings.entityKinds].sort(),
+      konsernMembersOnly: mapSettings.konsernMembersOnly,
     })
   }
 

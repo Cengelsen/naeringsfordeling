@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-import { geocodeAddress } from '../scripts/lib/geocode.js'
+import { geocodeAddressResolved, ensureLocalKartverketReady } from '../scripts/lib/geocode-resolve.js'
 import {
   applyCachedCoordinates,
   getCachedAddress,
@@ -71,7 +71,10 @@ export async function resolveOrganizationLocation(
   }
 
   if (row.address_text && row.postnummer) {
-    const coords = await geocodeAddress(
+    await ensureLocalKartverketReady(db)
+
+    const coords = await geocodeAddressResolved(
+      db,
       {
         postnummer: row.postnummer,
         adresse: [row.address_text],

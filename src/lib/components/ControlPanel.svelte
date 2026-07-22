@@ -5,12 +5,23 @@
     setColorScheme,
     setDistrictLevel,
     setVisualization,
+    toggleEmployeeBand,
+    toggleEntityKind,
+    toggleNaeringskodeSection,
     toggleOrgType,
   } from '../stores/settings.svelte'
-  import { MIN_DOTS_ZOOM, searchOrganizations } from '../services/api'
+  import { MIN_DOTS_ZOOM, fetchNaeringskoder, searchOrganizations } from '../services/api'
   import { fylkeFromKommune, fylkeName } from '../utils/geo'
+  import { EMPLOYEE_BANDS, EMPLOYEE_BAND_LABELS } from '../utils/employeeBands'
+  import { naeringskodeSectionLabel } from '../utils/naeringskode'
 
-  import type { ColorScheme, DistrictLevel, OrganizationSearchHit, VisualizationMode } from '../types'
+  import type {
+    ColorScheme,
+    DistrictLevel,
+    OrganizationSearchHit,
+    VisualizationMode,
+  } from '../types'
+  import type { NaeringskodeOption } from '../services/api'
 
   interface Props {
     orgForms: Organisasjonsform[]
@@ -31,6 +42,16 @@
   let orgLookupResults = $state<OrganizationSearchHit[]>([])
   let orgLookupOpen = $state(false)
   let orgLookupActiveIndex = $state(-1)
+  let naeringskoder = $state<NaeringskodeOption[]>([])
+  let showAllNaering = $state(false)
+
+  void fetchNaeringskoder()
+    .then((rows) => {
+      naeringskoder = rows
+    })
+    .catch(() => {
+      naeringskoder = []
+    })
 
   const ORG_LOOKUP_DEBOUNCE_MS = 450
   let orgLookupTimer: ReturnType<typeof setTimeout> | undefined
@@ -53,6 +74,10 @@
         )
       : orgForms
     return showAllOrgForms ? list : list.slice(0, 12)
+  })
+
+  const filteredNaeringskoder = $derived.by(() => {
+    return showAllNaering ? naeringskoder : naeringskoder.slice(0, 12)
   })
 
   const selectedOrgCount = $derived(mapSettings.orgTypes.length)
@@ -388,6 +413,95 @@
         Nullstill valg
       </button>
     {/if}
+  </section>
+
+  <section class="section">
+    <h2>Næring</h2>
+    <p class="hint">
+      {mapSettings.naeringskodeSections.length === 0
+        ? 'Alle næringer vises'
+        : `${mapSettings.naeringskodeSections.length} seksjon${mapSettings.naeringskodeSections.length === 1 ? '' : 'er'} valgt`}
+    </p>
+    <div class="org-list">
+      {#each filteredNaeringskoder as item (item.section)}
+        <label class="checkbox org-item">
+          <input
+            type="checkbox"
+            checked={mapSettings.naeringskodeSections.includes(item.section)}
+            onchange={() => toggleNaeringskodeSection(item.section)}
+          />
+          <span class="org-code">{item.section}</span>
+          <span class="org-label">
+            {naeringskodeSectionLabel(item.section, item.label)}
+          </span>
+        </label>
+      {/each}
+    </div>
+    {#if naeringskoder.length > 12}
+      <button type="button" class="link-btn" onclick={() => (showAllNaering = !showAllNaering)}>
+        {showAllNaering ? 'Vis færre' : `Vis alle (${naeringskoder.length})`}
+      </button>
+    {/if}
+    {#if mapSettings.naeringskodeSections.length > 0}
+      <button
+        type="button"
+        class="link-btn"
+        onclick={() => (mapSettings.naeringskodeSections = [])}
+      >
+        Nullstill valg
+      </button>
+    {/if}
+  </section>
+
+  <section class="section">
+    <h2>Antall ansatte</h2>
+    {#each EMPLOYEE_BANDS as band (band)}
+      <label class="checkbox">
+        <input
+          type="checkbox"
+          checked={mapSettings.employeeBands.includes(band)}
+          onchange={() => toggleEmployeeBand(band)}
+        />
+        {EMPLOYEE_BAND_LABELS[band]}
+      </label>
+    {/each}
+    {#if mapSettings.employeeBands.length > 0}
+      <button type="button" class="link-btn" onclick={() => (mapSettings.employeeBands = [])}>
+        Nullstill valg
+      </button>
+    {/if}
+  </section>
+
+  <section class="section">
+    <h2>Enhetstype</h2>
+    <label class="checkbox">
+      <input
+        type="checkbox"
+        checked={mapSettings.entityKinds.includes('enhet')}
+        onchange={() => toggleEntityKind('enhet')}
+      />
+      Hovedenheter
+    </label>
+    <label class="checkbox">
+      <input
+        type="checkbox"
+        checked={mapSettings.entityKinds.includes('underenhet')}
+        onchange={() => toggleEntityKind('underenhet')}
+      />
+      Underenheter
+    </label>
+  </section>
+
+  <section class="section">
+    <h2>Konsern</h2>
+    <label class="checkbox">
+      <input type="checkbox" bind:checked={mapSettings.konsernMode} />
+      Konsern-modus (vis tre i popup)
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" bind:checked={mapSettings.konsernMembersOnly} />
+      Kun konsernmedlemmer
+    </label>
   </section>
 
   <section class="section">

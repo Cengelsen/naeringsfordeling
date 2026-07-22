@@ -6,7 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       full_import:
-        description: Run full BRREG import (rebuild from scratch)
+        description: Run full BRREG import (rebuild from scratch; deletes DB with --fresh)
+        type: boolean
+        default: false
+      backfill:
+        description: Backfill new columns + underenheter into existing DB (no delete)
         type: boolean
         default: false
       geocode_only:
@@ -58,6 +62,7 @@ jobs:
         env:
           HAS_RELEASE: ${{ steps.download.outputs.has_release }}
           FULL_IMPORT: ${{ github.event.inputs.full_import || 'false' }}
+          BACKFILL: ${{ github.event.inputs.backfill || 'false' }}
           GEOCODE_ONLY: ${{ github.event.inputs.geocode_only || 'false' }}
           GEOCODE_LIMIT: ${{ github.event.inputs.geocode_limit || '5000' }}
           SYNC_GEOCODE_CONCURRENCY: '3'
@@ -71,14 +76,22 @@ jobs:
             export SYNC_GEOCODE_LIMIT="$GEOCODE_LIMIT"
             yarn sync:geocode --geocode-limit="$GEOCODE_LIMIT"
           elif [ "$FULL_IMPORT" = "true" ]; then
-            echo "Modus: full import (manuell)"
+            echo "Modus: full import (manuell) – enheter + underenheter"
             export SYNC_GEOCODE_LIMIT=5000
             export BUILD_DB_MAX_ROUNDS=6
+            export BUILD_DB_MAX_GEOCODE_ADDRESSES=50000
             yarn build-db --fresh
-          elif [ "$HAS_RELEASE" = "false" ]; then
-            echo "Modus: første bygg – full BRREG-import + geokode inntil kvote"
+          elif [ "$BACKFILL" = "true" ]; then
+            echo "Modus: backfill – oppdaterer eksisterende database fra BRREG bulk"
             export SYNC_GEOCODE_LIMIT=5000
             export BUILD_DB_MAX_ROUNDS=6
+            export BUILD_DB_MAX_GEOCODE_ADDRESSES=50000
+            yarn build-db --backfill --regeocode-metadata
+          elif [ "$HAS_RELEASE" = "false" ]; then
+            echo "Modus: første bygg – full BRREG-import (enheter + underenheter) + geokode inntil kvote"
+            export SYNC_GEOCODE_LIMIT=5000
+            export BUILD_DB_MAX_ROUNDS=6
+            export BUILD_DB_MAX_GEOCODE_ADDRESSES=50000
             yarn build-db --fresh
           else
             echo "Modus: inkrementell BRREG-sync + geokode nye/endrede adresser"

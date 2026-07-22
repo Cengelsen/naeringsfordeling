@@ -9,7 +9,9 @@ All data synkroniseres nattlig fra BRREG til en **SQLite-database** via GitHub A
 
 - Interaktivt kart over hele Norge med kommuner
 - Filtrering på organisasjonstype (AS, ENK, BRL, osv.)
+- Filtrering på næringskode (NACE-seksjon), antall ansatte (bånd), enhetstype (hovedenheter/underenheter)
 - Filtrering på fylke, kommune, konkurs, avvikling og MVA-registrering
+- Konsern-modus: vis konsernstruktur i popup med kartoverlay
 - To visualiseringsmoduser: distrikter (fylker/kommuner) og adresser (prikker)
 - **Nightly sync** via GitHub Actions til SQLite + forhåndsbygde PMTiles
 - Prikker lastes primært fra vektorfliser; API/SQLite brukes som fallback
@@ -56,8 +58,10 @@ Oversikt over alle `yarn`-kommandoer i [`package.json`](package.json). CLI-flagg
 |----------|-------------|-----------------|
 | `yarn build-db` | Bygg komplett SQLite-database | Se flagg under. |
 | `yarn build-db:dev` | Dev-bygg (forhåndsdefinert) | Tilsvarer `yarn build-db --dev --fresh`. |
+| `yarn build-national-db` | Nasjonal database fra BRREG + Kartverket bulk | Se flagg under. Krever `unzip`. |
 | `yarn sync` | Inkrementell oppdatering + geokoding | Se flagg under. |
 | `yarn sync:full` | Full BRREG-import + geokoding | Tilsvarer `yarn sync --full`. |
+| `yarn sync:backfill` | Oppgrader eksisterende DB fra BRREG bulk | Tilsvarer `yarn sync --backfill`. |
 | `yarn sync:dev` | Rask lokal database | Tilsvarer `yarn sync --dev --geocode-limit=2000`. |
 | `yarn sync:geocode` | Kun geokode manglende adresser | Tilsvarer `yarn sync --geocode-only`. |
 
@@ -66,6 +70,10 @@ Oversikt over alle `yarn`-kommandoer i [`package.json`](package.json). CLI-flagg
 | Flagg | Beskrivelse |
 |-------|-------------|
 | `--fresh` | Slett eksisterende database og start full import. |
+| `--backfill` | Stream BRREG inn i eksisterende database (oppgrader nye kolonner + underenheter). Uten `--fylke`: hele landet. |
+| `--fylke=XX` | Med `--backfill` eller `--dev`: begrens til ett fylke (tosifret fylkeskode). |
+| `--skip-underenheter-backfill` | Med `--backfill`: hopp over underenheter. |
+| `--regeocode-metadata` | Oppdater Kartverket-metadata på allerede geokodede adresser. |
 | `--dev` | Importer kun dev-kommuner (3 små, eller hele fylke med `--fylke`). |
 | `--fylke=XX` | Dev-import for ett fylke (tosifret fylkeskode, f.eks. `46`). Kreves med `--geocode-all`. Env: `SYNC_DEV_FYLKE`. |
 | `--skip-geocode` | Importer uten geokoding. |
@@ -78,6 +86,10 @@ Oversikt over alle `yarn`-kommandoer i [`package.json`](package.json). CLI-flagg
 | Flagg | Beskrivelse |
 |-------|-------------|
 | `--full` | Full import fra BRREG bulk i stedet for inkrementell sync. |
+| `--backfill` | Som `--full`, men eksplisitt for oppgradering av eksisterende database (ingen sletting). Uten `--fylke`: hele landet. |
+| `--fylke=XX` | Med `--backfill`: begrens oppdateringen til ett fylke (for dev/fylke-databaser). |
+| `--skip-underenheter-backfill` | Med `--backfill`: hopp over underenheter bulk. |
+| `--regeocode-metadata` | Oppdater `geocode_quality` / `kommunenummer_geo` på allerede geokodede adresser. |
 | `--dev` | Dev-import (samme kommuner/fylke som `build-db --dev`). |
 | `--fylke=XX` | Dev-import for ett fylke. Env: `SYNC_DEV_FYLKE`. |
 | `--geocode-only` | Hopp over BRREG-import; kun geokode adresser uten koordinater. |
@@ -128,6 +140,9 @@ Koden er de to første sifrene i kommunenummeret (f.eks. Bergen `4601` → fylke
 | `BRREG_ENTITY_DELAY_MS` | `150` | Pause mellom enkeltoppslag i BRREG. |
 | `API_MAX_RETRIES` | `5` | HTTP-retries ved 429/503. |
 | `API_RETRY_BASE_MS` | `1000` | Initial retry-backoff. |
+| `KARTVERKET_CACHE_DIR` | `data/cache/national-build` | Cache for Kartverket CSV-zip; importeres automatisk ved geokoding hvis tabellen mangler. |
+
+Geokoding (`yarn sync`, `yarn build-db`, server) bruker **lokal Kartverket-database** (`kartverket_addresses` eller zip i cache) når tilgjengelig, og faller tilbake til Kartverket Adresse-API ved miss.
 
 ### Eksport og nedlasting
 
@@ -161,6 +176,72 @@ yarn dev --host --port 5174
 - **Geokoding** – kjører i batcher til alle adresser er geokodet eller ingen fremgang
 
 Se [Scripts og flagg](#scripts-og-flagg) for alle kommandonavn, CLI-flagg og miljøvariabler.
+
+Etter merge av utvidet BRREG-synk oppgraderes kolonner automatisk via `ensureColumns()` ved neste kjøring. For å **fyll inn data** i en eksisterende database uten å slette den:
+
+```bash
+# Oppdater næringskode, ansatte, konsern-felt og importer underenheter (beholder geokoding)
+yarn sync --backfill
+
+# Fylke-scoped database (f.eks. dev-import for Vestland) – importerer ikke hele Norge
+yarn sync --backfill --fylke=46
+
+# Samme via build-db
+yarn build-db --backfill --fylke=46 --geocode-limit=2000
+
+# Oppdater også Kartverket-metadata (geocode_quality, kommunenummer_geo) på eksisterende prikker
+yarn sync --backfill --regeocode-metadata
+
+# Kun metadata (ingen ny BRREG-nedlasting)
+yarn sync --geocode-only --regeocode-metadata
+```
+
+### Nasjonal database (BRREG + Kartverket bulk)
+
+`yarn build-national-db` bygger én SQLite-fil med **hele landet** uten live Kartverket-API-kall:
+
+1. Laster ned [Matrikkelen Adresse](https://kartkatalog.geonorge.no/) (CSV, EPSG:4258, ~150 MB zip)
+2. Importerer alle adresser til tabellen `kartverket_addresses`
+3. Streamer BRREG bulk (enheter + underenheter)
+4. Geokoder organisasjoner mot lokal Kartverket-database
+5. Bygger R-tree-indeks
+
+Standard output: `data/norway.db` (overstyr med `--output=` eller `DATABASE_PATH`).
+
+| Flagg | Beskrivelse |
+|-------|-------------|
+| `--fresh` | Slett eksisterende output-fil først. |
+| `--output=PATH` | SQLite-fil (standard: `data/norway.db`). |
+| `--reuse-downloads` | Hopp over Kartverket-nedlasting hvis zip finnes i cache. |
+| `--cache-dir=PATH` | Cache for Kartverket-zip (standard: `data/cache/national-build`). |
+| `--skip-kartverket` | Bruk eksisterende `kartverket_addresses` i databasen. |
+| `--skip-brreg` | Hopp over BRREG-import. |
+| `--skip-geocode` | Importer kun rådata. |
+| `--skip-underenheter` | Importer kun hovedenheter fra BRREG. |
+| `--metadata-only` | Oppdater kun geokode-metadata (krever eksisterende koordinater). |
+
+Krever `unzip` på PATH (`dnf install unzip`). Kartverket-cachen kan gjenbrukes mellom kjøringer.
+
+```bash
+yarn build-national-db --fresh
+yarn build-national-db --fresh --reuse-downloads   # raskere re-kjøring
+DATABASE_PATH=data/norway.db yarn server
+```
+
+`--fresh` sletter fortsatt databasen og starter helt på nytt. `--backfill` upserter inn i eksisterende SQLite – koordinater beholdes når adressen er uendret. Uten `--fylke` lastes **hele landet** fra BRREG bulk; med `--fylke=46` oppdateres kun det fylket (samme scope som `--dev --fylke=46`).
+
+Ved behov kan du kjøre GitHub Actions `workflow_dispatch` med **full import** (sletter og bygger på nytt i CI) eller legge til en backfill-jobb senere.
+
+### Nye filterparametre (API)
+
+| Param | Standard | Beskrivelse |
+|-------|----------|-------------|
+| `naeringskodeSections` | (alle) | Kommaseparerte 2-sifrede NACE-seksjoner, f.eks. `62,47` |
+| `employeeBands` | (alle) | `0`, `1-4`, `5-19`, `20+`, `unknown` |
+| `entityKinds` | `enhet` | `enhet`, `underenhet` (underenheter er skjult som standard) |
+| `konsernMembersOnly` | `false` | Kun organisasjoner med `er_i_konsern=1` |
+
+PMTiles inneholder `naeringskode`, `employeeBand` og `entityKind` som klientfiltre (samme mønster som `orgType`). Bake-in-filtrene (konkurs, avvikling, MVA) er uendret.
 
 ## Prikkevisning (marker rendering)
 
@@ -379,7 +460,7 @@ yarn preview
 ## Datakilder
 
 - **BRREG** (sync-script) – enheter og oppdateringer
-- **Kartverket Adresse-API** (sync-script) – geokoding ved synk
+- **Kartverket** (lokal bulk eller Adresse-API) – geokoding ved synk
 - **SQLite** – kilde for API, aggregater og tile-export
 - **PMTiles** (runtime, prikker) – forhåndsbygde vektorfliser for default-filtre
 - **OpenStreetMap** – kartfliser (Leaflet)

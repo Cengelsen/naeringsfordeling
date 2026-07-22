@@ -22,6 +22,11 @@ export interface MapFilters {
   excludeKonkurs: boolean
   excludeUnderAvvikling: boolean
   vatRegisteredOnly: boolean
+  naeringskodeSections: string[]
+  employeeBands: import('./utils/employeeBands').EmployeeBand[]
+  entityKinds: ('enhet' | 'underenhet')[]
+  konsernMode: boolean
+  konsernMembersOnly: boolean
 }
 
 export type VisualizationMode = 'choropleth' | 'dots'
@@ -74,6 +79,28 @@ export interface Organization {
   kommunenummer: string
   lat: number | null
   lng: number | null
+  naeringskode?: string | null
+  naeringskodeLabel?: string | null
+  antallAnsatte?: number | null
+  employeeBand?: import('./utils/employeeBands').EmployeeBand
+  entityKind?: 'enhet' | 'underenhet'
+  overordnetEnhet?: string | null
+  erIKonsern?: boolean
+  geocodeQuality?: string | null
+  matrikkelKey?: string | null
+}
+
+export interface KonsernNode {
+  organisasjonsnummer: string
+  navn?: string
+  organisasjonsform?: { kode?: string; beskrivelse?: string }
+  underenheter?: KonsernNode[]
+}
+
+export interface Konsernstruktur {
+  organisasjonsnummer: string
+  navn?: string
+  underenheter?: KonsernNode[]
 }
 
 export interface OrganizationSearchHit {
@@ -109,6 +136,9 @@ export interface OrganizationPoint {
   addressText?: string
   postnummer?: string
   kommunenummer?: string
+  naeringskode?: string | null
+  employeeBand?: import('./utils/employeeBands').EmployeeBand
+  entityKind?: 'enhet' | 'underenhet'
 }
 
 export interface KommuneFeatureProperties {
