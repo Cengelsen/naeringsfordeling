@@ -226,20 +226,23 @@
     return `${addressLine}<p class="address-popup-summary">${orgs.length} organisasjoner på denne adressen</p><div class="address-popup-list">${items}</div>`
   }
 
-  function resolveOrganizationsFromPoints(orgnrs: string[]): Organization[] {
-    const index = new Map(allPoints.map((point) => [normalizeOrgnr(point.orgnr), point]))
-    const resolved: Organization[] = []
+  function resolveOrganizationFromPoints(orgnr: string): Organization | null {
+    const point = allPoints.find((entry) => normalizeOrgnr(entry.orgnr) === normalizeOrgnr(orgnr))
+    return point ? organizationFromPoint(point) : null
+  }
 
-    for (const orgnr of orgnrs) {
-      const point = index.get(normalizeOrgnr(orgnr))
-      const org = point ? organizationFromPoint(point) : null
-      if (!org) {
-        throw new Error(`Mangler organisasjonsdata for org.nr ${orgnr}`)
-      }
-      resolved.push(org)
-    }
+  async function resolveOrganization(orgnr: string): Promise<Organization> {
+    const fromPoints = resolveOrganizationFromPoints(orgnr)
+    if (fromPoints) return fromPoints
 
-    return resolved
+    const local = await lookupOrganizationLocal(orgnr)
+    if (local) return local
+
+    return fetchOrganizationDetail(orgnr)
+  }
+
+  async function resolveOrganizations(orgnrs: string[]): Promise<Organization[]> {
+    return Promise.all(orgnrs.map((orgnr) => resolveOrganization(orgnr)))
   }
 
   function showOrganizationDetails(org: Organization, latlng: L.LatLng, note?: string) {
@@ -251,47 +254,46 @@
       .openOn(map)
   }
 
-  function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
+  async function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
     if (!map) return
 
+    const popup = L.popup({ maxWidth: 320 })
+      .setLatLng(latlng)
+      .setContent('Laster organisasjon…')
+      .openOn(map)
+
     try {
-      const org = resolveOrganizationsFromPoints([orgnr])[0]!
+      const org = await resolveOrganization(orgnr)
       const extra = note ? `<br/><em>${note}</em>` : ''
-      L.popup({ maxWidth: 320 })
-        .setLatLng(latlng)
-        .setContent(`${orgPopupHtml(org)}${extra}`)
-        .openOn(map)
+      popup.setContent(`${orgPopupHtml(org)}${extra}`)
     } catch (err) {
-      L.popup({ maxWidth: 320 })
-        .setLatLng(latlng)
-        .setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjon')
-        .openOn(map)
+      popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjon')
     }
   }
 
-  function showAddressPopup(orgnrs: string[], latlng: L.LatLng) {
+  async function showAddressPopup(orgnrs: string[], latlng: L.LatLng) {
     if (!map) return
 
+    const popup = L.popup({ maxWidth: 360, className: 'address-popup' })
+      .setLatLng(latlng)
+      .setContent('Laster organisasjoner…')
+      .openOn(map)
+
     try {
-      const orgs = resolveOrganizationsFromPoints(orgnrs)
+      const orgs = await resolveOrganizations(orgnrs)
       orgs.sort((a, b) => a.navn.localeCompare(b.navn, 'nb'))
-      L.popup({ maxWidth: 360, className: 'address-popup' })
-        .setLatLng(latlng)
-        .setContent(addressPopupHtml(orgs))
-        .openOn(map)
+      popup.setContent(addressPopupHtml(orgs))
     } catch (err) {
-      L.popup({ maxWidth: 320 })
-        .setLatLng(latlng)
-        .setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjoner')
-        .openOn(map)
+      popup.setMaxWidth(320)
+      popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjoner')
     }
   }
 
   function handleMarkerClick(orgnrs: string[], latlng: L.LatLng) {
     if (orgnrs.length === 1) {
-      showOrganizationPopup(orgnrs[0]!, latlng)
+      void showOrganizationPopup(orgnrs[0]!, latlng)
     } else {
-      showAddressPopup(orgnrs, latlng)
+      void showAddressPopup(orgnrs, latlng)
     }
   }
 

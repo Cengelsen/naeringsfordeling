@@ -1,3 +1,4 @@
+
 # Næringsfordeling
 
 Visuell oversikt over organisasjoner i Norge, fordelt etter kommune og organisasjonstype.
@@ -30,45 +31,136 @@ yarn dev           # terminal 2
 
 Frontend proxyer `/api` til `http://localhost:3001` i dev. Uten API og database starter ikke appen med data. Uten `points.pmtiles` fungerer prikkevisning fortsatt via API (tregere ved mange punkter).
 
+## Scripts og flagg
+
+Oversikt over alle `yarn`-kommandoer i [`package.json`](package.json). CLI-flagg settes etter kommandonavnet, f.eks. `yarn sync --full`. Miljøvariabler settes foran, f.eks. `DATABASE_PATH=data/test.db yarn server`.
+
+### Frontend
+
+| Kommando | Beskrivelse | Flagg / miljøvariabler |
+|----------|-------------|------------------------|
+| `yarn dev` | Vite dev-server (port 5173) | Vite-flagg: `--host`, `--port`, `--open`, `--strictPort`, osv. |
+| `yarn build` | Produksjonsbygg til `dist/` | `GITHUB_PAGES=true` – GitHub Pages base path. `VITE_BASE=/repo-navn/` – base URL (kun med `GITHUB_PAGES=true`). |
+| `yarn preview` | Forhåndsvis produksjonsbygg | Samme Vite-flagg som `dev` (`--host`, `--port`, …). |
+| `yarn check` | Typecheck (svelte-check + tsc) | svelte-check-flagg, f.eks. `--watch`, `--threshold error`. |
+
+### API
+
+| Kommando | Beskrivelse | Flagg / miljøvariabler |
+|----------|-------------|------------------------|
+| `yarn server` | Hono API på port 3001 | `PORT` – lytteport (standard: `3001`). `DATABASE_PATH` – SQLite-fil (standard: `data/organizations.db`). |
+
+### Database: bygg og sync
+
+| Kommando | Beskrivelse | Innebygde flagg |
+|----------|-------------|-----------------|
+| `yarn build-db` | Bygg komplett SQLite-database | Se flagg under. |
+| `yarn build-db:dev` | Dev-bygg (forhåndsdefinert) | Tilsvarer `yarn build-db --dev --fresh`. |
+| `yarn sync` | Inkrementell oppdatering + geokoding | Se flagg under. |
+| `yarn sync:full` | Full BRREG-import + geokoding | Tilsvarer `yarn sync --full`. |
+| `yarn sync:dev` | Rask lokal database | Tilsvarer `yarn sync --dev --geocode-limit=2000`. |
+| `yarn sync:geocode` | Kun geokode manglende adresser | Tilsvarer `yarn sync --geocode-only`. |
+
+**`yarn build-db` – CLI-flagg:**
+
+| Flagg | Beskrivelse |
+|-------|-------------|
+| `--fresh` | Slett eksisterende database og start full import. |
+| `--dev` | Importer kun dev-kommuner (3 små, eller hele fylke med `--fylke`). |
+| `--fylke=XX` | Dev-import for ett fylke (tosifret fylkeskode, f.eks. `46`). Kreves med `--geocode-all`. Env: `SYNC_DEV_FYLKE`. |
+| `--skip-geocode` | Importer uten geokoding. |
+| `--geocode-all` | Geokode alle adresser i dev-fylket (krever `--dev` og `--fylke`). |
+| `--geocode-limit=N` | Maks adresser per geokodingsbatch (standard: 5000, dev: 2000). |
+| `--max-rounds=N` | Maks antall geokodingsrunder (standard: 10000). Env: `BUILD_DB_MAX_ROUNDS`. |
+
+**`yarn sync` – CLI-flagg:**
+
+| Flagg | Beskrivelse |
+|-------|-------------|
+| `--full` | Full import fra BRREG bulk i stedet for inkrementell sync. |
+| `--dev` | Dev-import (samme kommuner/fylke som `build-db --dev`). |
+| `--fylke=XX` | Dev-import for ett fylke. Env: `SYNC_DEV_FYLKE`. |
+| `--geocode-only` | Hopp over BRREG-import; kun geokode adresser uten koordinater. |
+| `--geocode-all` | Geokode alle gjenværende adresser (krever `--dev` eller `--geocode-only`). |
+| `--geocode-limit=N` | Maks adresser per batch (standard: 10000). Env: `SYNC_GEOCODE_LIMIT`. |
+| `--max-rounds=N` | Maks geokodingsrunder. Env: `BUILD_DB_MAX_ROUNDS`. |
+
+**Fylkeskoder** (tosifret prefiks i kommunenummer — brukes med `--fylke=XX` og i kartfiltre):
+
+| Kode | Fylke | Merknad |
+|------|-------|---------|
+| `03` | Oslo | |
+| `11` | Rogaland | |
+| `15` | Møre og Romsdal | |
+| `18` | Nordland | |
+| `31` | Østfold | |
+| `32` | Akershus | |
+| `33` | Buskerud | |
+| `34` | Innlandet | |
+| `39` | Vestfold | |
+| `40` | Telemark | |
+| `42` | Agder | |
+| `46` | Vestland | |
+| `50` | Trøndelag | |
+| `55` | Troms | |
+| `56` | Finnmark | |
+| `30` | Viken | Utgått (2024); bruk `31`–`33` |
+| `38` | Vestfold og Telemark | Utgått (2024); bruk `39` eller `40` |
+| `54` | Troms og Finnmark | Utgått (2024); bruk `55` eller `56` |
+| `21` | Svalbard | |
+| `22` | Jan Mayen | |
+
+Koden er de to første sifrene i kommunenummeret (f.eks. Bergen `4601` → fylke `46`). Samme mapping brukes i kartet og i [`src/lib/utils/geo.ts`](src/lib/utils/geo.ts).
+
+**Miljøvariabler (gjelder `build-db`, `sync` og geokoding):**
+
+| Variabel | Standard | Beskrivelse |
+|----------|----------|-------------|
+| `DATABASE_PATH` | `data/organizations.db` | SQLite-fil. |
+| `SYNC_GEOCODE_LIMIT` | `5000` | Adresser per geokodingsbatch. |
+| `SYNC_GEOCODE_CONCURRENCY` | `3` | Parallelle Kartverket-kall. |
+| `GEOCODE_DELAY_MS` | `200` | Pause mellom geokodingskall. |
+| `GEOCODE_BATCH_PAUSE_MS` | `2000` | Pause mellom batches. |
+| `BUILD_DB_MAX_ROUNDS` | `10000` | Maks geokodingsrunder. |
+| `BUILD_DB_MAX_GEOCODE_ADDRESSES` | (ubegrenset) | Stopp geokoding etter N adresser totalt. |
+| `SYNC_DEV_FYLKE` | – | Fylkeskode for dev-import (alternativ til `--fylke`). |
+| `BRREG_PAGE_DELAY_MS` | `250` | Pause mellom BRREG-listesider. |
+| `BRREG_ENTITY_DELAY_MS` | `150` | Pause mellom enkeltoppslag i BRREG. |
+| `API_MAX_RETRIES` | `5` | HTTP-retries ved 429/503. |
+| `API_RETRY_BASE_MS` | `1000` | Initial retry-backoff. |
+
+### Eksport og nedlasting
+
+| Kommando | Beskrivelse | Flagg / miljøvariabler |
+|----------|-------------|------------------------|
+| `yarn export-vector-tiles` | Bygg PMTiles med tippecanoe | `DATABASE_PATH`. `POINTS_OUTPUT_DIR` (standard: `public/data`). Krever `tippecanoe` på PATH. |
+| `yarn export-points` | Bygg JSON-kommune-tiles (fallback-cache) | `DATABASE_PATH`. `POINTS_OUTPUT_DIR` (standard: `public/data/points`). |
+| `yarn export-static-api` | Eksporter statisk JSON-API til `public/data/api/` | `STATIC_API_DIR` (standard: `public/data/api`). Leser `DATABASE_PATH`. |
+| `yarn download-db` | Last ned `organizations.db` fra GitHub Release | Ingen flagg (bruker `gh release download`). |
+| `yarn download-kommuner` | Last ned kommunegrenser (GeoJSON) | Ingen flagg (fast URL). |
+| `yarn download-points` | Last ned `points.pmtiles` fra GitHub Release | Ingen flagg (bruker `gh release download`). |
+
+**Eksempler:**
+
+```bash
+yarn build-db --fresh --skip-geocode
+yarn sync --dev --fylke=46 --geocode-limit=500
+yarn sync --geocode-only --geocode-all --fylke=46
+DATABASE_PATH=data/test.db PORT=4000 yarn server
+POINTS_OUTPUT_DIR=/tmp/points yarn export-points
+yarn dev --host --port 5174
+```
+
 ## Database-sync
 
-| Kommando | Beskrivelse |
-|----------|-------------|
-| **`yarn build-db`** | **Bygg komplett SQLite-database** (BRREG import + geokoding til ferdig) |
-| `yarn sync:dev` | Rask lokal database (3 små kommuner) |
-| `yarn sync` | Inkrementell oppdatering + én geokodingsbatch |
-| `yarn sync:full` | Full import fra BRREG bulk + én geokodingsbatch |
-| `yarn sync:geocode` | Kun geokode adresser som mangler koordinater |
-| `yarn server` | Start API som leser `data/organizations.db` |
-| `yarn download-db` | Last ned database fra GitHub Release `database` |
-| `yarn download-points` | Last ned PMTiles fra GitHub Release `points` |
-| `yarn export-vector-tiles` | Bygg PMTiles lokalt (krever tippecanoe) |
-| `yarn export-points` | Bygg JSON-kommune-tiles (valgfri fallback-cache) |
-
-### `yarn build-db`
-
-Bygger `data/organizations.db` med API-grenser innbakt:
+`yarn build-db` bygger `data/organizations.db` med API-grenser innbakt:
 
 - **BRREG bulk** – én nedlasting for full import (anbefalt)
 - **BRREG oppdateringer** – paginering med pause, enkeltoppslag med pause, retry ved 429/503
 - **Kartverket** – begrenset parallellitet, pause mellom kall, retry ved 429/503
 - **Geokoding** – kjører i batcher til alle adresser er geokodet eller ingen fremgang
 
-```bash
-yarn build-db              # oppdater eksisterende db, geokode resten
-yarn build-db --fresh      # slett og bygg på nytt fra BRREG bulk
-yarn build-db --skip-geocode   # kun import, ingen geokoding
-```
-
-Miljøvariabler for tuning:
-
-- `DATABASE_PATH` – output-fil (standard: `data/organizations.db`)
-- `SYNC_GEOCODE_LIMIT` – adresser per geokodingsbatch (standard: 5000)
-- `SYNC_GEOCODE_CONCURRENCY` – parallelle geokodingskall (standard: 3)
-- `GEOCODE_DELAY_MS` – pause mellom Kartverket-kall (standard: 200)
-- `BRREG_PAGE_DELAY_MS` – pause mellom BRREG-sider (standard: 250)
-- `BRREG_ENTITY_DELAY_MS` – pause mellom enkeltoppslag (standard: 150)
-- `API_MAX_RETRIES` – retry ved 429/503 (standard: 5)
+Se [Scripts og flagg](#scripts-og-flagg) for alle kommandonavn, CLI-flagg og miljøvariabler.
 
 ## Prikkevisning (marker rendering)
 
@@ -109,9 +201,41 @@ Basekartet er Leaflet (OSM-raster). Prikkene tegnes i et transparent MapLibre GL
 
 **Forutsetninger:**
 
-- [tippecanoe](https://github.com/felt/tippecanoe) på `PATH`
+- [tippecanoe](https://github.com/felt/tippecanoe) på `PATH` (se [Fedora-instruksjoner](#installere-tippecanoe-fedora) under)
 - [go-pmtiles](https://github.com/protomaps/go-pmtiles) CLI (lastes automatisk ned til `.cache/bin/` hvis den mangler)
 - Ferdig geokodet `data/organizations.db`
+
+#### Installere tippecanoe (Fedora)
+
+Tippecanoe finnes ikke i Fedoras offisielle repos. To vanlige måter:
+
+**Alternativ A – COPR (raskest):**
+
+```bash
+sudo dnf install dnf-plugins-core
+sudo dnf copr enable dilawar/tippecanoe
+sudo dnf install tippecanoe
+tippecanoe --version
+```
+
+COPR er community-maintained og ikke offisielt støttet av Fedora. Sjekk [copr.fedoraproject.org/coprs/dilawar/tippecanoe](https://copr.fedoraproject.org/coprs/dilawar/tippecanoe/) før du aktiverer repoet.
+
+**Alternativ B – bygg fra kilde (samme som GitHub Actions):**
+
+```bash
+sudo dnf install gcc gcc-c++ make sqlite-devel zlib-devel git
+git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+make -C /tmp/tippecanoe -j"$(nproc)"
+sudo make -C /tmp/tippecanoe install
+tippecanoe --version
+```
+
+Deretter:
+
+```bash
+yarn download-db          # eller yarn build-db / yarn sync:dev
+yarn export-vector-tiles
+```
 
 **Pipeline:**
 
@@ -216,9 +340,9 @@ Hvis MapLibre/WebGL feiler, tegnes `L.circleMarker` på canvas (`leafletDotsLaye
 # Etter at nattlig Action har publisert release "points":
 yarn download-points
 
-# Eller bygg selv:
+# Eller bygg selv (krever tippecanoe — se Fedora-instruksjoner over):
 yarn download-db          # eller yarn build-db
-yarn export-vector-tiles  # krever tippecanoe
+yarn export-vector-tiles
 ```
 
 ## GitHub Actions
