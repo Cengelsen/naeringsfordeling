@@ -20,6 +20,7 @@ import {
   type CompactPoint,
 } from '../map/points'
 import { assetUrl } from '../utils/assets'
+import { isDetailZoom } from '../lodConfig'
 import { fetchStaticJson } from '../utils/staticJson'
 import { buildOrgSearchIndex, searchOrgSearchIndex, type OrgSearchIndex } from '../search/orgSearchIndex'
 
@@ -308,6 +309,9 @@ class ApiError extends Error {
 
 /** Target point count for the current zoom (matches server-side sampling). */
 export function limitForZoom(zoom: number): number {
+  if (isDetailZoom(zoom)) {
+    return MAX_VIEWPORT_DOTS
+  }
   const z = Math.max(4, Math.min(18, zoom))
   return Math.min(MAX_VIEWPORT_DOTS, Math.round(250 * 1.38 ** (z - 4)))
 }
@@ -464,9 +468,8 @@ async function fetchViewportSummaryStatic(
     byOrgType[orgType] = (byOrgType[orgType] ?? 0) + 1
   }
 
-  const detailMinZoom = 12
   const renderMode: ViewportSummary['renderMode'] =
-    options.zoom != null && options.zoom >= detailMinZoom ? 'individual' : 'aggregate'
+    isDetailZoom(options.zoom) ? 'individual' : 'aggregate'
 
   return {
     totalInViewport,

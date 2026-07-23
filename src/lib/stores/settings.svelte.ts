@@ -1,4 +1,5 @@
 import type { ColorScheme, DistrictLevel, MapSettings, VisualizationMode } from '../types'
+import { DETAIL_MIN_ZOOM } from '../lodConfig'
 
 export const defaultSettings: MapSettings = {
   orgTypes: [],
@@ -10,13 +11,13 @@ export const defaultSettings: MapSettings = {
   entityKinds: ['enhet'],
   konsernMode: false,
   konsernMembersOnly: false,
-  visualization: 'choropleth',
+  visualization: 'dots',
   districtLevel: 'kommune',
   colorScheme: 'blues',
   showLegend: true,
   selectedFylke: '',
   selectedKommune: '',
-  dotsDetailMinZoom: 12,
+  dotsDetailMinZoom: DETAIL_MIN_ZOOM,
 }
 
 export const mapSettings = $state<MapSettings>({ ...defaultSettings })

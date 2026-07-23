@@ -1,47 +1,91 @@
-/** LOD grid cell sizes in decimal degrees. */
-export const LOD_CELL_DEG = {
-  coarse: 0.32,
-  medium: 0.08,
-  fine: 0.02,
-} as const
-
-export type LodBand = keyof typeof LOD_CELL_DEG
-
-export const LOD_BANDS: LodBand[] = ['coarse', 'medium', 'fine']
+import {
+  DETAIL_MIN_ZOOM,
+  FYLKE_MAX_ZOOM,
+  FYLKE_MIN_ZOOM,
+  GRUNNKRETS_MAX_ZOOM,
+  GRUNNKRETS_MIN_ZOOM,
+  KOMMUNE_MAX_ZOOM,
+  KOMMUNE_MIN_ZOOM,
+} from '../../src/lib/lodConfig.js'
 
 export const LOD_LAYER_NAMES = {
-  coarse: 'cells_coarse',
-  medium: 'cells_medium',
-  fine: 'cells_fine',
+  fylkePoly: 'districts_fylke_poly',
+  fylke: 'districts_fylke',
+  kommunePoly: 'districts_kommune_poly',
+  kommune: 'districts_kommune',
+  grunnkretserPoly: 'grunnkretser_poly',
   points: 'organizations',
 } as const
 
+/** Pre-rendered zoom bands: district tiles → grunnkretser → individual addresses. */
 export const LOD_ZOOM_RANGES = {
-  coarse: { minZoom: 4, maxZoom: 7 },
-  medium: { minZoom: 7, maxZoom: 10 },
-  fine: { minZoom: 10, maxZoom: 12 },
-  points: { minZoom: 12, maxZoom: 16 },
+  fylke: { minZoom: FYLKE_MIN_ZOOM, maxZoom: FYLKE_MAX_ZOOM },
+  kommune: { minZoom: KOMMUNE_MIN_ZOOM, maxZoom: KOMMUNE_MAX_ZOOM },
+  grunnkretser: { minZoom: GRUNNKRETS_MIN_ZOOM, maxZoom: GRUNNKRETS_MAX_ZOOM },
+  points: { minZoom: DETAIL_MIN_ZOOM, maxZoom: 18 },
 } as const
 
-export function gridCellId(lat: number, lng: number, cellDeg: number): string {
-  const latIdx = Math.floor(lat / cellDeg)
-  const lngIdx = Math.floor(lng / cellDeg)
-  return `${latIdx}_${lngIdx}`
+export type LodLayerExport =
+  | {
+      kind: 'district'
+      level: 'fylke' | 'kommune'
+      polyLayer: string
+      pointLayer: string
+      minZoom: number
+      maxZoom: number
+    }
+  | {
+      kind: 'grunnkretser'
+      polyLayer: string
+      minZoom: number
+      maxZoom: number
+    }
+  | {
+      kind: 'points'
+      layer: string
+      minZoom: number
+      maxZoom: number
+    }
+
+export const LOD_EXPORT_LAYERS: LodLayerExport[] = [
+  {
+    kind: 'district',
+    level: 'fylke',
+    polyLayer: LOD_LAYER_NAMES.fylkePoly,
+    pointLayer: LOD_LAYER_NAMES.fylke,
+    minZoom: LOD_ZOOM_RANGES.fylke.minZoom,
+    maxZoom: LOD_ZOOM_RANGES.fylke.maxZoom,
+  },
+  {
+    kind: 'district',
+    level: 'kommune',
+    polyLayer: LOD_LAYER_NAMES.kommunePoly,
+    pointLayer: LOD_LAYER_NAMES.kommune,
+    minZoom: LOD_ZOOM_RANGES.kommune.minZoom,
+    maxZoom: LOD_ZOOM_RANGES.kommune.maxZoom,
+  },
+  {
+    kind: 'grunnkretser',
+    polyLayer: LOD_LAYER_NAMES.grunnkretserPoly,
+    minZoom: LOD_ZOOM_RANGES.grunnkretser.minZoom,
+    maxZoom: LOD_ZOOM_RANGES.grunnkretser.maxZoom,
+  },
+  {
+    kind: 'points',
+    layer: LOD_LAYER_NAMES.points,
+    minZoom: LOD_ZOOM_RANGES.points.minZoom,
+    maxZoom: LOD_ZOOM_RANGES.points.maxZoom,
+  },
+]
+
+export function isPolygonLodLayer(name: string): boolean {
+  return name.endsWith('_poly')
 }
 
-export function gridCellCentroid(cellId: string, cellDeg: number): [lng: number, lat: number] {
-  const [latIdxRaw, lngIdxRaw] = cellId.split('_')
-  const latIdx = Number(latIdxRaw)
-  const lngIdx = Number(lngIdxRaw)
-  const lat = (latIdx + 0.5) * cellDeg
-  const lng = (lngIdx + 0.5) * cellDeg
-  return [lng, lat]
-}
-
-export function cellDegForBand(band: LodBand): number {
-  return LOD_CELL_DEG[band]
-}
-
-export function layerNameForBand(band: LodBand): string {
-  return LOD_LAYER_NAMES[band]
+export function isAggregateLodLayer(name: string): boolean {
+  return (
+    name.startsWith('districts_') ||
+    name.startsWith('grunnkretser_') ||
+    name.startsWith('cells_')
+  )
 }

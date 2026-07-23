@@ -18,6 +18,9 @@ public/data/points.mbtiles
 public/data/api/
 public/data/kommuner.geojson
 public/data/kommuner.geojson.gz
+public/data/grunnkretser.geojson
+public/data/grunnkretser.geojson.gz
+public/data/districts.tar.gz
 *.local
 
 # Editor directories and files

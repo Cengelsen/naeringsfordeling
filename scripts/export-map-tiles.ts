@@ -7,16 +7,12 @@ import { openDatabase, DEFAULT_DB_PATH } from './lib/db.js'
 import {
   collectOrgTypes,
   countGeocodedPoints,
-  exportLodAggregateNdjson,
   exportPointsNdjson,
 } from './lib/lod-aggregate.js'
-import {
-  LOD_BANDS,
-  LOD_LAYER_NAMES,
-  LOD_ZOOM_RANGES,
-  layerNameForBand,
-  type LodBand,
-} from './lib/lod-grid.js'
+import { exportDistrictPolyNdjson } from './lib/lod-districts.js'
+import { exportGrunnkretsPolyNdjson } from './lib/lod-grunnkretser.js'
+import { exportDistrictColorAssets } from './lib/district-color-export.js'
+import { LOD_EXPORT_LAYERS, LOD_LAYER_NAMES, LOD_ZOOM_RANGES } from './lib/lod-grid.js'
 
 const SHARED_TIPPECANOE_ARGS = ['-P', '--no-tile-compression', '--force', '--no-feature-limit']
 
@@ -96,17 +92,45 @@ function cleanupPartialOutputs(outputDir: string) {
 
 async function writeNdjson(
   path: string,
-  write: (stream: ReturnType<typeof createWriteStream>) => void | Promise<void>,
+  write: (stream: ReturnType<typeof createWriteStream>) => void,
 ): Promise<void> {
   const stream = createWriteStream(path)
-  await write(stream)
+  write(stream)
   await new Promise<void>((resolve, reject) => {
     stream.end((error) => (error ? reject(error) : resolve()))
   })
 }
 
+async function exportLayerMbtiles(
+  tempPrefix: string,
+  suffix: string,
+  layerName: string,
+  minZoom: number,
+  maxZoom: number,
+  writeNdjsonContent: (stream: ReturnType<typeof createWriteStream>) => void,
+  extraArgs: string[] = [],
+): Promise<{ ndjsonPath: string; mbtilesPath: string }> {
+  const ndjsonPath = `${tempPrefix}-${suffix}.ndjson`
+  const mbtilesPath = `${tempPrefix}-${suffix}.mbtiles`
+
+  console.log(`Exporting ${layerName}…`)
+  await writeNdjson(ndjsonPath, writeNdjsonContent)
+
+  console.log(`Running tippecanoe for ${layerName} (z${minZoom}-z${maxZoom})…`)
+  const result = runTippecanoe(mbtilesPath, ndjsonPath, layerName, minZoom, maxZoom, extraArgs)
+  if (result.stdout) process.stdout.write(result.stdout)
+  if (result.error || result.status !== 0) {
+    if (result.stderr) process.stderr.write(result.stderr)
+    throw new Error(`Tippecanoe failed for ${layerName}`)
+  }
+
+  return { ndjsonPath, mbtilesPath }
+}
+
 async function main() {
   const dbPath = process.env.DATABASE_PATH ?? DEFAULT_DB_PATH
+  console.log(`Database: ${dbPath}`)
+  console.log('Output: hele landet (alle geokodede orgs i valgt database)')
   const outputDir = process.env.POINTS_OUTPUT_DIR ?? 'public/data'
   const pmtilesPath = join(outputDir, 'points.pmtiles')
   const mbtilesPath = join(outputDir, 'points.mbtiles')
@@ -121,71 +145,68 @@ async function main() {
   const total = countGeocodedPoints(db)
   const orgTypes = collectOrgTypes(db)
 
+  console.log('Exporting district color GeoJSON (predefined geography)…')
+  const districtColors = exportDistrictColorAssets(db, join(outputDir, 'districts'))
+  console.log(`  Wrote ${districtColors.manifestPath}`)
+
   const bandMbtiles: string[] = []
   const tempFiles: string[] = []
 
-  for (const band of LOD_BANDS) {
-    const ndjsonPath = `${tempPrefix}-${band}.ndjson`
-    tempFiles.push(ndjsonPath)
-    const layerName = layerNameForBand(band)
-    const { minZoom, maxZoom } = LOD_ZOOM_RANGES[band]
-
-    console.log(`Exporting ${band} aggregate NDJSON…`)
-    await writeNdjson(ndjsonPath, (stream) => {
-      const stats = exportLodAggregateNdjson(db, stream, band)
-      console.log(
-        `  ${band}: ${stats.cells.toLocaleString('nb-NO')} cells, ${stats.features.toLocaleString('nb-NO')} features`,
+  for (const spec of LOD_EXPORT_LAYERS) {
+    if (spec.kind === 'district') {
+      const poly = await exportLayerMbtiles(
+        tempPrefix,
+        `${spec.level}-poly`,
+        spec.polyLayer,
+        spec.minZoom,
+        spec.maxZoom,
+        (stream) => {
+          const stats = exportDistrictPolyNdjson(db, stream, spec.level)
+          console.log(
+            `  ${spec.polyLayer}: ${stats.polygonFeatures.toLocaleString('nb-NO')} polygon features`,
+          )
+        },
       )
-    })
-
-    const bandMbtilesPath = `${tempPrefix}-${band}.mbtiles`
-    tempFiles.push(bandMbtilesPath)
-    console.log(`Running tippecanoe for ${layerName} (z${minZoom}-z${maxZoom})…`)
-
-    const result = runTippecanoe(bandMbtilesPath, ndjsonPath, layerName, minZoom, maxZoom, [
-      '--maximum-tile-bytes=2000000',
-    ])
-    if (result.stdout) process.stdout.write(result.stdout)
-    if (result.error || result.status !== 0) {
-      if (result.stderr) process.stderr.write(result.stderr)
-      throw new Error(`Tippecanoe failed for ${layerName}`)
+      tempFiles.push(poly.ndjsonPath, poly.mbtilesPath)
+      bandMbtiles.push(poly.mbtilesPath)
+      continue
     }
-    bandMbtiles.push(bandMbtilesPath)
+
+    if (spec.kind === 'grunnkretser') {
+      const layer = await exportLayerMbtiles(
+        tempPrefix,
+        'grunnkretser',
+        spec.polyLayer,
+        spec.minZoom,
+        spec.maxZoom,
+        (stream) => {
+          const stats = exportGrunnkretsPolyNdjson(db, stream)
+          console.log(
+            `  ${spec.polyLayer}: ${stats.polygonFeatures.toLocaleString('nb-NO')} polygon features (${stats.grunnkretser.toLocaleString('nb-NO')} grunnkretser loaded)`,
+          )
+        },
+        ['--maximum-tile-bytes=2000000'],
+      )
+      tempFiles.push(layer.ndjsonPath, layer.mbtilesPath)
+      bandMbtiles.push(layer.mbtilesPath)
+      continue
+    }
+
+    const points = await exportLayerMbtiles(
+      tempPrefix,
+      'organizations',
+      spec.layer,
+      spec.minZoom,
+      spec.maxZoom,
+      (stream) => {
+        const count = exportPointsNdjson(db, stream)
+        console.log(`  ${spec.layer}: ${count.toLocaleString('nb-NO')} individual addresses`)
+      },
+      ['--drop-densest-as-needed', '--coalesce-densest-as-needed', '--maximum-tile-bytes=2000000'],
+    )
+    tempFiles.push(points.ndjsonPath, points.mbtilesPath)
+    bandMbtiles.push(points.mbtilesPath)
   }
-
-  const pointsNdjsonPath = `${tempPrefix}-points.ndjson`
-  tempFiles.push(pointsNdjsonPath)
-  console.log('Exporting individual points NDJSON…')
-  await writeNdjson(pointsNdjsonPath, (stream) => {
-    const count = exportPointsNdjson(db, stream)
-    console.log(`  ${count.toLocaleString('nb-NO')} point features`)
-  })
-
-  const pointsMbtilesPath = `${tempPrefix}-points.mbtiles`
-  tempFiles.push(pointsMbtilesPath)
-  const pointsRange = LOD_ZOOM_RANGES.points
-  console.log(
-    `Running tippecanoe for ${LOD_LAYER_NAMES.points} (z${pointsRange.minZoom}-z${pointsRange.maxZoom})…`,
-  )
-
-  const pointsResult = runTippecanoe(
-    pointsMbtilesPath,
-    pointsNdjsonPath,
-    LOD_LAYER_NAMES.points,
-    pointsRange.minZoom,
-    pointsRange.maxZoom,
-    [
-      '--drop-densest-as-needed',
-      '--coalesce-densest-as-needed',
-      '--maximum-tile-bytes=2000000',
-    ],
-  )
-  if (pointsResult.stdout) process.stdout.write(pointsResult.stdout)
-  if (pointsResult.error || pointsResult.status !== 0) {
-    if (pointsResult.stderr) process.stderr.write(pointsResult.stderr)
-    throw new Error('Tippecanoe failed for organizations layer')
-  }
-  bandMbtiles.push(pointsMbtilesPath)
 
   console.log('Joining MBTiles layers…')
   const joinResult = runTileJoin(mbtilesPath, bandMbtiles)
@@ -211,16 +232,10 @@ async function main() {
   rmSync(`${mbtilesPath}-journal`, { force: true })
 
   const layers = [
-    ...LOD_BANDS.map((band: LodBand) => ({
-      name: layerNameForBand(band),
-      minZoom: LOD_ZOOM_RANGES[band].minZoom,
-      maxZoom: LOD_ZOOM_RANGES[band].maxZoom,
-    })),
-    {
-      name: LOD_LAYER_NAMES.points,
-      minZoom: LOD_ZOOM_RANGES.points.minZoom,
-      maxZoom: LOD_ZOOM_RANGES.points.maxZoom,
-    },
+    { name: LOD_LAYER_NAMES.fylkePoly, minZoom: LOD_ZOOM_RANGES.fylke.minZoom, maxZoom: LOD_ZOOM_RANGES.fylke.maxZoom },
+    { name: LOD_LAYER_NAMES.kommunePoly, minZoom: LOD_ZOOM_RANGES.kommune.minZoom, maxZoom: LOD_ZOOM_RANGES.kommune.maxZoom },
+    { name: LOD_LAYER_NAMES.grunnkretserPoly, minZoom: LOD_ZOOM_RANGES.grunnkretser.minZoom, maxZoom: LOD_ZOOM_RANGES.grunnkretser.maxZoom },
+    { name: LOD_LAYER_NAMES.points, minZoom: LOD_ZOOM_RANGES.points.minZoom, maxZoom: LOD_ZOOM_RANGES.points.maxZoom },
   ]
 
   writeFileSync(

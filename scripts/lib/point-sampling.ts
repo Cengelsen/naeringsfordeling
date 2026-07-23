@@ -1,13 +1,18 @@
-/** Max points returned for a viewport request. */
+import { isDetailZoom } from '../../src/lib/lodConfig.js'
+
+/** Max points returned for a viewport request (aggregate zoom sampling). */
 export const MAX_VIEWPORT_DOTS = 50_000
 
-/** Oversample factor when fetching from DB before stratified thinning. */
 export const POINT_SAMPLE_OVERSAMPLE = 5
 
 /** Target point count for a map zoom level (smooth scale, no hard cutoff). */
 export function limitForZoom(zoom?: number, explicitLimit?: number): number {
   if (explicitLimit != null) {
     return Math.min(Math.max(1, explicitLimit), MAX_VIEWPORT_DOTS)
+  }
+
+  if (isDetailZoom(zoom)) {
+    return MAX_VIEWPORT_DOTS
   }
 
   if (zoom == null || !Number.isFinite(zoom)) {
@@ -18,7 +23,10 @@ export function limitForZoom(zoom?: number, explicitLimit?: number): number {
   return Math.min(MAX_VIEWPORT_DOTS, Math.round(250 * 1.38 ** (z - 4)))
 }
 
-export function fetchLimitForTarget(target: number): number {
+export function fetchLimitForTarget(target: number, zoom?: number): number | null {
+  if (isDetailZoom(zoom)) {
+    return null
+  }
   return Math.min(MAX_VIEWPORT_DOTS, Math.max(target, target * POINT_SAMPLE_OVERSAMPLE))
 }
 

@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import type Database from 'better-sqlite3'
-import { effectiveKommunenummerExpr, openDatabase } from './db.js'
+import { effectiveKommunenummerExpr, openDatabase, setSyncState } from './db.js'
 import { ensureKartverketSchema } from './kartverket-bulk.js'
 import { brregReferenceAvailable } from './reference-cache.js'
 
@@ -84,6 +84,83 @@ function organizationKommuneFilter(alias: string, kommuner: string[]): { sql: st
 
 export interface ImportRegionFromNationalOptions {
   skipUnderenheter?: boolean
+}
+
+export function importEntireNationalDb(
+  target: Database.Database,
+  sourcePath: string,
+  options: ImportRegionFromNationalOptions = {},
+): { organizations: number; addressCache: number; kartverket: number } {
+  if (!nationalDatabaseAvailable(sourcePath)) {
+    throw new Error(`Nasjonal database mangler eller er tom: ${sourcePath}`)
+  }
+
+  attachNationalDatabase(target, sourcePath)
+
+  try {
+    if (!sqliteTableExists(target, 'organizations', 'national')) {
+      throw new Error(`Nasjonal database har ingen organizations-tabell: ${sourcePath}`)
+    }
+
+    const entityFilter = options.skipUnderenheter ? "WHERE entity_kind = 'enhet'" : ''
+
+    target.exec('DELETE FROM organizations')
+    target.exec('DELETE FROM address_cache')
+    ensureKartverketSchema(target)
+    target.exec('DELETE FROM kartverket_addresses')
+
+    const orgResult = target
+      .prepare(
+        `INSERT INTO organizations
+         SELECT o.*
+         FROM national.organizations o
+         ${entityFilter}`,
+      )
+      .run()
+
+    const cacheResult = target
+      .prepare(
+        `INSERT INTO address_cache
+         SELECT ac.*
+         FROM national.address_cache ac
+         WHERE ac.cache_key IN (
+           SELECT DISTINCT address_key
+           FROM organizations
+           WHERE address_key IS NOT NULL
+         )`,
+      )
+      .run()
+
+    let kartverketCount = 0
+    if (sqliteTableExists(target, 'kartverket_addresses', 'national')) {
+      const kvResult = target
+        .prepare(
+          `INSERT INTO kartverket_addresses
+           SELECT kv.*
+           FROM national.kartverket_addresses kv`,
+        )
+        .run()
+      kartverketCount = kvResult.changes
+    }
+
+    if (sqliteTableExists(target, 'sync_state', 'national')) {
+      target.exec(`
+        INSERT OR REPLACE INTO sync_state (key, value)
+        SELECT key, value
+        FROM national.sync_state
+      `)
+    }
+
+    setSyncState(target, 'copied_from_national_db', sourcePath)
+
+    return {
+      organizations: orgResult.changes,
+      addressCache: cacheResult.changes,
+      kartverket: kartverketCount,
+    }
+  } finally {
+    detachNationalDatabase(target)
+  }
 }
 
 export function importRegionFromNationalDb(

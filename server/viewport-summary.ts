@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type Database from 'better-sqlite3'
+import { isDetailZoom } from '../src/lib/lodConfig.js'
 import { effectiveKommunenummerExpr } from '../scripts/lib/db.js'
 import {
   appendAreaFilters,
@@ -140,9 +140,7 @@ export function queryViewportSummary(
     throw new Error('bbox is required')
   }
 
-  const detailMinZoom = 12
-  const renderMode: ViewportSummary['renderMode'] =
-    zoom != null && zoom >= detailMinZoom ? 'individual' : 'aggregate'
+  const renderMode: ViewportSummary['renderMode'] = isDetailZoom(zoom) ? 'individual' : 'aggregate'
 
   const kommuner = kommunerIntersectingBbox(filters.bbox)
   const kommuneExpr = effectiveKommunenummerExpr()

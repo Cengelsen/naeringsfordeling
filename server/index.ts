@@ -91,41 +91,63 @@ function queryOrganizationPoints(
   filters: ReturnType<typeof parseFilters>,
   targetLimit: number,
 ): { rows: OrganizationPointRow[]; sourceCount: number } {
-  const fetchLimit = fetchLimitForTarget(targetLimit)
+  const fetchLimit = fetchLimitForTarget(targetLimit, filters.zoom)
   const query = organizationQuery(filters)
 
   let raw: OrganizationPointRow[]
 
   if (query.useRtree) {
     const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
-    raw = db
-      .prepare(
-        `SELECT ${POINT_SELECT}
-         FROM organizations o
-         INNER JOIN orgs_rtree r ON r.id = o.rowid
-         WHERE r.maxLng >= ? AND r.minLng <= ?
-           AND r.maxLat >= ? AND r.minLat <= ?
-           AND ${query.conditions.join(' AND ')}
-         LIMIT ?`,
-      )
-      .all(minLng, maxLng, minLat, maxLat, ...query.params, fetchLimit) as OrganizationPointRow[]
+    raw = fetchLimit == null
+      ? (db
+          .prepare(
+            `SELECT ${POINT_SELECT}
+             FROM organizations o
+             INNER JOIN orgs_rtree r ON r.id = o.rowid
+             WHERE r.maxLng >= ? AND r.minLng <= ?
+               AND r.maxLat >= ? AND r.minLat <= ?
+               AND ${query.conditions.join(' AND ')}`,
+          )
+          .all(minLng, maxLng, minLat, maxLat, ...query.params) as OrganizationPointRow[])
+      : (db
+          .prepare(
+            `SELECT ${POINT_SELECT}
+             FROM organizations o
+             INNER JOIN orgs_rtree r ON r.id = o.rowid
+             WHERE r.maxLng >= ? AND r.minLng <= ?
+               AND r.maxLat >= ? AND r.minLat <= ?
+               AND ${query.conditions.join(' AND ')}
+             LIMIT ?`,
+          )
+          .all(minLng, maxLng, minLat, maxLat, ...query.params, fetchLimit) as OrganizationPointRow[])
   } else {
     appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
-    raw = db
-      .prepare(
-        `SELECT ${POINT_SELECT}
-         FROM organizations o
-         WHERE ${query.conditions.join(' AND ')}
-         LIMIT ?`,
-      )
-      .all(...query.params, fetchLimit) as OrganizationPointRow[]
+    raw = fetchLimit == null
+      ? (db
+          .prepare(
+            `SELECT ${POINT_SELECT}
+             FROM organizations o
+             WHERE ${query.conditions.join(' AND ')}`,
+          )
+          .all(...query.params) as OrganizationPointRow[])
+      : (db
+          .prepare(
+            `SELECT ${POINT_SELECT}
+             FROM organizations o
+             WHERE ${query.conditions.join(' AND ')}
+             LIMIT ?`,
+          )
+          .all(...query.params, fetchLimit) as OrganizationPointRow[])
   }
 
-  const rows = stratifiedSamplePoints(raw, targetLimit, filters.bbox, {
-    orgType: (row) => row.org_type,
-    lat: (row) => row.lat,
-    lng: (row) => row.lng,
-  })
+  const rows =
+    fetchLimit == null
+      ? raw
+      : stratifiedSamplePoints(raw, targetLimit, filters.bbox, {
+          orgType: (row) => row.org_type,
+          lat: (row) => row.lat,
+          lng: (row) => row.lng,
+        })
 
   return { rows, sourceCount: raw.length }
 }
@@ -233,7 +255,8 @@ app.get('/api/organizations/points', (c) => {
   )
   const compact = c.req.query('format') === 'compact'
   const { rows, sourceCount } = queryOrganizationPoints(filters, limit)
-  const truncated = sourceCount >= fetchLimitForTarget(limit) || sourceCount > rows.length
+  const fetchCap = fetchLimitForTarget(limit, filters.zoom)
+  const truncated = fetchCap != null && (sourceCount >= fetchCap || sourceCount > rows.length)
 
   if (compact) {
     const points: CompactPoint[] = rows.map((row) =>

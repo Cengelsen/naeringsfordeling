@@ -5,8 +5,8 @@ import type { GeoJSONSource } from 'maplibre-gl'
 import '@maplibre/maplibre-gl-leaflet'
 import type { OrganizationPoint } from '../types'
 import type { EmployeeBand } from '../utils/employeeBands'
-import { orgTypeColorExpression } from '../utils/orgTypeColors'
-import { ensurePmtilesProtocol, VECTOR_TILES_LAYER, type VectorTilesLayerSpec } from './vectorTiles'
+import { bakedColorExpression, orgTypeColorExpression } from '../utils/orgTypeColors'
+import { ensurePmtilesProtocol, isPolygonLodLayer, VECTOR_TILES_LAYER, type VectorTilesLayerSpec } from './vectorTiles'
 import { groupPointsByLocation, locationKey, orgnrsFromGroup } from './addressGroups'
 import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
 import {
@@ -27,7 +27,15 @@ function aggregateLayerId(sourceLayer: string): string {
   return `org-${sourceLayer}`
 }
 
-function aggregateRadiusExpression(): maplibregl.ExpressionSpecification {
+function districtFillLayerId(sourceLayer: string): string {
+  return `org-fill-${sourceLayer}`
+}
+
+function isDistrictMarkerLayer(sourceLayer: string): boolean {
+  return sourceLayer.startsWith('districts_') && !sourceLayer.endsWith('_poly')
+}
+
+function supercellRadiusExpression(): maplibregl.ExpressionSpecification {
   return [
     'interpolate',
     ['linear'],
@@ -158,7 +166,15 @@ export interface MaplibreDotsLayerOptions {
   pointsLayer?: VectorTilesLayerSpec | null
   orgTypesForColors?: string[]
   onMarkerClick: (orgnrs: string[], latlng: L.LatLng) => void
-  onAggregateClick?: (info: { orgType: string; count: number; latlng: L.LatLng }) => void
+  onAggregateClick?: (info: {
+    orgType: string
+    count: number
+    latlng: L.LatLng
+    label?: string
+    total?: number
+    districtLevel?: string
+    orgTypeBreakdown?: string
+  }) => void
   onVectorTilesError?: (message: string) => void
 }
 
@@ -180,7 +196,7 @@ export function createMaplibreDotsLayer(
   const vectorMode = Boolean(options.vectorTilesUrl)
   const lodLayers = options.lodLayers ?? []
   const pointsLayerSpec = options.pointsLayer ?? null
-  const pointsMinZoom = pointsLayerSpec?.minZoom ?? 0
+  const pointsMinZoom = options.dotsDetailMinZoom
   const pointsMaxZoom = pointsLayerSpec?.maxZoom ?? 24
   const pointsSourceLayer = pointsLayerSpec?.name ?? VECTOR_TILES_LAYER
   let ready = false
@@ -196,12 +212,19 @@ export function createMaplibreDotsLayer(
   }
   let currentPoints: OrganizationPoint[] = []
   let pendingPoints: OrganizationPoint[] | null = null
-  let clickLayers = vectorMode
-    ? [
-        ...lodLayers.map((layer) => aggregateLayerId(layer.name)),
-        POINT_LAYER_ID,
-      ]
-    : clusteringEnabled
+  function lodClickLayerIds(): string[] {
+    return lodLayers.flatMap((layer) => {
+      if (isPolygonLodLayer(layer.name)) {
+        return [districtFillLayerId(layer.name)]
+      }
+      if (isDistrictMarkerLayer(layer.name)) {
+        return []
+      }
+      return [aggregateLayerId(layer.name)]
+    })
+  }
+
+  let clickLayers = vectorMode ? [...lodClickLayerIds(), POINT_LAYER_ID] : clusteringEnabled
       ? [MULTI_POINT_LAYER_ID, POINT_LAYER_ID, CLUSTER_LAYER_ID]
       : [MULTI_POINT_LAYER_ID, POINT_LAYER_ID]
 
@@ -277,7 +300,7 @@ export function createMaplibreDotsLayer(
   }
 
   function aggregateLayerFilter(): maplibregl.FilterSpecification {
-    const typeFilter = propertyInFilter('orgType', dotFilters.orgTypes)
+    const typeFilter = propertyInFilter('dominantOrgType', dotFilters.orgTypes)
     return typeFilter ?? true
   }
 
@@ -315,12 +338,6 @@ export function createMaplibreDotsLayer(
 
   function applyPointColors(types: string[]) {
     const colorExpr = types.length > 0 ? orgTypeColorExpression(types) : '#64748b'
-    for (const spec of lodLayers) {
-      const layerId = aggregateLayerId(spec.name)
-      if (mlMap.getLayer(layerId)) {
-        mlMap.setPaintProperty(layerId, 'circle-color', colorExpr)
-      }
-    }
     if (mlMap.getLayer(POINT_LAYER_ID)) {
       mlMap.setPaintProperty(POINT_LAYER_ID, 'circle-color', colorExpr)
     }
@@ -328,14 +345,22 @@ export function createMaplibreDotsLayer(
 
   function applyOpacity() {
     const pointOpacity = stale ? 0.45 : 0.88
-    const aggregateOpacity = stale ? 0.4 : 0.72
     const clusterOpacity = stale ? 0.55 : 0.92
     const labelOpacity = stale ? 0.65 : 1
+    const aggregateFillOpacity = stale ? 0.28 : 0.42
+    const aggregateCircleOpacity = stale ? 0.4 : 0.82
 
     for (const spec of lodLayers) {
+      if (isPolygonLodLayer(spec.name)) {
+        const fillId = districtFillLayerId(spec.name)
+        if (mlMap.getLayer(fillId)) {
+          mlMap.setPaintProperty(fillId, 'fill-opacity', aggregateFillOpacity)
+        }
+        continue
+      }
       const layerId = aggregateLayerId(spec.name)
       if (mlMap.getLayer(layerId)) {
-        mlMap.setPaintProperty(layerId, 'circle-opacity', aggregateOpacity)
+        mlMap.setPaintProperty(layerId, 'circle-opacity', aggregateCircleOpacity)
       }
     }
 
@@ -358,6 +383,10 @@ export function createMaplibreDotsLayer(
       if (mlMap.getLayer(id)) mlMap.removeLayer(id)
     }
     for (const spec of lodLayers) {
+      if (isPolygonLodLayer(spec.name)) {
+        const fillId = districtFillLayerId(spec.name)
+        if (mlMap.getLayer(fillId)) mlMap.removeLayer(fillId)
+      }
       const layerId = aggregateLayerId(spec.name)
       if (mlMap.getLayer(layerId)) mlMap.removeLayer(layerId)
     }
@@ -366,7 +395,32 @@ export function createMaplibreDotsLayer(
 
   function addAggregateLayers() {
     for (const spec of lodLayers) {
+      if (isPolygonLodLayer(spec.name)) {
+        const fillId = districtFillLayerId(spec.name)
+        mlMap.addLayer({
+          id: fillId,
+          type: 'fill',
+          source: SOURCE_ID,
+          'source-layer': spec.name,
+          minzoom: spec.minZoom,
+          maxzoom: spec.maxZoom,
+          filter: aggregateLayerFilter(),
+          paint: {
+            'fill-color': bakedColorExpression(),
+            'fill-opacity': 0.42,
+            'fill-outline-color': '#0f172a',
+          },
+        })
+        continue
+      }
+
+      if (isDistrictMarkerLayer(spec.name)) {
+        continue
+      }
+
       const layerId = aggregateLayerId(spec.name)
+      const radius = supercellRadiusExpression()
+
       mlMap.addLayer({
         id: layerId,
         type: 'circle',
@@ -376,10 +430,9 @@ export function createMaplibreDotsLayer(
         maxzoom: spec.maxZoom,
         filter: aggregateLayerFilter(),
         paint: {
-          'circle-color':
-            currentTypes.length > 0 ? orgTypeColorExpression(currentTypes) : '#64748b',
-          'circle-radius': aggregateRadiusExpression(),
-          'circle-stroke-width': 0.5,
+          'circle-color': bakedColorExpression(),
+          'circle-radius': radius,
+          'circle-stroke-width': 0.75,
           'circle-stroke-color': '#0f172a',
           'circle-opacity': 0.72,
         },
@@ -440,10 +493,7 @@ export function createMaplibreDotsLayer(
     removeDataLayers()
     clusteringEnabled = clustered
     clickLayers = vectorMode
-      ? [
-          ...lodLayers.map((layer) => aggregateLayerId(layer.name)),
-          POINT_LAYER_ID,
-        ]
+      ? [...lodClickLayerIds(), POINT_LAYER_ID]
       : clustered
         ? [MULTI_POINT_LAYER_ID, POINT_LAYER_ID, CLUSTER_LAYER_ID]
         : [MULTI_POINT_LAYER_ID, POINT_LAYER_ID]
@@ -627,12 +677,35 @@ export function createMaplibreDotsLayer(
     )
   }
 
-  function handleAggregateFeature(feature: maplibregl.MapGeoJSONFeature) {
-    const orgType = feature.properties?.orgType as string | undefined
-    const count = feature.properties?.count as number | undefined
+  function handleAggregateFeature(
+    feature: maplibregl.MapGeoJSONFeature,
+    latlng: L.LatLng,
+  ) {
+    const orgType =
+      (feature.properties?.dominantOrgType as string | undefined) ??
+      (feature.properties?.orgType as string | undefined)
+    const count =
+      (feature.properties?.count as number | undefined) ??
+      (feature.properties?.total as number | undefined)
     if (!orgType || count == null) return
-    const [lng, lat] = (feature.geometry as Point).coordinates
-    options.onAggregateClick?.({ orgType, count, latlng: L.latLng(lat, lng) })
+    options.onAggregateClick?.({
+      orgType,
+      count,
+      latlng,
+      label: feature.properties?.label as string | undefined,
+      total: feature.properties?.total as number | undefined,
+      districtLevel: feature.properties?.districtLevel as string | undefined,
+      orgTypeBreakdown: feature.properties?.orgTypeBreakdown as string | undefined,
+    })
+  }
+
+  function isAggregateLayerId(layerId: string): boolean {
+    return lodLayers.some((spec) => {
+      if (isPolygonLodLayer(spec.name)) {
+        return layerId === districtFillLayerId(spec.name)
+      }
+      return layerId === aggregateLayerId(spec.name)
+    })
   }
 
   function handleLeafletClick(event: L.LeafletMouseEvent) {
@@ -643,11 +716,9 @@ export function createMaplibreDotsLayer(
 
     L.DomEvent.stopPropagation(event)
 
-    const aggregateFeature = features.find((feature) =>
-      lodLayers.some((spec) => feature.layer.id === aggregateLayerId(spec.name)),
-    )
+    const aggregateFeature = features.find((feature) => isAggregateLayerId(feature.layer.id))
     if (aggregateFeature && map.getZoom() < options.dotsDetailMinZoom) {
-      handleAggregateFeature(aggregateFeature)
+      handleAggregateFeature(aggregateFeature, event.latlng)
       return
     }
 

@@ -43,10 +43,28 @@ jobs:
           set -euo pipefail
           mkdir -p public/data/points data
 
-          curl -fsSL \
-            -o public/data/kommuner.geojson \
-            https://raw.githubusercontent.com/robhop/fylker-og-kommuner/main/Kommuner-S.geojson
-          gzip -9 -f -k public/data/kommuner.geojson
+          yarn download-kommuner
+
+          if gh release view points >/dev/null 2>&1; then
+            gh release download points --pattern 'points.pmtiles' --dir public/data --clobber
+            gh release download points --pattern 'manifest.json' --dir public/data/points --clobber
+            echo "Loaded vector tiles from release"
+
+            if gh release download points --pattern 'districts.tar.gz' --dir public/data --clobber 2>/dev/null; then
+              tar -C public/data -xzf public/data/districts.tar.gz
+              rm -f public/data/districts.tar.gz
+              echo "Loaded prebuilt district colours from release"
+              echo "DISTRICTS_PREBUILT=1" >> "$GITHUB_ENV"
+            else
+              echo "No districts.tar.gz in points release – will rebuild"
+            fi
+          else
+            echo "No points release yet – dots mode will use exported geocoded-points.json"
+          fi
+
+          if [ "${DISTRICTS_PREBUILT:-}" != "1" ]; then
+            yarn download-grunnkretser
+          fi
 
           if gh release view database >/dev/null 2>&1; then
             gh release download database --pattern 'organizations.db' --dir data --clobber
@@ -55,16 +73,10 @@ jobs:
             echo "No database release yet – static API export will be skipped"
           fi
 
-          if gh release view points >/dev/null 2>&1; then
-            gh release download points --pattern 'points.pmtiles' --dir public/data --clobber
-            gh release download points --pattern 'manifest.json' --dir public/data/points --clobber
-            echo "Loaded vector tiles from release"
-          else
-            echo "No points release yet – dots mode will use exported geocoded-points.json"
-          fi
-
       - name: Export static API
         if: hashFiles('data/organizations.db') != ''
+        env:
+          DISTRICTS_SKIP_EXPORT: ${{ env.DISTRICTS_PREBUILT == '1' && '1' || '' }}
         run: yarn export-static-api
 
       - name: Build site

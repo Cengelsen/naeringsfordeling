@@ -80,24 +80,24 @@ jobs:
             export SYNC_GEOCODE_LIMIT=5000
             export BUILD_DB_MAX_ROUNDS=6
             export BUILD_DB_MAX_GEOCODE_ADDRESSES=50000
-            yarn build-db --fresh
+            yarn build-db --fresh --allow-api --refresh-downloads
           elif [ "$BACKFILL" = "true" ]; then
             echo "Modus: backfill – oppdaterer eksisterende database fra BRREG bulk"
             export SYNC_GEOCODE_LIMIT=5000
             export BUILD_DB_MAX_ROUNDS=6
             export BUILD_DB_MAX_GEOCODE_ADDRESSES=50000
-            yarn build-db --backfill --regeocode-metadata
+            yarn build-db --backfill --regeocode-metadata --allow-api
           elif [ "$HAS_RELEASE" = "false" ]; then
             echo "Modus: første bygg – full BRREG-import (enheter + underenheter) + geokode inntil kvote"
             export SYNC_GEOCODE_LIMIT=5000
             export BUILD_DB_MAX_ROUNDS=6
             export BUILD_DB_MAX_GEOCODE_ADDRESSES=50000
-            yarn build-db --fresh
+            yarn build-db --fresh --allow-api --refresh-downloads
           else
             echo "Modus: inkrementell BRREG-sync + geokode nye/endrede adresser"
             export SYNC_GEOCODE_LIMIT=5000
             export BUILD_DB_MAX_ROUNDS=6
-            yarn build-db
+            yarn build-db --allow-api
           fi
 
       - name: Publish database release
@@ -129,7 +129,11 @@ jobs:
             | sudo tar xz -C /usr/local/bin pmtiles
 
       - name: Export map tiles (LOD pyramid)
-        run: yarn export-map-tiles
+        run: |
+          yarn download-kommuner
+          yarn download-grunnkretser
+          yarn export-map-tiles
+          tar -C public/data -czf public/data/districts.tar.gz districts
 
       - name: Publish vector tiles release
         uses: softprops/action-gh-release@v2
@@ -137,12 +141,14 @@ jobs:
           tag_name: points
           name: Organization point tiles
           body: |
-            Pre-built PMTiles vector tiles for default map filters.
+            Pre-built PMTiles vector tiles for default map filters,
+            plus district/grunnkrets colour GeoJSON (`districts.tar.gz`).
 
             Run: ${{ github.run_id }}
             Time: ${{ github.run_started_at }}
           files: |
             public/data/points.pmtiles
             public/data/points/manifest.json
+            public/data/districts.tar.gz
           make_latest: true
           overwrite_files: true

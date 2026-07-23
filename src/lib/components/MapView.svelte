@@ -43,12 +43,21 @@
   import { naeringskodeSectionLabel } from '../utils/naeringskode'
   import {
     aggregateLayersFromManifest,
-    manifestHasLodLayers,
+    lodTilesAvailable,
     pointsLayerFromManifest,
     probeVectorTiles,
     vectorTilesSourceUrl,
     type VectorTilesManifest,
   } from '../map/vectorTiles'
+  import {
+    createDistrictColorLayer,
+    type DistrictColorController,
+  } from '../map/districtColorLayer'
+  import {
+    detailLevelLabel,
+    probeDistrictColors,
+    type DistrictColorsManifest,
+  } from '../map/districtColors'
   import { createDotsLayer, type DotsLayerController } from '../map/dotsLayer'
   import Legend from './Legend.svelte'
   import OrgTypeLegend from './OrgTypeLegend.svelte'
@@ -71,6 +80,7 @@
 
   let mapContainer: HTMLDivElement
   let map: L.Map | null = null
+  let mapZoom = $state(5)
   let geoLayer: L.GeoJSON | null = null
   let dotsController: DotsLayerController | null = null
   let points = $state<OrganizationPoint[]>([])
@@ -90,6 +100,8 @@
   let boundsTimer: ReturnType<typeof setTimeout> | undefined
   let kommuneBoundsByNummer = new Map<string, GeoBounds>()
   let vectorTilesManifest = $state<VectorTilesManifest | null>(null)
+  let districtColorsManifest = $state<DistrictColorsManifest | null>(null)
+  let districtColorController: DistrictColorController | null = null
   let vectorTilesDisabled = $state(false)
   let webglUnavailable = $state(false)
   let webglBannerDismissed = $state(false)
@@ -99,6 +111,10 @@
 
   const ORG_LOCATE_ZOOM = 18
 
+  /** Pre-rendered district/grunnkrets GeoJSON (preferred aggregate path). */
+  const districtColorsReady = $derived(districtColorsManifest !== null)
+
+  /** Individual address PMTiles at detail zoom (requires default bake-in filters). */
   const vectorTilesReady = $derived(
     vectorTilesManifest !== null &&
       !vectorTilesDisabled &&
@@ -106,9 +122,31 @@
       canUseStaticTiles(settings),
   )
 
-  const lodTilesReady = $derived(
-    vectorTilesReady && manifestHasLodLayers(vectorTilesManifest),
+  /** PMTiles aggregate layers — used only when district GeoJSON is unavailable. */
+  const pmtilesLodReady = $derived(
+    vectorTilesReady && !districtColorsReady && lodTilesAvailable(vectorTilesManifest),
   )
+
+  const aggregateZoomActive = $derived(
+    settings.visualization === 'dots' && mapZoom < settings.dotsDetailMinZoom,
+  )
+
+  const currentDetailLevel = $derived(
+    detailLevelLabel(mapZoom, {
+      visualization: settings.visualization,
+      districtLevel: settings.districtLevel,
+      dotsDetailMinZoom: settings.dotsDetailMinZoom,
+      manifest: districtColorsManifest,
+    }),
+  )
+
+  const dotsSourceLabel = $derived.by(() => {
+    if (districtColorsReady && aggregateZoomActive) return 'distriktsfliser'
+    if (pmtilesLodReady && aggregateZoomActive) return 'vektorfliser (LOD)'
+    if (vectorTilesReady) return 'vektorfliser'
+    if (webglUnavailable) return 'Leaflet-fallback'
+    return 'SQLite-database'
+  })
 
   const countMap = $derived(new Map(counts.map((c) => [c.kommunenummer, c.count])))
 
@@ -136,8 +174,8 @@
   const totalVisible = $derived(
     settings.visualization === 'dots'
       ? (dotsState.viewportSummary?.geocodedInBbox ??
-        (vectorTilesReady
-          ? vectorTilesManifest?.total ?? 0
+        (!aggregateZoomActive && vectorTilesReady
+          ? (dotsState.renderedFeatureCount ?? 0)
           : filterPointsByMapFilters(allPoints, settings).length))
       : counts.reduce((sum, c) => sum + c.count, 0),
   )
@@ -153,8 +191,9 @@
   }
 
   const orgTypeLegendItems = $derived.by(() => {
-    if (vectorTilesReady && vectorTilesManifest) {
-      const manifestTypes = vectorTilesManifest.orgTypes
+    const manifestTypes =
+      districtColorsManifest?.orgTypes ?? vectorTilesManifest?.orgTypes ?? null
+    if (manifestTypes) {
       return manifestTypes.map((kode) => {
         const meta = orgForms.find((f) => f.kode === kode)
         return {
@@ -422,15 +461,53 @@
     }
   }
 
-  function handleAggregateClick(info: { orgType: string; count: number; latlng: L.LatLng }) {
+  function handleAggregateClick(info: {
+    orgType: string
+    count: number
+    latlng: L.LatLng
+    label?: string
+    total?: number
+    districtLevel?: string
+    orgTypeBreakdown?: string
+  }) {
     if (!map) return
-    const label = orgForms.find((form) => form.kode === info.orgType)?.beskrivelse ?? info.orgType
-    L.popup({ maxWidth: 280 })
+    const typeLabel = orgForms.find((form) => form.kode === info.orgType)?.beskrivelse ?? info.orgType
+    const place =
+      info.label ??
+      (info.districtLevel === 'fylke'
+        ? 'Fylke'
+        : info.districtLevel === 'grunnkrets'
+          ? 'Grunnkrets'
+          : 'Kommune')
+    const totalLine =
+      info.total != null
+        ? `<br>${info.total.toLocaleString('nb-NO')} organisasjoner totalt i ${place}`
+        : ''
+    const breakdownLine = formatOrgTypeBreakdownHtml(info.orgTypeBreakdown)
+    L.popup({ maxWidth: 320 })
       .setLatLng(info.latlng)
       .setContent(
-        `<strong>${label}</strong><br>${info.count.toLocaleString('nb-NO')} organisasjoner i cellen<br><em>Zoom inn for enkeltadresser</em>`,
+        `<strong>${place}</strong>${totalLine}${breakdownLine}<br><em>Zoom inn for enkeltadresser</em>`,
       )
       .openOn(map)
+  }
+
+  function formatOrgTypeBreakdownHtml(breakdownJson?: string): string {
+    if (!breakdownJson) return ''
+    try {
+      const breakdown = JSON.parse(breakdownJson) as Record<string, number>
+      const lines = Object.entries(breakdown)
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 6)
+        .map(([kode, count]) => {
+          const label = orgForms.find((form) => form.kode === kode)?.beskrivelse ?? kode
+          return `${label}: ${count.toLocaleString('nb-NO')}`
+        })
+      if (lines.length === 0) return ''
+      return `<br><br>${lines.join('<br>')}`
+    } catch {
+      return ''
+    }
   }
 
   function handleMarkerClick(orgnrs: string[], latlng: L.LatLng) {
@@ -452,6 +529,7 @@
       geoLayer.remove()
       geoLayer = null
     }
+    removeDistrictColorLayer()
     removeDotsController()
   }
 
@@ -533,14 +611,66 @@
     })
   }
 
+  function removeDistrictColorLayer() {
+    districtColorController?.remove()
+    districtColorController = null
+  }
+
+  function fylkerInBounds(): string[] {
+    const fylker = new Set<string>()
+    for (const kommunenummer of kommunerInBounds()) {
+      fylker.add(fylkeFromKommune(kommunenummer))
+    }
+    return [...fylker].sort()
+  }
+
+  function ensureDistrictColorLayer() {
+    if (!map || !districtColorsManifest) return
+
+    if (!districtColorController) {
+      districtColorController = createDistrictColorLayer(map, districtColorsManifest, {
+        getViewportFylker: fylkerInBounds,
+        onFeatureClick: (feature, latlng) => {
+          handleAggregateClick({
+            orgType: feature.properties.dominantOrgType,
+            count: feature.properties.count,
+            latlng,
+            label: feature.properties.label,
+            total: feature.properties.total ?? feature.properties.count,
+            districtLevel: feature.properties.districtLevel,
+            orgTypeBreakdown: feature.properties.orgTypeBreakdown,
+          })
+        },
+      })
+    }
+
+    districtColorController.setZoom(map.getZoom())
+    districtColorController.setViewportFylker(fylkerInBounds())
+    districtColorController.setFilters({
+      orgTypes: settings.orgTypes,
+      selectedFylke: settings.selectedFylke,
+      selectedKommune: settings.selectedKommune,
+    })
+    districtColorController.show()
+  }
+
   function ensureDotsController() {
     if (!map) return
 
     const vectorMode = vectorTilesReady
+    const useLodFallback = pmtilesLodReady
+    const lodLayers = useLodFallback ? aggregateLayersFromManifest(vectorTilesManifest) : []
     const vectorUrl = vectorMode ? vectorTilesSourceUrl() : null
-    const orgTypesForColors = vectorTilesManifest?.orgTypes ?? orgForms.map((form) => form.kode)
+    const orgTypesForColors =
+      districtColorsManifest?.orgTypes ??
+      vectorTilesManifest?.orgTypes ??
+      orgForms.map((form) => form.kode)
 
-    if (dotsController && dotsControllerUsesVector === vectorMode) {
+    if (
+      dotsController &&
+      dotsControllerUsesVector === vectorMode &&
+      dotsControllerUsesLod === useLodFallback
+    ) {
       applyDotFilters()
       return
     }
@@ -551,7 +681,7 @@
       dotsDetailMinZoom: settings.dotsDetailMinZoom,
       dotsClustering: false,
       vectorTilesUrl: vectorUrl,
-      lodLayers: vectorMode ? aggregateLayersFromManifest(vectorTilesManifest) : [],
+      lodLayers,
       pointsLayer: vectorMode ? pointsLayerFromManifest(vectorTilesManifest) : null,
       orgTypesForColors,
       onMarkerClick: handleMarkerClick,
@@ -561,6 +691,7 @@
 
     dotsController = controller
     dotsControllerUsesVector = usedWebgl && vectorMode
+    dotsControllerUsesLod = usedWebgl && useLodFallback
 
     if (!usedWebgl) {
       webglUnavailable = true
@@ -569,27 +700,16 @@
   }
 
   let dotsControllerUsesVector = false
+  let dotsControllerUsesLod = false
 
   function removeDotsController() {
     dotsController?.remove()
     dotsController = null
     dotsControllerUsesVector = false
+    dotsControllerUsesLod = false
     points = []
     allPoints = []
     dotsCache.clear()
-  }
-
-  function applyVectorTilesState() {
-    ensureDotsController()
-    applyDotFilters()
-    dotsController?.setStale(false)
-    dotsController?.bringToFront()
-    updateDotsState({
-      loading: false,
-      phase: 'idle',
-      message: null,
-    })
-    window.setTimeout(() => updateRenderedFeatureCount(), 300)
   }
 
   function kommunerInBounds(): string[] {
@@ -693,6 +813,15 @@
   }
 
   function applyOrgTypeVisibility() {
+    if (aggregateZoomActive && districtColorsReady) {
+      ensureDistrictColorLayer()
+      return
+    }
+    if (aggregateZoomActive && pmtilesLodReady) {
+      applyDotFilters()
+      updateRenderedFeatureCount()
+      return
+    }
     applyDotFilters()
     if (untrack(() => vectorTilesReady)) {
       updateRenderedFeatureCount()
@@ -744,19 +873,84 @@
     })
   }
 
+  function applyVectorTilesState(options: { includeViewportSummary?: boolean } = {}) {
+    ensureDotsController()
+    applyDotFilters()
+    dotsController?.setStale(false)
+    dotsController?.bringToFront()
+    updateDotsState({
+      loading: false,
+      phase: 'idle',
+      message: null,
+      organizations: vectorTilesManifest?.total ?? 0,
+      geocoded: vectorTilesManifest?.total ?? 0,
+    })
+    updateRenderedFeatureCount()
+    if (options.includeViewportSummary) {
+      void loadViewportSummary()
+    }
+  }
+
   async function loadDots() {
     if (!map || settings.visualization !== 'dots' || orgFocusActive) return
 
-    if (vectorTilesReady) {
-      applyVectorTilesState()
+    const zoom = map.getZoom()
+    const atAggregateZoom = zoom < settings.dotsDetailMinZoom
+
+    if (atAggregateZoom && districtColorsReady) {
+      removeDotsController()
+      if (geoLayer) {
+        geoLayer.remove()
+        geoLayer = null
+      }
+      ensureDistrictColorLayer()
+      updateDotsState({
+        loading: false,
+        phase: 'idle',
+        message: null,
+        skipped: 0,
+      })
       await loadViewportSummary()
+      return
+    }
+
+    if (atAggregateZoom && pmtilesLodReady) {
+      removeDistrictColorLayer()
+      if (geoLayer) {
+        geoLayer.remove()
+        geoLayer = null
+      }
+      applyVectorTilesState({ includeViewportSummary: true })
+      return
+    }
+
+    if (atAggregateZoom) {
+      removeDistrictColorLayer()
+      removeDotsController()
+      renderBaseKommuner()
+      if (geoLayer) geoLayer.bringToBack()
+      updateDotsState({
+        loading: false,
+        phase: 'idle',
+        message:
+          'Distriktsfliser mangler. Kjør yarn download-grunnkretser && yarn export-district-colors',
+      })
+      await loadViewportSummary()
+      return
+    }
+
+    removeDistrictColorLayer()
+    renderBaseKommuner()
+    if (geoLayer) geoLayer.bringToBack()
+
+    if (vectorTilesReady) {
+      applyVectorTilesState({ includeViewportSummary: true })
       return
     }
 
     ensureDotsController()
 
     const targetKommuner = kommunerInBounds()
-    const zoom = map.getZoom()
     const bounds = map.getBounds()
     const bbox = mapBbox(bounds)
 
@@ -773,6 +967,7 @@
         kommuner: 0,
         message: null,
       })
+      await loadViewportSummary()
       return
     }
 
@@ -841,9 +1036,8 @@
   function scheduleDotsReload(delay = DOTS_FILTER_RELOAD_DELAY_MS) {
     if (settings.visualization !== 'dots' || orgFocusActive) return
     clearTimeout(boundsTimer)
-    boundsTimer = setTimeout(() => {
-      loadDots()
-      loadViewportSummary()
+    boundsTimer = window.setTimeout(() => {
+      void loadDots()
     }, delay)
   }
 
@@ -972,6 +1166,7 @@
     }
 
     if (settings.visualization === 'choropleth') {
+      removeDistrictColorLayer()
       removeDotsController()
       renderChoropleth()
       return
@@ -984,7 +1179,20 @@
     scheduleDotsReload(0)
   }
 
+  function handleMapZoomEnd() {
+    mapZoom = map?.getZoom() ?? mapZoom
+    scheduleDotsReloadOnZoom()
+  }
+
   onMount(() => {
+    void probeDistrictColors().then(({ available, manifest }) => {
+      if (!available || !manifest) return
+      districtColorsManifest = manifest
+      if (settings.visualization === 'dots') {
+        scheduleDotsReload(0)
+      }
+    })
+
     void probeVectorTiles().then(({ available, manifest }) => {
       if (!available || !manifest) return
       vectorTilesManifest = manifest
@@ -1004,6 +1212,7 @@
       ],
       maxBoundsViscosity: 1,
     }).setView([65.0, 12.0], 5)
+    mapZoom = 5
 
     L.control.zoom({ position: 'topright' }).addTo(map)
 
@@ -1014,7 +1223,7 @@
     }).addTo(map)
 
     map.on('moveend', scheduleDotsReloadOnMove)
-    map.on('zoomend', scheduleDotsReloadOnZoom)
+    map.on('zoomend', handleMapZoomEnd)
 
     const resizeObserver = new ResizeObserver(() => {
       map?.invalidateSize({ animate: false })
@@ -1027,7 +1236,8 @@
       clearTimeout(boundsTimer)
       resizeObserver.disconnect()
       map?.off('moveend', scheduleDotsReloadOnMove)
-      map?.off('zoomend', scheduleDotsReloadOnZoom)
+      map?.off('zoomend', handleMapZoomEnd)
+      removeDistrictColorLayer()
       removeDotsController()
       clearOrgMarker()
       map?.remove()
@@ -1061,9 +1271,14 @@
     settings.employeeBands
     settings.entityKinds
     settings.konsernMembersOnly
+    settings.selectedFylke
+    settings.selectedKommune
 
     dotsCache.clear()
-    if (dotsController && dotsControllerUsesVector !== vectorTilesReady) {
+    if (
+      dotsController &&
+      (dotsControllerUsesVector !== vectorTilesReady || dotsControllerUsesLod !== pmtilesLodReady)
+    ) {
       removeDotsController()
     }
     scheduleDotsReload()
@@ -1135,6 +1350,10 @@
     </div>
   {/if}
 
+  <div class="zoom-level-tag" aria-live="polite">
+    z{mapZoom} · {currentDetailLevel}
+  </div>
+
   <div class="attribution">
     {#if orgFocusActive}
       Organisasjon · OpenStreetMap
@@ -1143,7 +1362,7 @@
       {#if dotsState.viewportSummary && dotsState.viewportSummary.ungeocodedInViewport > 0}
         · {dotsState.viewportSummary.ungeocodedInViewport.toLocaleString('nb-NO')} uten kartkoordinat
       {/if}
-      · {vectorTilesReady ? 'vektorfliser' : webglUnavailable ? 'Leaflet-fallback' : 'SQLite-database'}
+      · {dotsSourceLabel}
     {:else}
       {totalVisible.toLocaleString('nb-NO')} organisasjoner i visningen
     {/if}
@@ -1229,6 +1448,21 @@
 
   .banner-dismiss:hover {
     background: #334155;
+  }
+
+  .zoom-level-tag {
+    position: absolute;
+    left: 1rem;
+    bottom: 0.75rem;
+    z-index: 1000;
+    background: rgba(15, 23, 42, 0.88);
+    color: #e2e8f0;
+    padding: 0.4rem 0.65rem;
+    border-radius: 0.35rem;
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
   }
 
   .attribution {

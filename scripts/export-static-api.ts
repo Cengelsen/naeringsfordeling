@@ -1,8 +1,9 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
 import { join } from 'node:path'
 import { openDatabase, DEFAULT_DB_PATH, effectiveKommunenummerExpr } from './lib/db.js'
 import { employeeBand, naeringskodeSection } from './lib/employeeBands.js'
+import { exportDistrictColorAssets } from './lib/district-color-export.js'
 
 const outputDir = process.env.STATIC_API_DIR ?? 'public/data/api'
 
@@ -231,8 +232,21 @@ writeJson('naeringskoder.json', {
 
 writeJson('geocoded-points.json', { rows: geocodedPoints }, true)
 
+const districtsManifest = join(process.cwd(), 'public/data/districts/manifest.json')
+const skipDistricts =
+  process.env.DISTRICTS_SKIP_EXPORT === '1' && existsSync(districtsManifest)
+
+let districtColorsPath = districtsManifest
+if (skipDistricts) {
+  console.log(`Skipping district color export (using prebuilt ${districtsManifest})`)
+} else {
+  const districtColors = exportDistrictColorAssets(db, 'public/data/districts')
+  districtColorsPath = districtColors.manifestPath
+}
+
 console.log(`Exported static API to ${outputDir}`)
 console.log(`  ${orgForms.length} org types, ${kommuner.length} kommuner`)
 console.log(`  ${municipalityBreakdown.length} municipality breakdown rows`)
 console.log(`  ${searchIndex.length.toLocaleString('nb-NO')} organizations`)
 console.log(`  ${geocodedPoints.length.toLocaleString('nb-NO')} geocoded points`)
+console.log(`  district colors → ${districtColorsPath}`)

@@ -312,7 +312,7 @@
 
     {#if isDotsView}
       <p class="hint">
-        Statistikken gjelder hele kartutsnittet. Ved lav zoom vises forhåndsaggregerte celleprikker; zoom inn for enkeltadresser.
+        Statistikken gjelder hele kartutsnittet. Ved lav zoom vises fylke/kommune/grunnkretser med org.type-fordeling (som Distrikter); enkeltadresser fra zoom 15.
       </p>
     {:else}
       <div class="segmented nested">

@@ -1,17 +1,12 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type Database from 'better-sqlite3'
+import { importBrregForKommuner } from './brreg-local-import.js'
 import {
   DEFAULT_REFERENCE_CACHE_DIR,
   brregReferenceAvailable,
   ensureKommunerCache,
-  importBrregEnheterFromCache,
-  importBrregUnderenheterFromCache,
   loadKommunerCache,
-  readReferenceManifest,
-  referencePath,
-  BRREG_ENHETER_FILE,
-  BRREG_UNDERENHETER_FILE,
 } from './reference-cache.js'
 import {
   downloadAndImportRegionKartverket,
@@ -23,7 +18,6 @@ import {
   geocodeAllFromKartverketBulk,
 } from './local-geocode.js'
 import { getStats, openDatabase, rebuildOrgsRtree, removeDatabaseFiles, setSyncState } from './db.js'
-import { entityKommunenummer, upsertEntity, upsertUnderenhet } from './organizations.js'
 import {
   importRegionFromNationalDb,
   listKommunerFromNationalDb,
@@ -259,66 +253,6 @@ export async function listAllKommuner(
   }))
 }
 
-async function importBrregForKommuner(
-  db: Database.Database,
-  kommuner: string[],
-  skipUnderenheter: boolean,
-  referenceCacheDir: string,
-): Promise<number> {
-  if (!brregReferenceAvailable(referenceCacheDir)) {
-    throw new Error(
-      `Mangler lokal BRREG referansedata i ${referenceCacheDir}. Kjør yarn build-national-db først.`,
-    )
-  }
-
-  const kommuneSet = new Set(kommuner.map((k) => k.padStart(4, '0')))
-  const filterEntity = (entity: Parameters<typeof upsertEntity>[1]) => {
-    const k = entityKommunenummer(entity)
-    return k != null && kommuneSet.has(k)
-  }
-
-  const enheterPath = referencePath(referenceCacheDir, BRREG_ENHETER_FILE)
-  const underenheterPath = referencePath(referenceCacheDir, BRREG_UNDERENHETER_FILE)
-
-  console.log(`  Filtrerer nasjonal BRREG-cache for ${kommuner.length} kommune(r)…`)
-  console.log(`  Enheter fra ${enheterPath}`)
-
-  let imported = 0
-  await importBrregEnheterFromCache(enheterPath, async (entity) => {
-    upsertEntity(db, entity, Boolean(entity.slettedato))
-    imported += 1
-  }, filterEntity)
-  console.log(`  ${imported.toLocaleString('nb-NO')} enheter importert`)
-
-  if (skipUnderenheter) {
-    console.log('  Underenheter hoppet over (--skip-underenheter).')
-  } else if (existsSync(underenheterPath)) {
-    let importedUnder = 0
-    console.log(`  Underenheter fra ${underenheterPath}`)
-    await importBrregUnderenheterFromCache(underenheterPath, async (entity) => {
-      upsertUnderenhet(db, entity, Boolean(entity.slettedato))
-      importedUnder += 1
-    }, filterEntity)
-    imported += importedUnder
-    console.log(`  ${importedUnder.toLocaleString('nb-NO')} underenheter importert`)
-  } else {
-    console.log('  Ingen lokal underenheter-fil i referansecache.')
-  }
-
-  const manifest = readReferenceManifest(referenceCacheDir)
-  if (manifest.last_oppdateringsid) {
-    setSyncState(db, 'last_oppdateringsid', manifest.last_oppdateringsid)
-  }
-  if (manifest.last_oppdateringsid_underenheter) {
-    setSyncState(db, 'last_oppdateringsid_underenheter', manifest.last_oppdateringsid_underenheter)
-  }
-
-  setSyncState(db, 'last_full_sync_at', new Date().toISOString())
-  setSyncState(db, 'last_backfill_at', new Date().toISOString())
-
-  return imported
-}
-
 export function regionLabel(descriptor: RegionDescriptor): string {
   if (descriptor.kind === 'fylke') {
     return `fylke ${descriptor.code} ${descriptor.name} (${descriptor.kommuner.length} kommuner)`
@@ -388,12 +322,10 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
 
     if (!options.skipBrreg) {
       console.log(`\nSteg 2/4: Importerer BRREG for ${descriptor.kommuner.length} kommune(r) fra lokal cache…`)
-      await importBrregForKommuner(
-        db,
-        descriptor.kommuner,
-        options.skipUnderenheter ?? false,
+      await importBrregForKommuner(db, descriptor.kommuner, {
+        skipUnderenheter: options.skipUnderenheter ?? false,
         referenceCacheDir,
-      )
+      })
     }
 
     if (!options.skipGeocode) {

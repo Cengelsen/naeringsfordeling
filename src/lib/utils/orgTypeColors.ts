@@ -131,3 +131,75 @@ export function orgTypeLabels(
 ): Array<{ kode: string; label: string; color: string }> {
   return types.sort((left, right) => spectrumPosition(left.kode) - spectrumPosition(right.kode))
 }
+
+const DEFAULT_MIX_COLOR = '#64748b'
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const normalized = hex.replace('#', '')
+  if (normalized.length !== 6) return null
+  const value = Number.parseInt(normalized, 16)
+  if (!Number.isFinite(value)) return null
+  return {
+    r: (value >> 16) & 255,
+    g: (value >> 8) & 255,
+    b: value & 255,
+  }
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const channel = (value: number) =>
+    Math.min(255, Math.max(0, Math.round(value)))
+      .toString(16)
+      .padStart(2, '0')
+  return `#${channel(r)}${channel(g)}${channel(b)}`
+}
+
+/** Count-weighted RGB blend of org-type spectrum colours (used at tile bake time). */
+export function mixOrgTypeColors(counts: Iterable<[orgType: string, count: number]>): string {
+  let totalR = 0
+  let totalG = 0
+  let totalB = 0
+  let total = 0
+
+  for (const [orgType, count] of counts) {
+    if (count <= 0) continue
+    const rgb = hexToRgb(colorForOrgType(orgType))
+    if (!rgb) continue
+    totalR += rgb.r * count
+    totalG += rgb.g * count
+    totalB += rgb.b * count
+    total += count
+  }
+
+  if (total === 0) return DEFAULT_MIX_COLOR
+  return rgbToHex(totalR / total, totalG / total, totalB / total)
+}
+
+export function dominantOrgType(counts: Iterable<[orgType: string, count: number]>): string {
+  let bestType = ''
+  let bestCount = 0
+  for (const [orgType, count] of counts) {
+    if (count > bestCount) {
+      bestType = orgType
+      bestCount = count
+    }
+  }
+  return bestType
+}
+
+/** Compact JSON breakdown for aggregate popups (sorted by count, descending). */
+export function orgTypeBreakdownJson(counts: Iterable<[orgType: string, count: number]>): string {
+  const entries = [...counts]
+    .filter(([, count]) => count > 0)
+    .sort((left, right) => right[1] - left[1])
+  const breakdown: Record<string, number> = {}
+  for (const [orgType, count] of entries) {
+    breakdown[orgType] = count
+  }
+  return JSON.stringify(breakdown)
+}
+
+/** MapLibre expression for pre-baked aggregate tile colours. */
+export function bakedColorExpression(): ExpressionSpecification {
+  return ['coalesce', ['get', 'color'], DEFAULT_MIX_COLOR] as ExpressionSpecification
+}

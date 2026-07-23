@@ -12,7 +12,7 @@ All data synkroniseres nattlig fra BRREG til en **SQLite-database** via GitHub A
 - Filtrering på næringskode (NACE-seksjon), antall ansatte (bånd), enhetstype (hovedenheter/underenheter)
 - Filtrering på fylke, kommune, konkurs, avvikling og MVA-registrering
 - Konsern-modus: vis konsernstruktur i popup med kartoverlay
-- To visualiseringsmoduser: distrikter (fylker/kommuner) og adresser (prikker)
+- To visualiseringsmoduser: distrikter (fylker/kommuner) og adresser (prikker). **Adresser er standard.**
 - **Nightly sync** via GitHub Actions til SQLite + forhåndsbygde PMTiles
 - Prikker lastes primært fra vektorfliser; API/SQLite brukes som fallback
 
@@ -21,13 +21,17 @@ All data synkroniseres nattlig fra BRREG til en **SQLite-database** via GitHub A
 ```bash
 yarn
 yarn download-db      # after GitHub Action has run once
-yarn download-points  # optional: PMTiles for fast dots mode
-# or, for local dev before the release exists:
-yarn sync:dev
+yarn download-kommuner
+yarn download-grunnkretser
+yarn export-district-colors   # pre-rendered district tiles (required for dots view)
+# optional, for fast detail zoom:
+yarn download-points
 
 yarn server        # terminal 1
 yarn dev           # terminal 2
 ```
+
+**Adresser** (default view) uses pre-exported district GeoJSON at zoom &lt; 15 — same predefined fylke/kommune/grunnkrets boundaries as Distrikter, with one baked org-type blend colour per region. Individual addresses from zoom 15. No organisation fetch at aggregate zoom. Run `yarn export-district-colors` after syncing the database (also runs as part of `yarn export-map-tiles`).
 
 Åpne [http://localhost:5173](http://localhost:5173).
 
@@ -83,6 +87,22 @@ Oversikt over alle `yarn`-kommandoer i [`package.json`](package.json). CLI-flagg
 | `--geocode-all` | Geokode alle adresser i dev-fylket (krever `--dev` og `--fylke`). |
 | `--geocode-limit=N` | Maks adresser per geokodingsbatch (standard: 5000, dev: 2000). |
 | `--max-rounds=N` | Maks antall geokodingsrunder (standard: 10000). Env: `BUILD_DB_MAX_ROUNDS`. |
+| `--allow-api` | Tillat BRREG/Kartverket HTTP-API når lokale filer mangler. **Uten dette flagget brukes kun lokale filer** (`data/norway.db`, deretter `data/cache/reference`). |
+| `--refresh-downloads` | Last ned BRREG referansefiler på nytt (krever `--allow-api`). |
+
+**`yarn build-db` – datakilder (prioritet):**
+
+1. `data/norway.db` (eller `NATIONAL_DB_PATH`) – kopieres i sin helhet ved `--fresh` / tom database
+2. BRREG bulk i `data/cache/reference` – filtrert import ved dev/fylke-backfill
+3. BRREG/Kartverket API – **kun** med `--allow-api` når lokale filer mangler
+
+Lokalt anbefalt flyt:
+
+```bash
+yarn build-national-db --fresh    # én gang: fyll norway.db + referansecache
+yarn build-db --fresh             # kopierer fra norway.db, ingen API
+yarn server && yarn dev
+```
 
 **`yarn sync` – CLI-flagg:**
 
@@ -99,6 +119,9 @@ Oversikt over alle `yarn`-kommandoer i [`package.json`](package.json). CLI-flagg
 | `--geocode-all` | Geokode alle gjenværende adresser (krever `--dev` eller `--geocode-only`). |
 | `--geocode-limit=N` | Maks adresser per batch (standard: 10000). Env: `SYNC_GEOCODE_LIMIT`. |
 | `--max-rounds=N` | Maks geokodingsrunder. Env: `BUILD_DB_MAX_ROUNDS`. |
+| `--allow-api` | Tillat BRREG/Kartverket HTTP-API (standard for inkrementell sync). |
+| `--local-only` | Tving lokal modus (ingen API) – overstyrrer standard for `yarn sync`. |
+| `--refresh-downloads` | Last ned BRREG referansefiler på nytt (krever `--allow-api`). |
 
 **Fylkeskoder** (tosifret prefiks i kommunenummer — brukes med `--fylke=XX` og i kartfiltre):
 
@@ -145,18 +168,23 @@ Koden er de to første sifrene i kommunenummeret (f.eks. Bergen `4601` → fylke
 | `API_RETRY_BASE_MS` | `1000` | Initial retry-backoff. |
 | `KARTVERKET_CACHE_DIR` | `data/cache/reference/kartverket` | Kartverket CSV-zip; importeres automatisk ved geokoding hvis tabellen mangler. |
 | `REFERENCE_CACHE_DIR` | `data/cache/reference` | Rot for referansedata (BRREG bulk + Kartverket). |
+| `NATIONAL_DB_PATH` | `data/norway.db` | Nasjonal database som `build-db` kopierer fra ved `--fresh`. |
 
-Geokoding (`yarn sync`, `yarn build-db`, server) sjekker **lokal Kartverket-database** (`kartverket_addresses` eller zip i cache) først, og faller tilbake til Kartverket Adresse-API ved miss. **Bygg-kommandoer** (`build-national-db`, `build-region-db`, …) bruker kun lokal data — ingen API-kall for geokoding eller BRREG når referansecache finnes.
+Geokoding (`yarn sync`, `yarn build-db`, server) sjekker **lokal Kartverket-database** (`kartverket_addresses` eller zip i cache) først, og faller tilbake til Kartverket Adresse-API ved miss **kun med `--allow-api`**. **`yarn build-db` bruker som standard kun lokale filer** (`norway.db` → referansecache); BRREG/Kartverket-API aktiveres bare med `--allow-api`. **`yarn sync`** tillater API som standard for inkrementelle oppdateringer, men bulk-import bruker fortsatt lokale filer når de finnes.
 
 ### Eksport og nedlasting
 
 | Kommando | Beskrivelse | Flagg / miljøvariabler |
 |----------|-------------|------------------------|
-| `yarn export-vector-tiles` | Bygg PMTiles med tippecanoe | `DATABASE_PATH`. `POINTS_OUTPUT_DIR` (standard: `public/data`). Krever `tippecanoe` på PATH. |
+| `yarn export-district-colors` | Bygg distrikts-GeoJSON med forhåndsbakt farge per fylke/kommune/grunnkrets | `DATABASE_PATH`. Krever `yarn download-kommuner` og `yarn download-grunnkretser`. Kjøres også fra `yarn export-map-tiles` og `yarn export-static-api`. |
+| `yarn export-map-tiles` | Bygg nasjonale LOD-PMTiles + distrikts-GeoJSON (detail zoom) | `DATABASE_PATH` (standard: `data/organizations.db`). Bruk `yarn export-map-tiles:norway` for `data/norway.db`. Krever `tippecanoe` + `yarn download-kommuner` + `yarn download-grunnkretser`. |
+| `yarn export-map-tiles:norway` | Samme, fra nasjonal DB (`data/norway.db`) | Hele landet. |
+| `yarn export-vector-tiles` | Alias for `export-map-tiles` | |
 | `yarn export-points` | Bygg JSON-kommune-tiles (fallback-cache) | `DATABASE_PATH`. `POINTS_OUTPUT_DIR` (standard: `public/data/points`). |
 | `yarn export-static-api` | Eksporter statisk JSON-API til `public/data/api/` | `STATIC_API_DIR` (standard: `public/data/api`). Leser `DATABASE_PATH`. |
 | `yarn download-db` | Last ned `organizations.db` fra GitHub Release | Ingen flagg (bruker `gh release download`). |
 | `yarn download-kommuner` | Last ned kommunegrenser (GeoJSON) | Ingen flagg (fast URL). |
+| `yarn download-grunnkretser` | Last ned grunnkretsgrenser fra Geonorge/Kartverket (GeoJSON, ~100 MB) | Ingen flagg (fast URL). |
 | `yarn download-points` | Last ned `points.pmtiles` fra GitHub Release | Ingen flagg (bruker `gh release download`). |
 
 **Eksempler:**
@@ -348,14 +376,16 @@ Basekartet er Leaflet (OSM-raster). Prikkene tegnes i et transparent MapLibre GL
 
 **Script:** [`scripts/export-map-tiles.ts`](scripts/export-map-tiles.ts) (`yarn export-map-tiles`, alias: `yarn export-vector-tiles`)
 
-Bygger en **zoom-pyramide** med forhåndsaggregerte celleprikker og enkeltadresser:
+Bygger en **zoom-pyramide** med distriktsfliser (fylke/kommune som i «Distrikter»), grunnkretser og enkeltadresser ved høy zoom:
 
 | Lag | Zoom | Innhold |
 |-----|------|---------|
-| `cells_coarse` | 4–7 | Store celler (~35 km), farge per org.type |
-| `cells_medium` | 7–10 | Mellomstore celler (~9 km) |
-| `cells_fine` | 10–12 | Fine celler (~2 km) |
-| `organizations` | 12–16 | Enkeltadresser (klikkbare) |
+| `districts_fylke_poly` | 4–6 | Fylkepolygoner med én forhåndsbakt blandingfarge per fylke |
+| `districts_kommune_poly` | 7–11 | Kommunepolygoner med én forhåndsbakt blandingfarge per kommune |
+| `grunnkretser_poly` | 12–14 | Kartverket-grunnkretser med én forhåndsbakt blandingfarge per grunnkrets |
+| `organizations` | 15–18 | Enkeltadresser (klikkbare) |
+
+Fargen for distrikter og grunnkretser beregnes ved **tile-export** (`mixOrgTypeColors` i `orgTypeColors.ts`): vektet RGB-blanding av org.type-spektrumet. Klienten leser bare `color` fra vektorflisene — ingen runtime-beregning eller org-henting for disse zoom-båndene.
 
 **Forutsetninger:**
 
@@ -388,26 +418,35 @@ sudo make -C /tmp/tippecanoe install
 tippecanoe --version
 ```
 
-Deretter:
+Deretter (hele Norge):
 
 ```bash
-yarn download-db          # eller yarn build-db / yarn sync:dev
-yarn export-map-tiles
+yarn download-kommuner          # kreves for fylke/kommune-fliser
+yarn download-grunnkretser      # kreves for grunnkrets-fliser (z12–14)
+yarn build-national-db --fresh  # eller yarn download-db / yarn sync:full
+yarn export-map-tiles:norway    # data/norway.db → public/data/points.pmtiles
 
-# Regional database (f.eks. Vestland):
+# Alternativ: app-databasen (samme som CI nightly sync)
+yarn export-map-tiles           # data/organizations.db
+```
+
+Valgfritt – kun ett fylke (raskere test):
+
+```bash
 DATABASE_PATH=data/regions/fylker/46-vestland.db yarn export-map-tiles
 ```
 
 **Pipeline:**
 
 1. Les geokodede organisasjoner fra SQLite (standardfiltre: ikke konkurs/avvikling, `entity_kind=enhet`)
-2. Aggreger til tre cellestørrelser (NDJSON med `orgType`, `count`, `cellId`)
-3. Eksporter enkeltpunkter som NDJSON
-4. Kjør tippecanoe per zoom-bånd → `tile-join` → én `points.mbtiles`
-5. `pmtiles convert` → `public/data/points.pmtiles`
-6. Skriv `public/data/points/manifest.json` med `layers[]` og filter-metadata
+2. Aggreger org.typer per fylke og kommune; bak én blandingfarge (`color`) per distrikt og eksporter polygoner
+3. Aggreger organisasjoner per grunnkrets (point-in-polygon mot Kartverket-grenser; NDJSON med `color`, `count`, `orgTypeBreakdown`)
+4. Eksporter enkeltpunkter som NDJSON
+5. Kjør tippecanoe per zoom-bånd → `tile-join` → én `points.mbtiles`
+6. `pmtiles convert` → `public/data/points.pmtiles`
+7. Skriv `public/data/points/manifest.json` med `layers[]` og filter-metadata
 
-**Statistikk vs. tegning:** Kartet viser forhåndsaggregerte prikker ved lav zoom. Paneltallene (`GET /api/viewport-summary`) teller alle organisasjoner i kartutsnittet (geokodede i bbox + uten koordinat i overlappende kommuner). På statisk GitHub Pages brukes omtrentlige tall fra `municipality-breakdown.json`.
+**Statistikk vs. tegning:** Kartet viser distriktsfliser og grunnkretser ved lav/medium zoom. Paneltallene (`GET /api/viewport-summary`) teller alle organisasjoner i kartutsnittet (geokodede i bbox + uten koordinat i overlappende kommuner). På statisk GitHub Pages brukes omtrentlige tall fra `municipality-breakdown.json`.
 
 **Pipeline (legacy enkeltlag):** Eldre manifest uten `layers[]` vises fortsatt som ett `organizations`-lag.
 
@@ -424,10 +463,12 @@ Miljøvariabler: `DATABASE_PATH`, `POINTS_OUTPUT_DIR` (standard `public/data`).
   "format": "pmtiles",
   "path": "/data/points.pmtiles",
   "layers": [
-    { "name": "cells_coarse", "minZoom": 4, "maxZoom": 7 },
-    { "name": "cells_medium", "minZoom": 7, "maxZoom": 10 },
-    { "name": "cells_fine", "minZoom": 10, "maxZoom": 12 },
-    { "name": "organizations", "minZoom": 12, "maxZoom": 16 }
+    { "name": "districts_fylke_poly", "minZoom": 4, "maxZoom": 6 },
+    { "name": "districts_fylke", "minZoom": 4, "maxZoom": 6 },
+    { "name": "districts_kommune_poly", "minZoom": 7, "maxZoom": 11 },
+    { "name": "districts_kommune", "minZoom": 7, "maxZoom": 11 },
+    { "name": "grunnkretser_poly", "minZoom": 12, "maxZoom": 14 },
+    { "name": "organizations", "minZoom": 15, "maxZoom": 18 }
   ],
   "filters": {
     "excludeKonkurs": true,
@@ -446,27 +487,41 @@ Miljøvariabler: `DATABASE_PATH`, `POINTS_OUTPUT_DIR` (standard `public/data`).
 
 | Fil | Rolle |
 |-----|-------|
+| [`src/lib/map/districtColors.ts`](src/lib/map/districtColors.ts) | Manifest + per-fylke gzip-lasting av distrikts-GeoJSON |
+| [`src/lib/map/districtColorLayer.ts`](src/lib/map/districtColorLayer.ts) | Leaflet GeoJSON-lag for aggregat-zoom |
 | [`src/lib/map/vectorTiles.ts`](src/lib/map/vectorTiles.ts) | PMTiles-protokoll, probe, manifest |
 | [`src/lib/map/maplibreDotsLayer.ts`](src/lib/map/maplibreDotsLayer.ts) | MapLibre-lag, clustering, styling |
 | [`src/lib/map/dotsLayer.ts`](src/lib/map/dotsLayer.ts) | Velger MapLibre eller Leaflet-fallback |
+| [`src/lib/lodConfig.ts`](src/lib/lodConfig.ts) | Felles `DETAIL_MIN_ZOOM` (15) for klient og export |
 | [`src/lib/components/MapView.svelte`](src/lib/components/MapView.svelte) | Orchestrering og filter-logikk |
 | [`vite.config.ts`](vite.config.ts) | `Accept-Ranges` for `.pmtiles` i dev/preview |
 
-Ved oppstart kjører `probeVectorTiles()`: HEAD på `/data/points.pmtiles` + fetch av manifest. Vektormodus brukes bare når:
+Ved oppstart kjører `probeVectorTiles()`: HEAD på `/data/points.pmtiles` + fetch av manifest. Hvis filene finnes lokalt eller på Pages, brukes vektorfliser automatisk — ingen `VITE_HAS_PMTILES`-flagg nødvendig i dev.
 
-- begge filene finnes
+**Aggregat-zoom (under `dotsDetailMinZoom`, standard 15):** prioritet:
+
+1. **Distrikts-GeoJSON** (`public/data/districts/`) — Leaflet-polygoner med samme forhåndsdefinerte fylke/kommune/grunnkrets-geometri som «Distrikter» (foretrukket)
+2. **PMTiles LOD-lag** — fallback hvis distrikts-GeoJSON mangler men `points.pmtiles` har aggregatlag
+3. Ellers: kommune-omriss + tydelig melding om manglende export
+
+Ingen organisasjons-henting per viewport på aggregat-zoom. Tall i panelet kommer fra `viewport-summary`.
+
+**Detalj-zoom (15+):** alle geokodede adresser i kartutsnittet — fra PMTiles når UI-filtrene matcher bake-in-filtrene, ellers uten sampling via API.
+
+Vektormodus krever i tillegg:
 - WebGL/MapLibre fungerer
-- UI-filtrene matcher bake-in-filtrene (`excludeKonkurs` + `excludeUnderAvvikling`, ikke `vatRegisteredOnly`) — se `canUseStaticTiles()`
+- For enkeltadresser (z15+): UI-filtrene matcher bake-in-filtrene (`excludeKonkurs` + `excludeUnderAvvikling`, ikke `vatRegisteredOnly`) — se `canUseStaticTiles()`
 
-Hvis brukeren skrur av konkurs-/avviklingsfilter eller krever kun MVA-registrerte, deaktiveres PMTiles og appen faller tilbake til API/JSON.
+Hvis brukeren skrur av konkurs-/avviklingsfilter eller krever kun MVA-registrerte, vises aggregat-fliser (fylke/kommune/grunnkretser) fortsatt fra distrikts-GeoJSON ved lav zoom; enkeltadresser (z15+) faller tilbake til API/JSON.
 
 **MapLibre i vektormodus:**
 
 - Registrerer `pmtiles://`-protokoll (`pmtiles`-pakken)
 - Source `org-dots`: `type: 'vector'`, URL `pmtiles://{origin}/data/points.pmtiles`
 - Layer `org-points`: `circle` med `source-layer: organizations`
-- Farge via `match` på `orgType`; radius interpoleres med zoom
-- Org-typefilter: client-side `setFilter` — ingen ny nedlasting
+- Aggregat-lag (fylke/kommune/grunnkretser): forhåndsbakt `fill-color` fra `color`-property
+- Enkeltadresser: farge via `match` på `orgType`; radius interpoleres med zoom
+- Org-typefilter på aggregater: client-side `setFilter` på `dominantOrgType` — ingen ny nedlasting
 - **Ingen MapLibre-clustering** i vektormodus; tippecanoe håndterer tetthet via drop/coalesce
 
 **GeoJSON-modus** (API eller JSON-tiles):

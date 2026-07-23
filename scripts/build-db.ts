@@ -20,8 +20,11 @@ function parseArgs(argv: string[]) {
     backfill: argv.includes('--backfill'),
     skipUnderenheterBackfill: argv.includes('--skip-underenheter-backfill'),
     regeocodeMetadata: argv.includes('--regeocode-metadata'),
+    allowApi: argv.includes('--allow-api'),
+    refreshDownloads: argv.includes('--refresh-downloads'),
     dev,
     devFylke: parseStringArg(argv, 'fylke', 'SYNC_DEV_FYLKE'),
+    nationalDbPath: parseStringArg(argv, 'national-db', 'NATIONAL_DB_PATH'),
     geocodeAll,
     skipGeocode: argv.includes('--skip-geocode'),
     geocodeLimit: Number(
@@ -68,7 +71,7 @@ async function main() {
   const db = openDatabase(dbPath)
 
   console.log(`Bygger SQLite-database: ${dbPath}`)
-  console.log('Kilder: BRREG bulk/oppdateringer + Kartverket (lokal bulk hvis tilgjengelig, ellers API)')
+  console.log('Kilder: norway.db → BRREG referansecache → API (kun med --allow-api)')
   const modus = args.dev
     ? `dev-import (${devImportLabel(args.devFylke)}${args.geocodeAll ? ', geokoder alle adresser' : `, geokoder ${DEV_GEOCODE_MAX}`})`
     : args.backfill
@@ -85,6 +88,9 @@ async function main() {
     backfill: args.backfill,
     skipUnderenheterBackfill: args.skipUnderenheterBackfill,
     regeocodeMetadata: args.regeocodeMetadata,
+    allowApi: args.allowApi,
+    refreshDownloads: args.refreshDownloads,
+    nationalDbPath: args.nationalDbPath,
     dev: args.dev,
     devFylke: args.devFylke,
     geocodeAll: args.geocodeAll,
