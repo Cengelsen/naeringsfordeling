@@ -184,6 +184,8 @@ export interface MaplibreDotsController {
   setDotFilters(filters: DotFilters): void
   setClustering(enabled: boolean): void
   setStale(stale: boolean): void
+  /** Hide the GL/canvas overlay without destroying it (keeps warm for instant z15). */
+  setVisible(visible: boolean): void
   bringToFront(): void
   countRenderedFeatures(): number
   remove(): void
@@ -196,6 +198,8 @@ export function createMaplibreDotsLayer(
   const vectorMode = Boolean(options.vectorTilesUrl)
   const lodLayers = options.lodLayers ?? []
   const pointsLayerSpec = options.pointsLayer ?? null
+  // Show address points as soon as Leaflet reaches detail zoom. Keep minzoom at
+  // dotsDetailMinZoom so aggregate zoom still hides them while MapLibre stays warm.
   const pointsMinZoom = options.dotsDetailMinZoom
   const pointsMaxZoom = pointsLayerSpec?.maxZoom ?? 24
   const pointsSourceLayer = pointsLayerSpec?.name ?? VECTOR_TILES_LAYER
@@ -783,6 +787,10 @@ export function createMaplibreDotsLayer(
     setStale(nextStale) {
       stale = nextStale
       if (ready) applyOpacity()
+    },
+    setVisible(visible) {
+      container.style.visibility = visible ? 'visible' : 'hidden'
+      container.style.opacity = visible ? '1' : '0'
     },
     bringToFront() {
       const pane = glLayer.getPane()

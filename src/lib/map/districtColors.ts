@@ -166,6 +166,17 @@ export async function loadDistrictColorLayer(
   return loadGeoJsonPath(spec.path)
 }
 
+/** Warm the per-fylke cache before the user reaches the grunnkretser zoom band. */
+export async function prefetchDistrictColorLayers(
+  spec: DistrictColorLayerSpec,
+  fylker: string[],
+): Promise<void> {
+  if (!spec.byFylke || !spec.fylkePathTemplate || fylker.length === 0) return
+  await Promise.all(
+    fylker.map((fylke) => loadGeoJsonPath(fylkePath(spec.fylkePathTemplate!, fylke))),
+  )
+}
+
 export function activeDistrictLayer(
   manifest: DistrictColorsManifest,
   zoom: number,

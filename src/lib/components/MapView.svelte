@@ -54,6 +54,7 @@
     type DistrictColorController,
   } from '../map/districtColorLayer'
   import {
+    activeDistrictLayer,
     detailLevelLabel,
     probeDistrictColors,
     type DistrictColorsManifest,
@@ -630,6 +631,7 @@
     if (!districtColorController) {
       districtColorController = createDistrictColorLayer(map, districtColorsManifest, {
         getViewportFylker: fylkerInBounds,
+        getViewportBounds: () => map?.getBounds() ?? null,
         onFeatureClick: (feature, latlng) => {
           handleAggregateClick({
             orgType: feature.properties.dominantOrgType,
@@ -652,14 +654,23 @@
       selectedKommune: settings.selectedKommune,
     })
     districtColorController.show()
+
+    // Prefetch grunnkretser for the visible fylker while still on kommune zoom.
+    const layer = activeDistrictLayer(districtColorsManifest, map.getZoom())
+    if (layer?.id === 'kommune') {
+      districtColorController.prefetchUpcoming(fylkerInBounds())
+    }
   }
 
   function ensureDotsController() {
     if (!map) return
 
     const vectorMode = vectorTilesReady
-    const useLodFallback = pmtilesLodReady
-    const lodLayers = useLodFallback ? aggregateLayersFromManifest(vectorTilesManifest) : []
+    // Keep MapLibre mounted during aggregate zoom (empty LOD) so z15 dots appear
+    // instantly. Grunnkretser use Leaflet district GeoJSON — more reliable than
+    // mixing PMTiles fill zoom bands with maplibre-gl-leaflet.
+    const lodLayers = pmtilesLodReady ? aggregateLayersFromManifest(vectorTilesManifest) : []
+    const useLod = lodLayers.length > 0
     const vectorUrl = vectorMode ? vectorTilesSourceUrl() : null
     const orgTypesForColors =
       districtColorsManifest?.orgTypes ??
@@ -669,7 +680,7 @@
     if (
       dotsController &&
       dotsControllerUsesVector === vectorMode &&
-      dotsControllerUsesLod === useLodFallback
+      dotsControllerUsesLod === useLod
     ) {
       applyDotFilters()
       return
@@ -691,7 +702,7 @@
 
     dotsController = controller
     dotsControllerUsesVector = usedWebgl && vectorMode
-    dotsControllerUsesLod = usedWebgl && useLodFallback
+    dotsControllerUsesLod = usedWebgl && useLod
 
     if (!usedWebgl) {
       webglUnavailable = true
@@ -875,6 +886,7 @@
 
   function applyVectorTilesState(options: { includeViewportSummary?: boolean } = {}) {
     ensureDotsController()
+    dotsController?.setVisible(true)
     applyDotFilters()
     dotsController?.setStale(false)
     dotsController?.bringToFront()
@@ -898,7 +910,13 @@
     const atAggregateZoom = zoom < settings.dotsDetailMinZoom
 
     if (atAggregateZoom && districtColorsReady) {
-      removeDotsController()
+      // Keep MapLibre warm (hidden) so z15 address dots appear immediately.
+      if (vectorTilesReady) {
+        ensureDotsController()
+        dotsController?.setVisible(false)
+      } else {
+        removeDotsController()
+      }
       if (geoLayer) {
         geoLayer.remove()
         geoLayer = null
@@ -910,7 +928,7 @@
         message: null,
         skipped: 0,
       })
-      await loadViewportSummary()
+      void loadViewportSummary()
       return
     }
 
@@ -935,10 +953,11 @@
         message:
           'Distriktsfliser mangler. Kjør yarn download-grunnkretser && yarn export-district-colors',
       })
-      await loadViewportSummary()
+      void loadViewportSummary()
       return
     }
 
+    // Detail zoom: individual addresses
     removeDistrictColorLayer()
     renderBaseKommuner()
     if (geoLayer) geoLayer.bringToBack()
@@ -967,7 +986,7 @@
         kommuner: 0,
         message: null,
       })
-      await loadViewportSummary()
+      void loadViewportSummary()
       return
     }
 
@@ -983,7 +1002,7 @@
     if (cached) {
       applyPoints(cached.points, cached.truncated, targetKommuner.length)
       prefetchExpanded(bbox, targetKommuner, zoom)
-      await loadViewportSummary()
+      void loadViewportSummary()
       return
     }
 
@@ -1014,7 +1033,7 @@
 
       applyPoints(result.points, result.truncated, targetKommuner.length)
       prefetchExpanded(bbox, targetKommuner, zoom)
-      await loadViewportSummary()
+      void loadViewportSummary()
     } catch (err) {
       if (token !== loadToken) return
       dotsController?.setStale(false)
@@ -1277,7 +1296,7 @@
     dotsCache.clear()
     if (
       dotsController &&
-      (dotsControllerUsesVector !== vectorTilesReady || dotsControllerUsesLod !== pmtilesLodReady)
+      dotsControllerUsesVector !== vectorTilesReady
     ) {
       removeDotsController()
     }

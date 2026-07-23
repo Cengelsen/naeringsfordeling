@@ -1,9 +1,10 @@
 import L from 'leaflet'
-import type { FeatureCollection } from 'geojson'
+import type { Feature, FeatureCollection, Geometry } from 'geojson'
 import { fylkeFromKommune } from '../utils/geo'
 import {
   activeDistrictLayer,
   loadDistrictColorLayer,
+  prefetchDistrictColorLayers,
   type DistrictColorFeature,
   type DistrictColorsManifest,
 } from './districtColors'
@@ -11,6 +12,7 @@ import {
 export interface DistrictColorLayerOptions {
   onFeatureClick: (feature: DistrictColorFeature, latlng: L.LatLng) => void
   getViewportFylker?: () => string[]
+  getViewportBounds?: () => L.LatLngBounds | null
 }
 
 export interface DistrictColorFilters {
@@ -23,6 +25,7 @@ export interface DistrictColorController {
   setZoom(zoom: number): void
   setFilters(filters: DistrictColorFilters): void
   setViewportFylker(fylker: string[]): void
+  prefetchUpcoming(fylker: string[]): void
   show(): void
   hide(): void
   remove(): void
@@ -32,12 +35,48 @@ function fylkerKey(fylker: string[]): string {
   return [...fylker].sort().join(',')
 }
 
+function geometryBounds(geometry: Geometry): L.LatLngBounds | null {
+  if (geometry.type === 'GeometryCollection') return null
+
+  const bounds = L.latLngBounds([])
+  const addRing = (ring: number[][]) => {
+    for (const [lng, lat] of ring) {
+      if (typeof lat === 'number' && typeof lng === 'number') {
+        bounds.extend([lat, lng])
+      }
+    }
+  }
+
+  if (geometry.type === 'Polygon') {
+    addRing(geometry.coordinates[0] ?? [])
+  } else if (geometry.type === 'MultiPolygon') {
+    for (const polygon of geometry.coordinates) {
+      addRing(polygon[0] ?? [])
+    }
+  } else {
+    return null
+  }
+
+  return bounds.isValid() ? bounds : null
+}
+
+function featureIntersectsViewport(
+  feature: Feature,
+  viewport: L.LatLngBounds | null,
+): boolean {
+  if (!viewport || !feature.geometry) return true
+  const bounds = geometryBounds(feature.geometry)
+  if (!bounds) return true
+  return viewport.intersects(bounds)
+}
+
 export function createDistrictColorLayer(
   map: L.Map,
   manifest: DistrictColorsManifest,
   options: DistrictColorLayerOptions,
 ): DistrictColorController {
   const root = L.layerGroup().addTo(map)
+  const canvasRenderer = L.canvas({ padding: 0.5 })
   let activeLayerId: string | null = null
   let activeFylkerKey = ''
   let currentZoom = map.getZoom()
@@ -90,9 +129,10 @@ export function createDistrictColorLayer(
     return {
       fillColor: color,
       color: '#0f172a',
-      weight: show ? 1 : 0,
-      opacity: show ? 0.85 : 0,
+      weight: show ? 0.6 : 0,
+      opacity: show ? 0.7 : 0,
       fillOpacity: show ? 0.5 : 0,
+      renderer: canvasRenderer,
     }
   }
 
@@ -102,6 +142,18 @@ export function createDistrictColorLayer(
         layer.setStyle((feature) => styleFeature(feature as DistrictColorFeature))
       }
     })
+  }
+
+  function clipToViewport(geojson: FeatureCollection): FeatureCollection {
+    const viewport = options.getViewportBounds?.() ?? null
+    if (!viewport || geojson.features.length < 400) return geojson
+
+    // Slightly expand so pans don't immediately blank edges.
+    const padded = viewport.pad(0.15)
+    return {
+      type: 'FeatureCollection',
+      features: geojson.features.filter((feature) => featureIntersectsViewport(feature, padded)),
+    }
   }
 
   async function renderActiveLayer(forceReload = false) {
@@ -138,14 +190,15 @@ export function createDistrictColorLayer(
     })
     if (generation !== loadGeneration) return
     if (!geojson) {
-      // Reset so the next ensure/setViewport call retries instead of restyling stale layers.
       activeLayerId = null
       activeFylkerKey = ''
       return
     }
 
+    const clipped = spec.byFylke ? clipToViewport(geojson) : geojson
+
     root.clearLayers()
-    L.geoJSON(geojson, {
+    L.geoJSON(clipped, {
       style: (feature) => styleFeature(feature as DistrictColorFeature),
       onEachFeature: (feature, layer) => {
         const typed = feature as DistrictColorFeature
@@ -158,7 +211,7 @@ export function createDistrictColorLayer(
             const target = event.target as L.Path
             if (!featureVisible(typed)) return
             target.setStyle({ weight: 2, opacity: 1, fillOpacity: 0.65 })
-            target.bringToFront()
+            if ('bringToFront' in target) target.bringToFront()
           },
           mouseout: (event: L.LeafletMouseEvent) => {
             const target = event.target as L.Path
@@ -183,6 +236,11 @@ export function createDistrictColorLayer(
     },
     setViewportFylker(_fylker) {
       void renderActiveLayer()
+    },
+    prefetchUpcoming(fylker) {
+      const grunnkrets = manifest.layers.find((layer) => layer.id === 'grunnkretser')
+      if (!grunnkrets || fylker.length === 0) return
+      void prefetchDistrictColorLayers(grunnkrets, fylker)
     },
     show() {
       visible = true

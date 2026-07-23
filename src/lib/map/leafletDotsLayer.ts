@@ -143,6 +143,13 @@ export function createLeafletDotsLayer(
       stale = nextStale
       rebuild()
     },
+    setVisible(visible) {
+      if (!visible) {
+        layer.remove()
+      } else if (!map.hasLayer(layer)) {
+        layer.addTo(map)
+      }
+    },
     bringToFront() {
       layer.eachLayer((child) => {
         if ('bringToFront' in child && typeof child.bringToFront === 'function') {

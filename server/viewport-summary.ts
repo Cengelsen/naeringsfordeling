@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import type Database from 'better-sqlite3'
 import { isDetailZoom } from '../src/lib/lodConfig.js'
 import { effectiveKommunenummerExpr } from '../scripts/lib/db.js'
 import {
@@ -154,17 +155,7 @@ export function queryViewportSummary(
 
   const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(filters.bbox)
 
-  const geocodedRow = db
-    .prepare(
-      `SELECT COUNT(*) AS count
-       FROM organizations o
-       INNER JOIN orgs_rtree r ON r.id = o.rowid
-       WHERE r.maxLng >= ? AND r.minLng <= ?
-         AND r.maxLat >= ? AND r.minLat <= ?
-         AND ${geocodedConditions.join(' AND ')}`,
-    )
-    .get(minLng, maxLng, minLat, maxLat, ...geocodedParams) as { count: number }
-
+  // One rtree pass: geocoded count + org-type breakdown (accurate for bbox).
   const typeRows = db
     .prepare(
       `SELECT o.org_type AS org_type, COUNT(*) AS count
@@ -181,32 +172,37 @@ export function queryViewportSummary(
   }>
 
   const byOrgType: Record<string, number> = {}
+  let geocodedInBbox = 0
   for (const row of typeRows) {
     byOrgType[row.org_type] = row.count
+    geocodedInBbox += row.count
   }
 
-  let totalInViewport = geocodedRow.count
-
+  // Ungeocoded orgs in kommuner that intersect the viewport (accurate, index-friendly).
+  let ungeocodedInViewport = 0
   if (kommuner.length > 0) {
-    const { conditions: allConditions, params: allParams } = buildFilterQuery(filters, false, 'o')
-    allConditions.push(`${kommuneExpr} IN (${kommuner.map(() => '?').join(',')})`)
-    allParams.push(...kommuner)
+    const { conditions: ungeocodedConditions, params: ungeocodedParams } = buildFilterQuery(
+      filters,
+      false,
+      'o',
+    )
+    ungeocodedConditions.push(`${kommuneExpr} IS NOT NULL`)
+    ungeocodedConditions.push(`${kommuneExpr} IN (${kommuner.map(() => '?').join(',')})`)
+    ungeocodedConditions.push(`o.lat IS NULL`)
+    ungeocodedParams.push(...kommuner)
 
-    const totalRow = db
+    const ungeocodedRow = db
       .prepare(
         `SELECT COUNT(*) AS count
          FROM organizations o
-         WHERE ${allConditions.join(' AND ')}`,
+         WHERE ${ungeocodedConditions.join(' AND ')}`,
       )
-      .get(...allParams) as { count: number }
+      .get(...ungeocodedParams) as { count: number }
 
-    totalInViewport = totalRow.count
-  } else {
-    totalInViewport = geocodedRow.count
+    ungeocodedInViewport = ungeocodedRow.count
   }
 
-  const geocodedInBbox = geocodedRow.count
-  const ungeocodedInViewport = Math.max(0, totalInViewport - geocodedInBbox)
+  const totalInViewport = geocodedInBbox + ungeocodedInViewport
 
   return {
     totalInViewport,
