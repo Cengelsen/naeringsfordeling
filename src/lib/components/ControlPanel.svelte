@@ -28,7 +28,7 @@
     kommuner: Kommune[]
     loading: LoadingState
     dotsState: DotsLoadState
-    totalCount: number
+    totalCount: number | null
     onLocateOrganization: (orgnr: string) => void
   }
 
@@ -247,13 +247,26 @@
   </section>
 
   <section class="section stats">
-    {#if isDotsView && dotsState.viewportSummary}
+    {#if isDotsView && dotsState.statsLoading}
+      <div class="stat">
+        <span class="stat-value">…</span>
+        <span class="stat-label">Beregner adresser…</span>
+      </div>
+    {:else if isDotsView && dotsState.viewportSummary}
       <div class="stat">
         <span class="stat-value">
-          {dotsState.viewportSummary.geocodedInBbox.toLocaleString('nb-NO')}
+          {dotsState.viewportSummary.addressesInBbox.toLocaleString('nb-NO')}
         </span>
-        <span class="stat-label">I kartutsnittet</span>
+        <span class="stat-label">Adresser i utsnittet</span>
       </div>
+      {#if dotsState.viewportSummary.geocodedInBbox !== dotsState.viewportSummary.addressesInBbox}
+        <div class="stat">
+          <span class="stat-value">
+            {dotsState.viewportSummary.geocodedInBbox.toLocaleString('nb-NO')}
+          </span>
+          <span class="stat-label">Organisasjoner</span>
+        </div>
+      {/if}
       {#if dotsState.viewportSummary.ungeocodedInViewport > 0}
         <div class="stat">
           <span class="stat-value">
@@ -262,7 +275,7 @@
           <span class="stat-label">Uten kartkoordinat</span>
         </div>
       {/if}
-      {#if dotsState.renderedFeatureCount != null && dotsState.renderedFeatureCount > 0}
+      {#if dotsState.viewportSummary.renderMode === 'individual' && dotsState.renderedFeatureCount != null && dotsState.renderedFeatureCount > 0}
         <div class="stat">
           <span class="stat-value">
             {dotsState.renderedFeatureCount.toLocaleString('nb-NO')}
@@ -270,10 +283,15 @@
           <span class="stat-label">Prikker vist</span>
         </div>
       {/if}
+    {:else if !isDotsView}
+      <div class="stat">
+        <span class="stat-value">{(totalCount ?? 0).toLocaleString('nb-NO')}</span>
+        <span class="stat-label">Organisasjoner</span>
+      </div>
     {:else}
       <div class="stat">
-        <span class="stat-value">{totalCount.toLocaleString('nb-NO')}</span>
-        <span class="stat-label">{isDotsView ? 'Prikker' : 'Organisasjoner'}</span>
+        <span class="stat-value">—</span>
+        <span class="stat-label">Adresser i utsnittet</span>
       </div>
     {/if}
     <div class="stat">
@@ -370,26 +388,26 @@
           {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Oppdaterer kart…'}
           {dotsState.message ?? ''}
         </p>
+      {:else if dotsState.statsLoading}
+        <p class="hint loading-hint">Beregner adresser i utsnittet…</p>
       {:else if dotsState.viewportSummary}
         <p class="hint">
-          {dotsState.viewportSummary.geocodedInBbox.toLocaleString('nb-NO')} geokodede i kartutsnittet
+          {dotsState.viewportSummary.addressesInBbox.toLocaleString('nb-NO')} adresser i kartutsnittet
+          {#if dotsState.viewportSummary.geocodedInBbox !== dotsState.viewportSummary.addressesInBbox}
+            · {dotsState.viewportSummary.geocodedInBbox.toLocaleString('nb-NO')} organisasjoner
+          {/if}
           {#if dotsState.viewportSummary.ungeocodedInViewport > 0}
             · {dotsState.viewportSummary.ungeocodedInViewport.toLocaleString('nb-NO')} uten kartkoordinat
           {/if}
-          {#if dotsState.renderedFeatureCount != null && dotsState.renderedFeatureCount > 0}
+          {#if dotsState.viewportSummary.renderMode === 'individual' && dotsState.renderedFeatureCount != null && dotsState.renderedFeatureCount > 0}
             · {dotsState.renderedFeatureCount.toLocaleString('nb-NO')} prikker vist
           {/if}
           {#if dotsState.statsApproximate}
             · omtrentlige tall (statisk modus)
           {/if}
         </p>
-      {:else if dotsState.organizations > 0}
-        <p class="hint">
-          {dotsState.organizations.toLocaleString('nb-NO')} prikker i kartet
-          {#if dotsState.skipped > 0}
-            · {dotsState.skipped.toLocaleString('nb-NO')} uten adressetreff
-          {/if}
-        </p>
+      {:else if dotsState.message}
+        <p class="hint">{dotsState.message}</p>
       {/if}
     </section>
   {:else}

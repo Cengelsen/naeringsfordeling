@@ -6,9 +6,21 @@ export function locationKey(lat: number, lng: number): string {
   return `${lat.toFixed(LOCATION_PRECISION)}:${lng.toFixed(LOCATION_PRECISION)}`
 }
 
+/** Prefer Kartverket adresse_id; fall back to rounded lat/lng. */
+export function addressGroupKey(
+  lat: number,
+  lng: number,
+  adresseId?: string | null,
+): string {
+  const id = adresseId?.trim()
+  if (id) return `id:${id}`
+  return `ll:${locationKey(lat, lng)}`
+}
+
 export interface LocationGroup {
   lat: number
   lng: number
+  adresseId?: string | null
   orgs: OrganizationPoint[]
   orgCount: number
   /** Single org type, or `MIXED` when several types share the address. */
@@ -19,12 +31,13 @@ export function groupPointsByLocation(points: OrganizationPoint[]): LocationGrou
   const groups = new Map<string, LocationGroup>()
 
   for (const point of points) {
-    const key = locationKey(point.lat, point.lng)
+    const key = addressGroupKey(point.lat, point.lng, point.adresseId)
     let group = groups.get(key)
     if (!group) {
       group = {
         lat: point.lat,
         lng: point.lng,
+        adresseId: point.adresseId ?? null,
         orgs: [],
         orgCount: 0,
         orgType: point.orgType,
@@ -66,4 +79,9 @@ export function orgTypeSegments(group: LocationGroup): OrgTypeSegment[] {
       count,
       fraction: count / group.orgCount,
     }))
+}
+
+/** True when the API (or bake) already emitted one feature per address. */
+export function isPreGroupedAddressPoint(point: OrganizationPoint): boolean {
+  return point.orgCount != null && point.orgCount >= 1
 }

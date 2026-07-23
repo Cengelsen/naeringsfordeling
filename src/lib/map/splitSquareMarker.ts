@@ -25,6 +25,33 @@ export function colorMixKey(segments: ColoredSegment[]): string {
   return `mix-${segments.map((segment) => `${segment.orgType}:${segment.count}`).join('|')}`
 }
 
+/** Parse a `mix-AS:3|ENK:2` key back into colored segments for icon generation. */
+export function segmentsFromColorMixKey(key: string, colorTypes: string[]): ColoredSegment[] {
+  if (!key.startsWith('mix-')) return []
+  const parts = key
+    .slice(4)
+    .split('|')
+    .map((part) => {
+      const colon = part.lastIndexOf(':')
+      if (colon <= 0) return null
+      const orgType = part.slice(0, colon)
+      const count = Number(part.slice(colon + 1))
+      if (!orgType || !Number.isFinite(count) || count <= 0) return null
+      return { orgType, count }
+    })
+    .filter((entry): entry is { orgType: string; count: number } => entry != null)
+
+  const total = parts.reduce((sum, part) => sum + part.count, 0)
+  if (total <= 0) return []
+
+  return parts.map((part) => ({
+    orgType: part.orgType,
+    count: part.count,
+    fraction: part.count / total,
+    color: colorForOrgType(part.orgType, colorTypes),
+  }))
+}
+
 function allocateMatrixCells(segments: ColoredSegment[], cellCount: number): string[] {
   const total = segments.reduce((sum, segment) => sum + segment.count, 0)
   if (total === 0 || cellCount === 0) return []

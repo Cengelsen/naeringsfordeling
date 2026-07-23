@@ -81,7 +81,13 @@ export function filterPointsByMapFilters(
   >,
 ): OrganizationPoint[] {
   return points.filter((point) => {
-    if (filters.orgTypes.length > 0 && !filters.orgTypes.includes(point.orgType)) return false
+    if (filters.orgTypes.length > 0) {
+      const matchesType =
+        filters.orgTypes.includes(point.orgType) ||
+        (point.typeList != null &&
+          filters.orgTypes.some((orgType) => point.typeList!.includes(`,${orgType},`)))
+      if (!matchesType) return false
+    }
     if (!sectionMatchesFilter(point.naeringskode, filters.naeringskodeSections)) return false
     if (
       !bandMatchesFilter(point.employeeBand ?? 'unknown', filters.employeeBands)

@@ -207,7 +207,9 @@ async function main() {
       spec.maxZoom,
       (stream) => {
         const count = exportPointsNdjson(db, stream)
-        console.log(`  ${spec.layer}: ${count.toLocaleString('nb-NO')} individual addresses`)
+        console.log(
+          `  ${spec.layer}: ${count.toLocaleString('nb-NO')} address features (${total.toLocaleString('nb-NO')} orgs)`,
+        )
       },
       ['--no-tile-size-limit', '--drop-rate=1', `--base-zoom=${spec.minZoom}`],
     )

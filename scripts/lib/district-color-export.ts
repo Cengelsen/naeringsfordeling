@@ -6,7 +6,7 @@ import type Database from 'better-sqlite3'
 import { buildDistrictFeatures, loadOrgCountsByDistrict } from './lod-districts-export.js'
 import { bakeAggregateProps } from './lod-color.js'
 import { buildGrunnkretsColorGeoJson } from './grunnkretser-export.js'
-import { LOD_ZOOM_RANGES } from './lod-grid.js'
+import { LEAFLET_ZOOM_RANGES } from './lod-grid.js'
 
 function buildDistrictColorGeoJson(
   db: Database.Database,
@@ -117,15 +117,15 @@ export function exportDistrictColorAssets(
       {
         id: 'fylke',
         path: '/data/districts/fylke.geojson',
-        minZoom: LOD_ZOOM_RANGES.fylke.minZoom,
-        maxZoom: LOD_ZOOM_RANGES.fylke.maxZoom,
+        minZoom: LEAFLET_ZOOM_RANGES.fylke.minZoom,
+        maxZoom: LEAFLET_ZOOM_RANGES.fylke.maxZoom,
         features: fylke.features.length,
       },
       {
         id: 'kommune',
         path: '/data/districts/kommune.geojson',
-        minZoom: LOD_ZOOM_RANGES.kommune.minZoom,
-        maxZoom: LOD_ZOOM_RANGES.kommune.maxZoom,
+        minZoom: LEAFLET_ZOOM_RANGES.kommune.minZoom,
+        maxZoom: LEAFLET_ZOOM_RANGES.kommune.maxZoom,
         features: kommune.features.length,
       },
       {
@@ -133,8 +133,8 @@ export function exportDistrictColorAssets(
         path: '/data/districts/grunnkretser.geojson',
         byFylke: true,
         fylkePathTemplate: '/data/districts/grunnkretser/{fylke}.geojson',
-        minZoom: LOD_ZOOM_RANGES.grunnkretser.minZoom,
-        maxZoom: LOD_ZOOM_RANGES.grunnkretser.maxZoom,
+        minZoom: LEAFLET_ZOOM_RANGES.grunnkretser.minZoom,
+        maxZoom: LEAFLET_ZOOM_RANGES.grunnkretser.maxZoom,
         features: grunnkretser.features.length,
       },
     ],

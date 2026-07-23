@@ -459,6 +459,7 @@ async function fetchViewportSummaryStatic(
   }
 
   let geocodedInBbox = 0
+  const addressKeys = new Set<string>()
   const points = await loadGeocodedPoints()
   for (const row of points) {
     if (!geocodedPointMatchesFilters(row, filters)) continue
@@ -466,6 +467,8 @@ async function fetchViewportSummaryStatic(
     geocodedInBbox += 1
     const orgType = row[3]
     byOrgType[orgType] = (byOrgType[orgType] ?? 0) + 1
+    // Compact points have no adresse_id — group by rounded lat/lng like the map.
+    addressKeys.add(`${Number(row[2]).toFixed(5)}:${Number(row[1]).toFixed(5)}`)
   }
 
   const renderMode: ViewportSummary['renderMode'] =
@@ -474,6 +477,7 @@ async function fetchViewportSummaryStatic(
   return {
     totalInViewport,
     geocodedInBbox,
+    addressesInBbox: addressKeys.size,
     ungeocodedInViewport: Math.max(0, totalInViewport - geocodedInBbox),
     byOrgType,
     renderMode,
@@ -511,7 +515,7 @@ async function fetchOrganizationPointsFromApi(
   }
 
   const params = dataFiltersToParams(filters)
-  params.set('format', 'compact')
+  // Prefer full JSON so pre-grouped address features keep orgCount / orgnrs / typeList.
 
   if (options.bbox) {
     params.set('bbox', options.bbox.join(','))
@@ -550,17 +554,115 @@ export async function fetchOrganizationPoints(
   return fetchOrganizationPointsFromApi(filters, options)
 }
 
+const ORG_DETAIL_CACHE_MAX = 500
+const orgDetailCache = new Map<string, Organization>()
+const orgDetailInflight = new Map<string, Promise<Organization>>()
+const BATCH_ORG_MAX = 100
+
+function touchOrgDetailCache(org: Organization): Organization {
+  const key = normalizeOrgnr(org.orgnr)
+  if (orgDetailCache.has(key)) orgDetailCache.delete(key)
+  orgDetailCache.set(key, org)
+  while (orgDetailCache.size > ORG_DETAIL_CACHE_MAX) {
+    const oldest = orgDetailCache.keys().next().value
+    if (oldest == null) break
+    orgDetailCache.delete(oldest)
+  }
+  return org
+}
+
+/** Seed cache from tile/API point props so popups can paint before a full fetch. */
+export function seedOrganizationDetail(org: Organization): void {
+  touchOrgDetailCache(org)
+}
+
+function getCachedOrganization(orgnr: string): Organization | null {
+  const key = normalizeOrgnr(orgnr)
+  const cached = orgDetailCache.get(key)
+  if (!cached) return null
+  // Refresh LRU order.
+  orgDetailCache.delete(key)
+  orgDetailCache.set(key, cached)
+  return cached
+}
+
 export async function fetchOrganizationDetail(orgnr: string): Promise<Organization> {
-  if (STATIC_API) {
-    const organization = await lookupOrganizationLocal(orgnr)
-    if (!organization) {
-      throw new ApiError('Organisasjon ikke funnet')
+  const cached = getCachedOrganization(orgnr)
+  if (cached) return cached
+
+  const key = normalizeOrgnr(orgnr)
+  const inflight = orgDetailInflight.get(key)
+  if (inflight) return inflight
+
+  const promise = (async () => {
+    if (STATIC_API) {
+      const organization = await lookupOrganizationLocal(orgnr)
+      if (!organization) {
+        throw new ApiError('Organisasjon ikke funnet')
+      }
+      return touchOrgDetailCache(organization)
     }
-    return organization
+
+    const data = await apiFetch<{ organization: Organization }>(`/api/organizations/${orgnr}`)
+    return touchOrgDetailCache(data.organization)
+  })()
+
+  orgDetailInflight.set(key, promise)
+  try {
+    return await promise
+  } finally {
+    orgDetailInflight.delete(key)
+  }
+}
+
+/**
+ * Resolve many organisations in as few requests as possible (address popups).
+ * Uses LRU cache, then one POST /batch per chunk of up to 100 orgnrs.
+ */
+export async function fetchOrganizationsBatch(orgnrs: string[]): Promise<Organization[]> {
+  const unique = [...new Set(orgnrs.map(normalizeOrgnr).filter(Boolean))]
+  if (unique.length === 0) return []
+
+  const resolved = new Map<string, Organization>()
+  const missing: string[] = []
+
+  for (const orgnr of unique) {
+    const cached = getCachedOrganization(orgnr)
+    if (cached) {
+      resolved.set(orgnr, cached)
+      continue
+    }
+    if (STATIC_API) {
+      const local = await lookupOrganizationLocal(orgnr)
+      if (local) {
+        resolved.set(orgnr, touchOrgDetailCache(local))
+        continue
+      }
+    }
+    missing.push(orgnr)
   }
 
-  const data = await apiFetch<{ organization: Organization }>(`/api/organizations/${orgnr}`)
-  return data.organization
+  for (let i = 0; i < missing.length; i += BATCH_ORG_MAX) {
+    const chunk = missing.slice(i, i + BATCH_ORG_MAX)
+    if (STATIC_API) {
+      for (const orgnr of chunk) {
+        const local = await lookupOrganizationLocal(orgnr)
+        if (local) resolved.set(normalizeOrgnr(orgnr), touchOrgDetailCache(local))
+      }
+      continue
+    }
+
+    const data = await apiFetch<{ organizations: Organization[] }>('/api/organizations/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orgnrs: chunk }),
+    })
+    for (const org of data.organizations) {
+      resolved.set(normalizeOrgnr(org.orgnr), touchOrgDetailCache(org))
+    }
+  }
+
+  return unique.map((orgnr) => resolved.get(orgnr)).filter((org): org is Organization => org != null)
 }
 
 export async function fetchKonsernstruktur(orgnr: string): Promise<Konsernstruktur | null> {

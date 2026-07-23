@@ -1,26 +1,26 @@
 import type { FeatureCollection, Point } from 'geojson'
 import L from 'leaflet'
-import maplibregl from 'maplibre-gl'
+import maplibregl, { setMaxParallelImageRequests } from 'maplibre-gl'
 import type { GeoJSONSource } from 'maplibre-gl'
 import '@maplibre/maplibre-gl-leaflet'
 import type { OrganizationPoint } from '../types'
 import type { EmployeeBand } from '../utils/employeeBands'
 import { bakedColorExpression, orgTypeColorExpression } from '../utils/orgTypeColors'
-import { ensurePmtilesProtocol, isPolygonLodLayer, VECTOR_TILES_LAYER, type VectorTilesLayerSpec } from './vectorTiles'
-import { groupPointsByLocation, locationKey, orgnrsFromGroup } from './addressGroups'
-import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
 import {
-  colorMixKey,
-  coloredSegments,
-  createSplitSquareImageData,
-  SPLIT_SQUARE_IMAGE_SIZE,
-} from './splitSquareMarker'
+  ensurePmtilesProtocol,
+  isPolygonLodLayer,
+  VECTOR_TILES_LAYER,
+  type VectorTilesLayerSpec,
+} from './vectorTiles'
+import {
+  groupPointsByLocation,
+  isPreGroupedAddressPoint,
+  orgnrsFromGroup,
+} from './addressGroups'
+import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
 
 const SOURCE_ID = 'org-dots'
-const CLUSTER_LAYER_ID = 'org-clusters'
-const CLUSTER_COUNT_LAYER_ID = 'org-cluster-count'
 const POINT_LAYER_ID = 'org-points'
-const MULTI_POINT_LAYER_ID = 'org-points-multi'
 const CLICK_TOLERANCE_PX = 10
 
 function aggregateLayerId(sourceLayer: string): string {
@@ -35,58 +35,60 @@ function isDistrictMarkerLayer(sourceLayer: string): boolean {
   return sourceLayer.startsWith('districts_') && !sourceLayer.endsWith('_poly')
 }
 
-function supercellRadiusExpression(): maplibregl.ExpressionSpecification {
-  return [
-    'interpolate',
-    ['linear'],
-    ['zoom'],
-    4,
-    ['step', ['get', 'count'], 4, 50, 5, 200, 7, 1000, 10],
-    10,
-    ['step', ['get', 'count'], 5, 50, 6, 200, 8, 1000, 11],
-    12,
-    4,
-  ]
-}
-
 function pointRadiusExpression(detailMinZoom: number): maplibregl.ExpressionSpecification {
   const mlDetailZoom = Math.max(0, detailMinZoom - 1)
   return [
     'interpolate',
     ['linear'],
     ['zoom'],
-    0,
-    3,
     mlDetailZoom,
-    4,
+    ['case', ['>', ['coalesce', ['get', 'orgCount'], 1], 1], 5, 4],
     mlDetailZoom + 3,
-    6,
+    ['case', ['>', ['coalesce', ['get', 'orgCount'], 1], 1], 7, 6],
     mlDetailZoom + 6,
-    8,
+    ['case', ['>', ['coalesce', ['get', 'orgCount'], 1], 1], 9, 8],
   ]
 }
 
-function multiMarkerIconSizeExpression(detailMinZoom: number): maplibregl.ExpressionSpecification {
-  const mlDetailZoom = Math.max(0, detailMinZoom - 1)
-  const toIconSize = (radius: number) => (radius * 2) / SPLIT_SQUARE_IMAGE_SIZE
+function addressPointToFeature(
+  point: OrganizationPoint,
+): FeatureCollection<Point>['features'][number] {
+  const orgCount = point.orgCount ?? 1
+  const orgnrs = point.orgnrs ?? point.orgnr
+  const typeList =
+    point.typeList ?? (point.orgType === 'MIXED' ? ',,' : `,${point.orgType},`)
+  const naeringskode = point.naeringskode ?? ''
+  const properties: Record<string, string | number> = {
+    orgnr: point.orgnr,
+    orgType: point.orgType,
+    orgCount,
+    orgnrs,
+    typeList,
+    entityKind: point.entityKind ?? 'enhet',
+    employeeBand: point.employeeBand ?? 'unknown',
+    naeringskode: naeringskode.length >= 2 ? naeringskode.slice(0, 2) : naeringskode,
+  }
+  if (point.adresseId) properties.adresseId = point.adresseId
 
-  return [
-    'interpolate',
-    ['linear'],
-    ['zoom'],
-    mlDetailZoom,
-    toIconSize(4),
-    mlDetailZoom + 3,
-    toIconSize(6),
-    mlDetailZoom + 6,
-    toIconSize(8),
-  ]
+  return {
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [point.lng, point.lat] },
+    properties,
+  }
 }
 
-function pointsToGeoJson(points: OrganizationPoint[], colorTypes: string[]): FeatureCollection<Point> {
-  const groups = groupPointsByLocation(points)
+function pointsToGeoJson(
+  points: OrganizationPoint[],
+  _colorTypes: string[],
+): FeatureCollection<Point> {
+  if (points.length > 0 && isPreGroupedAddressPoint(points[0]!)) {
+    return {
+      type: 'FeatureCollection',
+      features: points.map((point) => addressPointToFeature(point)),
+    }
+  }
 
-  const features = groups.map((group) => {
+  const features = groupPointsByLocation(points).map((group) => {
     const orgnrs = orgnrsFromGroup(group)
     const primary = group.orgs[0]
     const naeringskode = primary?.naeringskode ?? ''
@@ -95,46 +97,21 @@ function pointsToGeoJson(points: OrganizationPoint[], colorTypes: string[]): Fea
       orgType: group.orgType,
       orgCount: group.orgCount,
       orgnrs: orgnrs.join(','),
+      typeList: `,${[...new Set(group.orgs.map((org) => org.orgType))].sort().join(',')},`,
       entityKind: primary?.entityKind ?? 'enhet',
       employeeBand: primary?.employeeBand ?? 'unknown',
       naeringskode: naeringskode.length >= 2 ? naeringskode.slice(0, 2) : naeringskode,
     }
-
-    if (group.orgCount > 1) {
-      properties.colorMixKey = colorMixKey(coloredSegments(group, colorTypes))
-    }
+    if (group.adresseId) properties.adresseId = group.adresseId
 
     return {
       type: 'Feature' as const,
-      geometry: {
-        type: 'Point' as const,
-        coordinates: [group.lng, group.lat],
-      },
+      geometry: { type: 'Point' as const, coordinates: [group.lng, group.lat] },
       properties,
     }
   })
 
-  return {
-    type: 'FeatureCollection',
-    features,
-  }
-}
-
-function syncMultiSquareImages(
-  mlMap: maplibregl.Map,
-  points: OrganizationPoint[],
-  colorTypes: string[],
-) {
-  for (const group of groupPointsByLocation(points)) {
-    if (group.orgCount <= 1) continue
-
-    const key = colorMixKey(coloredSegments(group, colorTypes))
-    if (mlMap.hasImage(key)) continue
-
-    mlMap.addImage(key, createSplitSquareImageData(coloredSegments(group, colorTypes)), {
-      pixelRatio: 1,
-    })
-  }
+  return { type: 'FeatureCollection', features }
 }
 
 const TRANSPARENT_STYLE: maplibregl.StyleSpecification = {
@@ -144,9 +121,7 @@ const TRANSPARENT_STYLE: maplibregl.StyleSpecification = {
     {
       id: 'background',
       type: 'background',
-      paint: {
-        'background-color': 'rgba(0,0,0,0)',
-      },
+      paint: { 'background-color': 'rgba(0,0,0,0)' },
     },
   ],
 }
@@ -160,12 +135,17 @@ export interface DotFilters {
 
 export interface MaplibreDotsLayerOptions {
   dotsDetailMinZoom: number
-  dotsClustering: boolean
+  /** @deprecated Clustering removed — ignored. */
+  dotsClustering?: boolean
   vectorTilesUrl?: string | null
   lodLayers?: VectorTilesLayerSpec[]
   pointsLayer?: VectorTilesLayerSpec | null
   orgTypesForColors?: string[]
-  onMarkerClick: (orgnrs: string[], latlng: L.LatLng) => void
+  onMarkerClick: (
+    orgnrs: string[],
+    latlng: L.LatLng,
+    hint?: Partial<OrganizationPoint> | null,
+  ) => void
   onAggregateClick?: (info: {
     orgType: string
     count: number
@@ -184,7 +164,10 @@ export interface MaplibreDotsController {
   setDotFilters(filters: DotFilters): void
   setClustering(enabled: boolean): void
   setStale(stale: boolean): void
-  /** Hide the GL/canvas overlay without destroying it (keeps warm for instant z15). */
+  /**
+   * No-op in vector/unified mode (layers self-gate via minzoom/maxzoom).
+   * GeoJSON fallback still uses it to clear markers below detail zoom.
+   */
   setVisible(visible: boolean): void
   bringToFront(): void
   countRenderedFeatures(): number
@@ -198,15 +181,13 @@ export function createMaplibreDotsLayer(
   const vectorMode = Boolean(options.vectorTilesUrl)
   const lodLayers = options.lodLayers ?? []
   const pointsLayerSpec = options.pointsLayer ?? null
-  // maplibre-gl-leaflet drives the GL map at LeafletZoom - 1. So Leaflet z15 →
-  // MapLibre z14; layer minzoom must use that offset or dots never appear at z15.
-  const pointsMinZoom = Math.max(0, options.dotsDetailMinZoom - 1)
-  const pointsMaxZoom = 24
+  // Leaflet DETAIL → GL DETAIL−1. Address markers must not paint below this.
+  const pointsPaintMinZoom = Math.max(0, options.dotsDetailMinZoom - 1)
   const pointsSourceLayer = pointsLayerSpec?.name ?? VECTOR_TILES_LAYER
+
   let ready = false
   let styleReady = false
   let stale = false
-  let clusteringEnabled = options.dotsClustering
   let currentTypes = options.orgTypesForColors ?? []
   let dotFilters: DotFilters = {
     orgTypes: [],
@@ -216,27 +197,20 @@ export function createMaplibreDotsLayer(
   }
   let currentPoints: OrganizationPoint[] = []
   let pendingPoints: OrganizationPoint[] | null = null
+
   function lodClickLayerIds(): string[] {
     return lodLayers.flatMap((layer) => {
-      if (isPolygonLodLayer(layer.name)) {
-        return [districtFillLayerId(layer.name)]
-      }
-      if (isDistrictMarkerLayer(layer.name)) {
-        return []
-      }
+      if (isPolygonLodLayer(layer.name)) return [districtFillLayerId(layer.name)]
+      if (isDistrictMarkerLayer(layer.name)) return []
       return [aggregateLayerId(layer.name)]
     })
   }
 
-  let clickLayers = vectorMode ? [...lodClickLayerIds(), POINT_LAYER_ID] : clusteringEnabled
-      ? [MULTI_POINT_LAYER_ID, POINT_LAYER_ID, CLUSTER_LAYER_ID]
-      : [MULTI_POINT_LAYER_ID, POINT_LAYER_ID]
+  let clickLayers = vectorMode
+    ? [...lodClickLayerIds(), POINT_LAYER_ID]
+    : [POINT_LAYER_ID]
 
-  const clusterMaxZoom = Math.max(0, options.dotsDetailMinZoom - 1)
-
-  if (vectorMode) {
-    ensurePmtilesProtocol()
-  }
+  if (vectorMode) ensurePmtilesProtocol()
 
   const glLayer = L.maplibreGL({
     style: TRANSPARENT_STYLE,
@@ -256,6 +230,8 @@ export function createMaplibreDotsLayer(
   container.style.zIndex = '650'
   container.style.pointerEvents = 'none'
   container.style.background = 'transparent'
+  container.style.opacity = '1'
+  container.style.visibility = 'visible'
 
   const mlMap = glLayer.getMaplibreMap()
   if (!mlMap) {
@@ -269,6 +245,8 @@ export function createMaplibreDotsLayer(
   mlMap.doubleClickZoom.disable()
   mlMap.touchZoomRotate.disable()
   mlMap.keyboard.disable()
+  // Default 16; raise so dense urban viewport tiles arrive in parallel.
+  setMaxParallelImageRequests(32)
 
   function propertyInFilter(
     property: string,
@@ -278,65 +256,33 @@ export function createMaplibreDotsLayer(
     return ['in', ['get', property], ['literal', values]]
   }
 
-  function pointLayerFilter(singleOnly: boolean): maplibregl.FilterSpecification {
+  function addressFilter(): maplibregl.FilterSpecification {
     const parts: maplibregl.FilterSpecification[] = []
     const typeFilter = propertyInFilter('orgType', dotFilters.orgTypes)
-
-    if (typeFilter) parts.push(typeFilter)
-
-    const countFilter: maplibregl.FilterSpecification = singleOnly
-      ? ['==', ['get', 'orgCount'], 1]
-      : ['>', ['get', 'orgCount'], 1]
-
-    if (vectorMode || !clusteringEnabled) {
-      if (vectorMode) {
-        return parts.length > 0 ? (['all', ...parts] as maplibregl.FilterSpecification) : true
-      }
-      return parts.length > 0
-        ? (['all', countFilter, ...parts] as maplibregl.FilterSpecification)
-        : countFilter
+    if (typeFilter) {
+      const typeListMatches = dotFilters.orgTypes.map(
+        (orgType) => ['in', `,${orgType},`, ['get', 'typeList']] as maplibregl.FilterSpecification,
+      )
+      parts.push(['any', typeFilter, ...typeListMatches] as maplibregl.FilterSpecification)
     }
-
-    const unclustered: maplibregl.FilterSpecification = ['!', ['has', 'point_count']]
-    return parts.length > 0
-      ? (['all', unclustered, countFilter, ...parts] as maplibregl.FilterSpecification)
-      : (['all', unclustered, countFilter] as maplibregl.FilterSpecification)
+    return parts.length > 0 ? (['all', ...parts] as maplibregl.FilterSpecification) : true
   }
 
   function aggregateLayerFilter(): maplibregl.FilterSpecification {
-    const typeFilter = propertyInFilter('dominantOrgType', dotFilters.orgTypes)
-    return typeFilter ?? true
+    return propertyInFilter('dominantOrgType', dotFilters.orgTypes) ?? true
   }
 
   function applyTypeVisibility() {
     for (const spec of lodLayers) {
-      const layerId = aggregateLayerId(spec.name)
+      const layerId = isPolygonLodLayer(spec.name)
+        ? districtFillLayerId(spec.name)
+        : aggregateLayerId(spec.name)
       if (mlMap.getLayer(layerId)) {
         mlMap.setFilter(layerId, aggregateLayerFilter())
       }
     }
-
     if (mlMap.getLayer(POINT_LAYER_ID)) {
-      mlMap.setFilter(POINT_LAYER_ID, pointLayerFilter(true))
-    }
-    if (mlMap.getLayer(MULTI_POINT_LAYER_ID)) {
-      mlMap.setFilter(MULTI_POINT_LAYER_ID, pointLayerFilter(false))
-    }
-
-    if (!vectorMode && clusteringEnabled) {
-      const hideClusters =
-        dotFilters.orgTypes.length > 0 ||
-        dotFilters.naeringskodeSections.length > 0 ||
-        dotFilters.employeeBands.length > 0 ||
-        dotFilters.entityKinds.length > 0
-          ? 'none'
-          : 'visible'
-      if (mlMap.getLayer(CLUSTER_LAYER_ID)) {
-        mlMap.setLayoutProperty(CLUSTER_LAYER_ID, 'visibility', hideClusters)
-      }
-      if (mlMap.getLayer(CLUSTER_COUNT_LAYER_ID)) {
-        mlMap.setLayoutProperty(CLUSTER_COUNT_LAYER_ID, 'visibility', hideClusters)
-      }
+      mlMap.setFilter(POINT_LAYER_ID, addressFilter())
     }
   }
 
@@ -349,43 +295,23 @@ export function createMaplibreDotsLayer(
 
   function applyOpacity() {
     const pointOpacity = stale ? 0.45 : 0.88
-    const clusterOpacity = stale ? 0.55 : 0.92
-    const labelOpacity = stale ? 0.65 : 1
-    const aggregateFillOpacity = stale ? 0.28 : 0.42
-    const aggregateCircleOpacity = stale ? 0.4 : 0.82
+    const fillOpacity = stale ? 0.28 : 0.42
 
     for (const spec of lodLayers) {
       if (isPolygonLodLayer(spec.name)) {
         const fillId = districtFillLayerId(spec.name)
         if (mlMap.getLayer(fillId)) {
-          mlMap.setPaintProperty(fillId, 'fill-opacity', aggregateFillOpacity)
+          mlMap.setPaintProperty(fillId, 'fill-opacity', fillOpacity)
         }
-        continue
-      }
-      const layerId = aggregateLayerId(spec.name)
-      if (mlMap.getLayer(layerId)) {
-        mlMap.setPaintProperty(layerId, 'circle-opacity', aggregateCircleOpacity)
       }
     }
-
     if (mlMap.getLayer(POINT_LAYER_ID)) {
       mlMap.setPaintProperty(POINT_LAYER_ID, 'circle-opacity', pointOpacity)
-    }
-    if (mlMap.getLayer(MULTI_POINT_LAYER_ID)) {
-      mlMap.setPaintProperty(MULTI_POINT_LAYER_ID, 'icon-opacity', pointOpacity)
-    }
-    if (mlMap.getLayer(CLUSTER_LAYER_ID)) {
-      mlMap.setPaintProperty(CLUSTER_LAYER_ID, 'circle-opacity', clusterOpacity)
-    }
-    if (mlMap.getLayer(CLUSTER_COUNT_LAYER_ID)) {
-      mlMap.setPaintProperty(CLUSTER_COUNT_LAYER_ID, 'text-opacity', labelOpacity)
     }
   }
 
   function removeDataLayers() {
-    for (const id of [POINT_LAYER_ID, MULTI_POINT_LAYER_ID, CLUSTER_LAYER_ID, CLUSTER_COUNT_LAYER_ID]) {
-      if (mlMap.getLayer(id)) mlMap.removeLayer(id)
-    }
+    if (mlMap.getLayer(POINT_LAYER_ID)) mlMap.removeLayer(POINT_LAYER_ID)
     for (const spec of lodLayers) {
       if (isPolygonLodLayer(spec.name)) {
         const fillId = districtFillLayerId(spec.name)
@@ -399,15 +325,18 @@ export function createMaplibreDotsLayer(
 
   function addAggregateLayers() {
     for (const spec of lodLayers) {
+      const minzoom = spec.minZoom
+      // Match tippecanoe band end (MapLibre hides at zoom >= maxzoom).
+      const maxzoom = spec.maxZoom
+
       if (isPolygonLodLayer(spec.name)) {
-        const fillId = districtFillLayerId(spec.name)
         mlMap.addLayer({
-          id: fillId,
+          id: districtFillLayerId(spec.name),
           type: 'fill',
           source: SOURCE_ID,
           'source-layer': spec.name,
-          minzoom: spec.minZoom,
-          maxzoom: spec.maxZoom,
+          minzoom,
+          maxzoom,
           filter: aggregateLayerFilter(),
           paint: {
             'fill-color': bakedColorExpression(),
@@ -418,24 +347,19 @@ export function createMaplibreDotsLayer(
         continue
       }
 
-      if (isDistrictMarkerLayer(spec.name)) {
-        continue
-      }
-
-      const layerId = aggregateLayerId(spec.name)
-      const radius = supercellRadiusExpression()
+      if (isDistrictMarkerLayer(spec.name)) continue
 
       mlMap.addLayer({
-        id: layerId,
+        id: aggregateLayerId(spec.name),
         type: 'circle',
         source: SOURCE_ID,
         'source-layer': spec.name,
-        minzoom: spec.minZoom,
-        maxzoom: spec.maxZoom,
+        minzoom,
+        maxzoom,
         filter: aggregateLayerFilter(),
         paint: {
           'circle-color': bakedColorExpression(),
-          'circle-radius': radius,
+          'circle-radius': 4,
           'circle-stroke-width': 0.75,
           'circle-stroke-color': '#0f172a',
           'circle-opacity': 0.72,
@@ -444,27 +368,26 @@ export function createMaplibreDotsLayer(
     }
   }
 
-  function addSinglePointLayer() {
+  function addAddressLayers() {
+    // One circle per address. Multi-org addresses are larger; click lists all orgnrs.
+    // No symbol/split-square icons — those required per-frame addImage and dominated cost.
     mlMap.addLayer({
       id: POINT_LAYER_ID,
       type: 'circle',
       source: SOURCE_ID,
       ...(vectorMode ? { 'source-layer': pointsSourceLayer } : {}),
-      minzoom: vectorMode ? pointsMinZoom : 0,
-      maxzoom: vectorMode ? pointsMaxZoom : 24,
-      filter: pointLayerFilter(true),
+      minzoom: pointsPaintMinZoom,
+      maxzoom: 24,
+      filter: addressFilter(),
       paint: {
         'circle-color':
           currentTypes.length > 0 ? orgTypeColorExpression(currentTypes) : '#64748b',
         'circle-radius': pointRadiusExpression(options.dotsDetailMinZoom),
         'circle-stroke-width': [
-          'interpolate',
-          ['linear'],
-          ['zoom'],
-          Math.max(0, options.dotsDetailMinZoom - 1),
-          0.5,
-          Math.max(0, options.dotsDetailMinZoom + 4),
-          1,
+          'case',
+          ['>', ['coalesce', ['get', 'orgCount'], 1], 1],
+          1.5,
+          0.75,
         ],
         'circle-stroke-color': '#0f172a',
         'circle-opacity': 0.88,
@@ -472,35 +395,13 @@ export function createMaplibreDotsLayer(
     })
   }
 
-  function addMultiPointLayer() {
-    mlMap.addLayer({
-      id: MULTI_POINT_LAYER_ID,
-      type: 'symbol',
-      source: SOURCE_ID,
-      minzoom: 0,
-      filter: pointLayerFilter(false),
-      layout: {
-        'icon-image': ['get', 'colorMixKey'],
-        'icon-size': multiMarkerIconSizeExpression(options.dotsDetailMinZoom),
-        'icon-allow-overlap': true,
-        'icon-ignore-placement': true,
-      },
-      paint: {
-        'icon-opacity': 0.88,
-      },
-    })
-  }
-
-  function setupDataLayers(clustered: boolean) {
+  function setupDataLayers() {
     if (!styleReady) return
 
     removeDataLayers()
-    clusteringEnabled = clustered
     clickLayers = vectorMode
       ? [...lodClickLayerIds(), POINT_LAYER_ID]
-      : clustered
-        ? [MULTI_POINT_LAYER_ID, POINT_LAYER_ID, CLUSTER_LAYER_ID]
-        : [MULTI_POINT_LAYER_ID, POINT_LAYER_ID]
+      : [POINT_LAYER_ID]
 
     if (vectorMode && options.vectorTilesUrl) {
       mlMap.addSource(SOURCE_ID, {
@@ -508,7 +409,7 @@ export function createMaplibreDotsLayer(
         url: options.vectorTilesUrl,
       })
       addAggregateLayers()
-      addSinglePointLayer()
+      addAddressLayers()
       applyPointColors(currentTypes)
       applyTypeVisibility()
       applyOpacity()
@@ -519,58 +420,8 @@ export function createMaplibreDotsLayer(
     mlMap.addSource(SOURCE_ID, {
       type: 'geojson',
       data: pointsToGeoJson(currentPoints, currentTypes),
-      ...(clustered
-        ? { cluster: true, clusterMaxZoom, clusterRadius: 50 }
-        : {}),
     })
-
-    if (clustered) {
-      mlMap.addLayer({
-        id: CLUSTER_LAYER_ID,
-        type: 'circle',
-        source: SOURCE_ID,
-        minzoom: 0,
-        maxzoom: options.dotsDetailMinZoom,
-        filter: ['has', 'point_count'],
-        paint: {
-          'circle-color': [
-            'step',
-            ['get', 'point_count'],
-            '#38bdf8',
-            25,
-            '#0ea5e9',
-            100,
-            '#0284c7',
-            500,
-            '#0369a1',
-          ],
-          'circle-radius': ['step', ['get', 'point_count'], 16, 25, 20, 100, 26, 500, 32],
-          'circle-stroke-width': 1,
-          'circle-stroke-color': '#0f172a',
-          'circle-opacity': 0.92,
-        },
-      })
-
-      mlMap.addLayer({
-        id: CLUSTER_COUNT_LAYER_ID,
-        type: 'symbol',
-        source: SOURCE_ID,
-        minzoom: 0,
-        maxzoom: options.dotsDetailMinZoom,
-        filter: ['has', 'point_count'],
-        layout: {
-          'text-field': ['get', 'point_count_abbreviated'],
-          'text-size': 12,
-        },
-        paint: {
-          'text-color': '#f8fafc',
-        },
-      })
-    }
-
-    addSinglePointLayer()
-    syncMultiSquareImages(mlMap, currentPoints, currentTypes)
-    addMultiPointLayer()
+    addAddressLayers()
     applyPointColors(currentTypes)
     applyTypeVisibility()
     applyOpacity()
@@ -579,12 +430,10 @@ export function createMaplibreDotsLayer(
 
   function updateSource(points: OrganizationPoint[]) {
     if (vectorMode) return
-
     currentPoints = points
     currentTypes = [...new Set(points.map((point) => point.orgType))].sort()
     const source = mlMap.getSource(SOURCE_ID) as GeoJSONSource | undefined
     if (source) {
-      syncMultiSquareImages(mlMap, points, currentTypes)
       source.setData(pointsToGeoJson(points, currentTypes))
       applyPointColors(currentTypes)
       applyTypeVisibility()
@@ -595,7 +444,7 @@ export function createMaplibreDotsLayer(
   function initStyle() {
     if (styleReady) return
     styleReady = true
-    setupDataLayers(clusteringEnabled)
+    setupDataLayers()
     if (pendingPoints) {
       updateSource(pendingPoints)
       pendingPoints = null
@@ -604,70 +453,40 @@ export function createMaplibreDotsLayer(
 
   mlMap.on('error', (event) => {
     if (!vectorMode) return
-    const message = event.error?.message ?? 'Vector tile source failed'
-    options.onVectorTilesError?.(message)
+    options.onVectorTilesError?.(event.error?.message ?? 'Vector tile source failed')
   })
 
   mlMap.on('load', initStyle)
   mlMap.once('styledata', initStyle)
 
-  async function handleClusterFeature(feature: maplibregl.MapGeoJSONFeature) {
-    const clusterId = feature.properties?.cluster_id
-    if (clusterId == null) return
-
-    const source = mlMap.getSource(SOURCE_ID) as GeoJSONSource
-    const expansionZoom = await source.getClusterExpansionZoom(clusterId)
-    const [lng, lat] = (feature.geometry as Point).coordinates
-
-    map.setView([lat, lng], Math.min(expansionZoom + 1, map.getMaxZoom()), {
-      animate: true,
-    })
-  }
-
   function orgnrsFromFeature(feature: maplibregl.MapGeoJSONFeature): string[] {
     const orgCount = feature.properties?.orgCount as number | undefined
     const orgnrsProp = feature.properties?.orgnrs as string | undefined
     if (orgCount != null && orgCount > 1 && orgnrsProp) {
-      return orgnrsProp.split(',')
+      return orgnrsProp.split(',').filter(Boolean)
     }
     const orgnr = feature.properties?.orgnr as string | undefined
     return orgnr ? [orgnr] : []
   }
 
-  function handlePointFeatures(features: maplibregl.MapGeoJSONFeature[]) {
-    const pointFeatures = features.filter(
-      (feature) =>
-        feature.layer.id === POINT_LAYER_ID || feature.layer.id === MULTI_POINT_LAYER_ID,
-    )
-    if (pointFeatures.length === 0) return
-
-    const multiFeature = pointFeatures.find((feature) => feature.layer.id === MULTI_POINT_LAYER_ID)
-    if (multiFeature) {
-      const orgnrs = orgnrsFromFeature(multiFeature)
-      if (orgnrs.length === 0) return
-      const [lng, lat] = (multiFeature.geometry as Point).coordinates
-      options.onMarkerClick(orgnrs, L.latLng(lat, lng))
-      return
+  function hintFromFeature(
+    feature: maplibregl.MapGeoJSONFeature,
+  ): Partial<OrganizationPoint> | null {
+    const props = feature.properties
+    if (!props) return null
+    const orgnr = props.orgnr as string | undefined
+    if (!orgnr) return null
+    return {
+      orgnr,
+      orgType: (props.orgType as string | undefined) ?? '',
+      navn: props.navn as string | undefined,
+      orgTypeLabel: props.orgTypeLabel as string | undefined,
+      addressText: props.addressText as string | undefined,
+      postnummer: props.postnummer as string | undefined,
+      orgCount: props.orgCount as number | undefined,
+      orgnrs: props.orgnrs as string | undefined,
+      adresseId: props.adresseId as string | undefined,
     }
-
-    const byLocation = new Map<string, { lat: number; lng: number; orgnrs: string[] }>()
-    for (const feature of pointFeatures) {
-      for (const orgnr of orgnrsFromFeature(feature)) {
-        const [lng, lat] = (feature.geometry as Point).coordinates
-        const key = locationKey(lat, lng)
-        const entry = byLocation.get(key) ?? { lat, lng, orgnrs: [] }
-        if (!entry.orgnrs.includes(orgnr)) entry.orgnrs.push(orgnr)
-        byLocation.set(key, entry)
-      }
-    }
-
-    const primary = pointFeatures[0]!
-    const [lng, lat] = (primary.geometry as Point).coordinates
-    const key = locationKey(lat, lng)
-    const group = byLocation.get(key)
-    if (!group || group.orgnrs.length === 0) return
-
-    options.onMarkerClick(group.orgnrs, L.latLng(group.lat, group.lng))
   }
 
   function featuresAtClick(latlng: L.LatLng): maplibregl.MapGeoJSONFeature[] {
@@ -677,44 +496,19 @@ export function createMaplibreDotsLayer(
         [point.x - CLICK_TOLERANCE_PX, point.y - CLICK_TOLERANCE_PX],
         [point.x + CLICK_TOLERANCE_PX, point.y + CLICK_TOLERANCE_PX],
       ],
-      { layers: clickLayers },
+      { layers: clickLayers.filter((id) => mlMap.getLayer(id)) },
     )
-  }
-
-  function handleAggregateFeature(
-    feature: maplibregl.MapGeoJSONFeature,
-    latlng: L.LatLng,
-  ) {
-    const orgType =
-      (feature.properties?.dominantOrgType as string | undefined) ??
-      (feature.properties?.orgType as string | undefined)
-    const count =
-      (feature.properties?.count as number | undefined) ??
-      (feature.properties?.total as number | undefined)
-    if (!orgType || count == null) return
-    options.onAggregateClick?.({
-      orgType,
-      count,
-      latlng,
-      label: feature.properties?.label as string | undefined,
-      total: feature.properties?.total as number | undefined,
-      districtLevel: feature.properties?.districtLevel as string | undefined,
-      orgTypeBreakdown: feature.properties?.orgTypeBreakdown as string | undefined,
-    })
   }
 
   function isAggregateLayerId(layerId: string): boolean {
     return lodLayers.some((spec) => {
-      if (isPolygonLodLayer(spec.name)) {
-        return layerId === districtFillLayerId(spec.name)
-      }
+      if (isPolygonLodLayer(spec.name)) return layerId === districtFillLayerId(spec.name)
       return layerId === aggregateLayerId(spec.name)
     })
   }
 
   function handleLeafletClick(event: L.LeafletMouseEvent) {
     if (!ready) return
-
     const features = featuresAtClick(event.latlng)
     if (features.length === 0) return
 
@@ -722,23 +516,32 @@ export function createMaplibreDotsLayer(
 
     const aggregateFeature = features.find((feature) => isAggregateLayerId(feature.layer.id))
     if (aggregateFeature && map.getZoom() < options.dotsDetailMinZoom) {
-      handleAggregateFeature(aggregateFeature, event.latlng)
+      const orgType =
+        (aggregateFeature.properties?.dominantOrgType as string | undefined) ??
+        (aggregateFeature.properties?.orgType as string | undefined)
+      const count =
+        (aggregateFeature.properties?.count as number | undefined) ??
+        (aggregateFeature.properties?.total as number | undefined)
+      if (orgType && count != null) {
+        options.onAggregateClick?.({
+          orgType,
+          count,
+          latlng: event.latlng,
+          label: aggregateFeature.properties?.label as string | undefined,
+          total: aggregateFeature.properties?.total as number | undefined,
+          districtLevel: aggregateFeature.properties?.districtLevel as string | undefined,
+          orgTypeBreakdown: aggregateFeature.properties?.orgTypeBreakdown as string | undefined,
+        })
+      }
       return
     }
 
-    const pointFeatures = features.filter(
-      (feature) =>
-        feature.layer.id === POINT_LAYER_ID || feature.layer.id === MULTI_POINT_LAYER_ID,
-    )
-    if (pointFeatures.length > 0) {
-      handlePointFeatures(pointFeatures)
-      return
-    }
-
-    const clusterFeature = features.find((feature) => feature.layer.id === CLUSTER_LAYER_ID)
-    if (clusterFeature) {
-      void handleClusterFeature(clusterFeature)
-    }
+    const pointFeature = features.find((feature) => feature.layer.id === POINT_LAYER_ID)
+    if (!pointFeature) return
+    const orgnrs = orgnrsFromFeature(pointFeature)
+    if (orgnrs.length === 0) return
+    const [lng, lat] = (pointFeature.geometry as Point).coordinates
+    options.onMarkerClick(orgnrs, L.latLng(lat, lng), hintFromFeature(pointFeature))
   }
 
   function handleLeafletMouseMove(event: L.LeafletMouseEvent) {
@@ -746,9 +549,7 @@ export function createMaplibreDotsLayer(
       map.getContainer().style.cursor = ''
       return
     }
-
-    const hasFeature = featuresAtClick(event.latlng).length > 0
-    map.getContainer().style.cursor = hasFeature ? 'pointer' : ''
+    map.getContainer().style.cursor = featuresAtClick(event.latlng).length > 0 ? 'pointer' : ''
   }
 
   map.on('click', handleLeafletClick)
@@ -764,12 +565,8 @@ export function createMaplibreDotsLayer(
       }
       updateSource(points)
     },
-    setClustering(enabled) {
-      if (vectorMode || (enabled === clusteringEnabled && ready)) return
-      clusteringEnabled = enabled
-      if (!styleReady) return
-      ready = false
-      setupDataLayers(enabled)
+    setClustering() {
+      // Removed — zoom LOD replaces clustering.
     },
     setVisibleOrgTypes(orgTypes) {
       dotFilters = { ...dotFilters, orgTypes: [...orgTypes] }
@@ -789,20 +586,19 @@ export function createMaplibreDotsLayer(
       if (ready) applyOpacity()
     },
     setVisible(visible) {
-      // Keep the canvas laid out while "hidden". visibility:hidden / display:none
-      // zeroes the WebGL backing store; after that, dots often never reappear.
-      container.style.opacity = visible ? '1' : '0'
-      container.style.visibility = 'visible'
-      if (visible) {
-        requestAnimationFrame(() => {
-          try {
-            mlMap.resize()
-            mlMap.triggerRepaint()
-          } catch {
-            // ignore if GL context is mid-teardown
-          }
-        })
+      // Vector/unified mode: minzoom/maxzoom own visibility — keep GL canvas alive.
+      if (vectorMode) {
+        container.style.opacity = '1'
+        container.style.visibility = 'visible'
+        return
       }
+      // GeoJSON fallback: hide markers below detail by clearing paint via opacity on layers.
+      const value = visible ? 'visible' : 'none'
+      if (mlMap.getLayer(POINT_LAYER_ID)) {
+        mlMap.setLayoutProperty(POINT_LAYER_ID, 'visibility', value)
+      }
+      container.style.opacity = '1'
+      container.style.visibility = 'visible'
     },
     bringToFront() {
       const pane = glLayer.getPane()

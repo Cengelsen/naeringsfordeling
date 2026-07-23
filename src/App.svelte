@@ -48,7 +48,9 @@
 
   const totalCount = $derived(
     mapSettings.visualization === 'dots'
-      ? (dotsState.viewportSummary?.geocodedInBbox ?? dotsState.organizations)
+      ? dotsState.statsLoading || !dotsState.viewportSummary
+        ? null
+        : dotsState.viewportSummary.addressesInBbox
       : visibleCounts.reduce((sum, c) => sum + c.count, 0),
   )
 

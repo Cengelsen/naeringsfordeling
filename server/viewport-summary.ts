@@ -1,18 +1,20 @@
-import { readFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
 import type Database from 'better-sqlite3'
 import { isDetailZoom } from '../src/lib/lodConfig.js'
 import { effectiveKommunenummerExpr } from '../scripts/lib/db.js'
+import { countViewportSpatial } from './addressSpatialIndex.js'
 import {
   appendAreaFilters,
   buildFilterQuery,
-  rtreeBboxParams,
   type ApiFilters,
 } from './filters.js'
+import { readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 
 export interface ViewportSummary {
   totalInViewport: number
   geocodedInBbox: number
+  /** Unique addresses (adresse_id or rounded lat/lng) among geocoded orgs in the bbox. */
+  addressesInBbox: number
   ungeocodedInViewport: number
   byOrgType: Record<string, number>
   renderMode: 'aggregate' | 'individual'
@@ -142,43 +144,13 @@ export function queryViewportSummary(
   }
 
   const renderMode: ViewportSummary['renderMode'] = isDetailZoom(zoom) ? 'individual' : 'aggregate'
-
   const kommuner = kommunerIntersectingBbox(filters.bbox)
   const kommuneExpr = effectiveKommunenummerExpr()
 
-  const { conditions: geocodedConditions, params: geocodedParams } = buildFilterQuery(
-    filters,
-    true,
-    'o',
-  )
-  appendAreaFilters(filters, geocodedConditions, geocodedParams, 'o')
+  // Exact address + org counts in O(log N) via in-memory wavelet index.
+  const spatial = countViewportSpatial(db, filters, filters.bbox)
 
-  const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(filters.bbox)
-
-  // One rtree pass: geocoded count + org-type breakdown (accurate for bbox).
-  const typeRows = db
-    .prepare(
-      `SELECT o.org_type AS org_type, COUNT(*) AS count
-       FROM organizations o
-       INNER JOIN orgs_rtree r ON r.id = o.rowid
-       WHERE r.maxLng >= ? AND r.minLng <= ?
-         AND r.maxLat >= ? AND r.minLat <= ?
-         AND ${geocodedConditions.join(' AND ')}
-       GROUP BY o.org_type`,
-    )
-    .all(minLng, maxLng, minLat, maxLat, ...geocodedParams) as Array<{
-    org_type: string
-    count: number
-  }>
-
-  const byOrgType: Record<string, number> = {}
-  let geocodedInBbox = 0
-  for (const row of typeRows) {
-    byOrgType[row.org_type] = row.count
-    geocodedInBbox += row.count
-  }
-
-  // Ungeocoded orgs in kommuner that intersect the viewport (accurate, index-friendly).
+  // Ungeocoded orgs in kommuner that intersect the viewport (index-friendly).
   let ungeocodedInViewport = 0
   if (kommuner.length > 0) {
     const { conditions: ungeocodedConditions, params: ungeocodedParams } = buildFilterQuery(
@@ -190,6 +162,7 @@ export function queryViewportSummary(
     ungeocodedConditions.push(`${kommuneExpr} IN (${kommuner.map(() => '?').join(',')})`)
     ungeocodedConditions.push(`o.lat IS NULL`)
     ungeocodedParams.push(...kommuner)
+    appendAreaFilters(filters, ungeocodedConditions, ungeocodedParams, 'o')
 
     const ungeocodedRow = db
       .prepare(
@@ -202,13 +175,14 @@ export function queryViewportSummary(
     ungeocodedInViewport = ungeocodedRow.count
   }
 
-  const totalInViewport = geocodedInBbox + ungeocodedInViewport
+  const totalInViewport = spatial.geocodedInBbox + ungeocodedInViewport
 
   return {
     totalInViewport,
-    geocodedInBbox,
+    geocodedInBbox: spatial.geocodedInBbox,
+    addressesInBbox: spatial.addressesInBbox,
     ungeocodedInViewport,
-    byOrgType,
+    byOrgType: spatial.byOrgType,
     renderMode,
     kommunerInViewport: kommuner.length,
   }

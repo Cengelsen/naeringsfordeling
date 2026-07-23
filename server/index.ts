@@ -9,6 +9,8 @@ import { limitForZoom, fetchLimitForTarget, stratifiedSamplePoints } from '../sc
 import { toCompactPoint, roundCoord, type CompactPoint } from '../scripts/lib/points.js'
 import { resolveOrganizationLocation } from './location.js'
 import { queryViewportSummary } from './viewport-summary.js'
+import { warmAddressSpatialIndex } from './addressSpatialIndex.js'
+import { groupOrganizationPointsByAddress } from './addressGroups.js'
 import {
   appendAreaFilters,
   appendBboxFilter,
@@ -53,7 +55,7 @@ async function fetchKonsernstruktur(orgnr: string) {
 }
 
 const POINT_SELECT = `o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_text, o.postnummer,
-                o.kommunenummer, o.lat, o.lng,
+                o.kommunenummer, o.lat, o.lng, o.adresse_id,
                 ${naeringskodeSectionSql('o')} AS naeringskode,
                 ${employeeBandSql('o')} AS employee_band,
                 o.entity_kind`
@@ -82,6 +84,7 @@ type OrganizationPointRow = {
   kommunenummer: string
   lat: number
   lng: number
+  adresse_id: string | null
   naeringskode: string | null
   employee_band: string
   entity_kind: string
@@ -257,17 +260,18 @@ app.get('/api/organizations/points', (c) => {
   const { rows, sourceCount } = queryOrganizationPoints(filters, limit)
   const fetchCap = fetchLimitForTarget(limit, filters.zoom)
   const truncated = fetchCap != null && (sourceCount >= fetchCap || sourceCount > rows.length)
+  const grouped = groupOrganizationPointsByAddress(rows)
 
   if (compact) {
-    const points: CompactPoint[] = rows.map((row) =>
-      toCompactPoint(row.orgnr, row.lng, row.lat, row.org_type, {
-        navn: row.navn,
-        orgTypeLabel: row.org_type_label,
-        addressText: row.address_text ?? '',
-        postnummer: row.postnummer ?? '',
-        naeringskode: row.naeringskode ?? undefined,
-        employeeBand: row.employee_band,
-        entityKind: row.entity_kind,
+    const points: CompactPoint[] = grouped.map((point) =>
+      toCompactPoint(point.orgnr, point.lng, point.lat, point.orgType, {
+        navn: point.navn,
+        orgTypeLabel: point.orgTypeLabel,
+        addressText: point.addressText,
+        postnummer: point.postnummer,
+        naeringskode: point.naeringskode ?? undefined,
+        employeeBand: point.employeeBand,
+        entityKind: point.entityKind,
       }),
     )
     return c.json({
@@ -275,27 +279,33 @@ app.get('/api/organizations/points', (c) => {
       count: points.length,
       truncated,
       sampled: truncated,
+      grouped: true,
     })
   }
 
   return c.json({
-    points: rows.map((row) => ({
-      orgnr: row.orgnr,
-      orgType: row.org_type,
-      orgTypeLabel: row.org_type_label,
-      navn: row.navn,
-      addressText: row.address_text ?? '',
-      postnummer: row.postnummer ?? '',
-      kommunenummer: row.kommunenummer,
-      lat: roundCoord(row.lat),
-      lng: roundCoord(row.lng),
-      naeringskode: row.naeringskode,
-      employeeBand: row.employee_band,
-      entityKind: row.entity_kind,
+    points: grouped.map((point) => ({
+      orgnr: point.orgnr,
+      orgType: point.orgType,
+      orgTypeLabel: point.orgTypeLabel,
+      navn: point.navn,
+      addressText: point.addressText,
+      postnummer: point.postnummer,
+      kommunenummer: point.kommunenummer,
+      lat: roundCoord(point.lat),
+      lng: roundCoord(point.lng),
+      naeringskode: point.naeringskode,
+      employeeBand: point.employeeBand,
+      entityKind: point.entityKind,
+      adresseId: point.adresseId,
+      orgCount: point.orgCount,
+      orgnrs: point.orgnrs,
+      typeList: point.typeList,
     })),
-    count: rows.length,
+    count: grouped.length,
     truncated,
     sampled: truncated,
+    grouped: true,
   })
 })
 
@@ -392,65 +402,116 @@ app.get('/api/organizations/:orgnr/konsern', async (c) => {
   }
 })
 
+type OrganizationDetailRow = {
+  orgnr: string
+  navn: string
+  org_type: string
+  org_type_label: string
+  address_text: string
+  postnummer: string
+  kommunenummer: string
+  lat: number | null
+  lng: number | null
+  naeringskode: string | null
+  naeringskode_label: string | null
+  antall_ansatte: number | null
+  har_registrert_antall_ansatte: number
+  entity_kind: string
+  overordnet_enhet: string | null
+  er_i_konsern: number
+  geocode_quality: string | null
+  matrikkel_key: string | null
+}
+
+const ORG_DETAIL_SELECT = `orgnr, navn, org_type, org_type_label, address_text, postnummer,
+              kommunenummer, lat, lng, naeringskode, naeringskode_label,
+              antall_ansatte, har_registrert_antall_ansatte, entity_kind,
+              overordnet_enhet, er_i_konsern, geocode_quality, matrikkel_key`
+
+function organizationFromDetailRow(row: OrganizationDetailRow) {
+  return {
+    orgnr: row.orgnr,
+    navn: row.navn,
+    orgType: row.org_type,
+    orgTypeLabel: row.org_type_label,
+    addressText: row.address_text,
+    postnummer: row.postnummer,
+    kommunenummer: row.kommunenummer,
+    lat: row.lat,
+    lng: row.lng,
+    naeringskode: row.naeringskode,
+    naeringskodeLabel: row.naeringskode_label,
+    antallAnsatte: row.antall_ansatte,
+    employeeBand: employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1),
+    entityKind: row.entity_kind,
+    overordnetEnhet: row.overordnet_enhet,
+    erIKonsern: row.er_i_konsern === 1,
+    geocodeQuality: row.geocode_quality,
+    matrikkelKey: row.matrikkel_key,
+  }
+}
+
+const BATCH_ORG_MAX = 100
+
+/** One round-trip for address popups listing many orgs at the same marker. */
+app.post('/api/organizations/batch', async (c) => {
+  let body: unknown
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'Ugyldig JSON' }, 400)
+  }
+
+  const raw =
+    body && typeof body === 'object' && Array.isArray((body as { orgnrs?: unknown }).orgnrs)
+      ? (body as { orgnrs: unknown[] }).orgnrs
+      : []
+  const orgnrs = [
+    ...new Set(
+      raw
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => value.replace(/\D/g, ''))
+        .filter((value) => value.length > 0),
+    ),
+  ].slice(0, BATCH_ORG_MAX)
+
+  if (orgnrs.length === 0) {
+    return c.json({ organizations: [] })
+  }
+
+  const placeholders = orgnrs.map(() => '?').join(',')
+  const rows = db
+    .prepare(
+      `SELECT ${ORG_DETAIL_SELECT}
+       FROM organizations
+       WHERE deleted = 0 AND orgnr IN (${placeholders})`,
+    )
+    .all(...orgnrs) as OrganizationDetailRow[]
+
+  const byOrgnr = new Map(rows.map((row) => [row.orgnr, organizationFromDetailRow(row)]))
+  const organizations = orgnrs
+    .map((orgnr) => byOrgnr.get(orgnr))
+    .filter((org): org is NonNullable<typeof org> => org != null)
+
+  return c.json({ organizations })
+})
+
 app.get('/api/organizations/:orgnr', (c) => {
   const orgnr = c.req.param('orgnr')
   const row = db
     .prepare(
-      `SELECT orgnr, navn, org_type, org_type_label, address_text, postnummer,
-              kommunenummer, lat, lng, naeringskode, naeringskode_label,
-              antall_ansatte, har_registrert_antall_ansatte, entity_kind,
-              overordnet_enhet, er_i_konsern, geocode_quality, matrikkel_key
+      `SELECT ${ORG_DETAIL_SELECT}
        FROM organizations
        WHERE deleted = 0 AND orgnr = ?`,
     )
-    .get(orgnr) as
-    | {
-        orgnr: string
-        navn: string
-        org_type: string
-        org_type_label: string
-        address_text: string
-        postnummer: string
-        kommunenummer: string
-        lat: number | null
-        lng: number | null
-        naeringskode: string | null
-        naeringskode_label: string | null
-        antall_ansatte: number | null
-        har_registrert_antall_ansatte: number
-        entity_kind: string
-        overordnet_enhet: string | null
-        er_i_konsern: number
-        geocode_quality: string | null
-        matrikkel_key: string | null
-      }
-    | undefined
+    .get(orgnr) as OrganizationDetailRow | undefined
 
   if (!row) {
     return c.json({ error: 'Organisasjon ikke funnet' }, 404)
   }
 
   return c.json({
-    organization: {
-      orgnr: row.orgnr,
-      navn: row.navn,
-      orgType: row.org_type,
-      orgTypeLabel: row.org_type_label,
-      addressText: row.address_text,
-      postnummer: row.postnummer,
-      kommunenummer: row.kommunenummer,
-      lat: row.lat,
-      lng: row.lng,
-      naeringskode: row.naeringskode,
-      naeringskodeLabel: row.naeringskode_label,
-      antallAnsatte: row.antall_ansatte,
-      employeeBand: employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1),
-      entityKind: row.entity_kind,
-      overordnetEnhet: row.overordnet_enhet,
-      erIKonsern: row.er_i_konsern === 1,
-      geocodeQuality: row.geocode_quality,
-      matrikkelKey: row.matrikkel_key,
-    },
+    organization: organizationFromDetailRow(row),
   })
 })
 
@@ -527,3 +588,12 @@ console.log(`API server on http://localhost:${port}`)
 console.log(`Database: ${dbPath}`)
 
 serve({ fetch: app.fetch, port })
+
+// Build O(log N) address index after listen so the port opens immediately.
+setImmediate(() => {
+  try {
+    warmAddressSpatialIndex(db)
+  } catch (error) {
+    console.error('Failed to warm address spatial index', error)
+  }
+})

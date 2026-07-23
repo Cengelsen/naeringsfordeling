@@ -18,15 +18,25 @@ export const LOD_LAYER_NAMES = {
 } as const
 
 /**
- * Pre-rendered zoom bands.
- * Note: maplibre-gl-leaflet uses GL zoom = Leaflet zoom - 1, so the organizations
- * tippecanoe layer is baked from DETAIL_MIN_ZOOM - 1 (Leaflet z15 → GL z14 tiles).
+ * Leaflet zoom bands for district GeoJSON (Distrikter + Adresser aggregate).
+ */
+export const LEAFLET_ZOOM_RANGES = {
+  fylke: { minZoom: FYLKE_MIN_ZOOM, maxZoom: FYLKE_MAX_ZOOM },
+  kommune: { minZoom: KOMMUNE_MIN_ZOOM, maxZoom: KOMMUNE_MAX_ZOOM },
+  grunnkretser: { minZoom: GRUNNKRETS_MIN_ZOOM, maxZoom: GRUNNKRETS_MAX_ZOOM },
+} as const
+
+/**
+ * Tippecanoe zoom bands for PMTiles.
+ * District/grunnkrets polys use the same numbers as Leaflet (fallback LOD only).
+ * Organizations bake from DETAIL−2 so tiles warm under grunnkretser
+ * (Leaflet z14 → GL z13 via maplibre-gl-leaflet). Client paints addresses from GL DETAIL−1.
  */
 export const LOD_ZOOM_RANGES = {
   fylke: { minZoom: FYLKE_MIN_ZOOM, maxZoom: FYLKE_MAX_ZOOM },
   kommune: { minZoom: KOMMUNE_MIN_ZOOM, maxZoom: KOMMUNE_MAX_ZOOM },
   grunnkretser: { minZoom: GRUNNKRETS_MIN_ZOOM, maxZoom: GRUNNKRETS_MAX_ZOOM },
-  points: { minZoom: Math.max(0, DETAIL_MIN_ZOOM - 1), maxZoom: 18 },
+  points: { minZoom: Math.max(0, DETAIL_MIN_ZOOM - 2), maxZoom: 18 },
 } as const
 
 export type LodLayerExport =

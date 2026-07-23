@@ -1,16 +1,19 @@
 import L from 'leaflet'
 import type { OrganizationPoint } from '../types'
 import { colorForOrgType } from '../utils/orgTypeColors'
-import { groupPointsByLocation, orgnrsFromGroup } from './addressGroups'
+import {
+  groupPointsByLocation,
+  isPreGroupedAddressPoint,
+  orgnrsFromGroup,
+} from './addressGroups'
 import type { MaplibreDotsController, MaplibreDotsLayerOptions, DotFilters } from './maplibreDotsLayer'
 import { filterPointsByMapFilters } from './points'
-import { coloredSegments, matrixSquareHtml } from './splitSquareMarker'
 
 const MAX_LEAFLET_DOTS = 4000
 
 /**
  * Canvas-backed Leaflet fallback when MapLibre/WebGL is unavailable.
- * Vector tiles are not supported in this mode.
+ * One circle per address; multi-org addresses are larger. No split-square icons.
  */
 export function createLeafletDotsLayer(
   map: L.Map,
@@ -27,44 +30,36 @@ export function createLeafletDotsLayer(
   let colorTypes = options.orgTypesForColors ?? []
   let stale = false
 
-  function pointRadius(): number {
+  function pointRadius(orgCount: number): number {
     const zoom = map.getZoom()
     const detail = options.dotsDetailMinZoom
-    if (zoom >= detail + 4) return 7
-    if (zoom >= detail + 1) return 5
-    return 4
+    const base = zoom >= detail + 4 ? 7 : zoom >= detail + 1 ? 5 : 4
+    return orgCount > 1 ? base + 1 : base
   }
 
-  function squareSize(): number {
-    return pointRadius() * 2
-  }
-
-  function addSquareMarker(
+  function addCircleMarker(
     lat: number,
     lng: number,
-    group: ReturnType<typeof groupPointsByLocation>[number],
+    orgType: string,
     orgnrs: string[],
+    orgCount: number,
+    hint?: Partial<OrganizationPoint> | null,
   ) {
-    const size = squareSize()
+    const radius = pointRadius(orgCount)
     const opacity = stale ? 0.45 : 0.85
-    const html = matrixSquareHtml(
-      coloredSegments(group, colorTypes),
-      size,
+    const color = colorForOrgType(orgType, colorTypes)
+    const marker = L.circleMarker([lat, lng], {
+      radius,
+      fillColor: color,
+      color: '#0f172a',
+      weight: orgCount > 1 ? 1.5 : 0.75,
       opacity,
-      `${group.orgCount} organisasjoner`,
-    )
-    const marker = L.marker([lat, lng], {
-      icon: L.divIcon({
-        className: 'org-dot-square-wrap',
-        iconSize: [size, size],
-        iconAnchor: [size / 2, size / 2],
-        html,
-      }),
+      fillOpacity: opacity,
     })
 
     marker.on('click', (event: L.LeafletMouseEvent) => {
       L.DomEvent.stopPropagation(event)
-      options.onMarkerClick(orgnrs, event.latlng)
+      options.onMarkerClick(orgnrs, event.latlng, hint)
     })
 
     marker.addTo(layer)
@@ -72,40 +67,25 @@ export function createLeafletDotsLayer(
 
   function rebuild() {
     layer.clearLayers()
+    if (map.getZoom() < options.dotsDetailMinZoom) return
 
     const filtered = filterPointsByMapFilters(currentPoints, dotFilters)
-
     const capped =
       filtered.length > MAX_LEAFLET_DOTS ? filtered.slice(0, MAX_LEAFLET_DOTS) : filtered
 
-    const groups = groupPointsByLocation(capped)
-    const radius = pointRadius()
-    const opacity = stale ? 0.45 : 0.85
-
-    for (const group of groups) {
-      const orgnrs = orgnrsFromGroup(group)
-      const color = colorForOrgType(group.orgType, colorTypes)
-
-      if (group.orgCount === 1) {
-        const point = group.orgs[0]!
-        const marker = L.circleMarker([group.lat, group.lng], {
-          radius,
-          fillColor: color,
-          color: '#0f172a',
-          weight: 0.75,
-          opacity,
-          fillOpacity: opacity,
-        })
-
-        marker.on('click', (event: L.LeafletMouseEvent) => {
-          L.DomEvent.stopPropagation(event)
-          options.onMarkerClick([point.orgnr], event.latlng)
-        })
-
-        marker.addTo(layer)
-      } else {
-        addSquareMarker(group.lat, group.lng, group, orgnrs)
+    if (capped.length > 0 && isPreGroupedAddressPoint(capped[0]!)) {
+      for (const point of capped) {
+        const orgCount = point.orgCount ?? 1
+        const orgnrs = (point.orgnrs ?? point.orgnr).split(',').filter(Boolean)
+        addCircleMarker(point.lat, point.lng, point.orgType, orgnrs, orgCount, point)
       }
+      return
+    }
+
+    for (const group of groupPointsByLocation(capped)) {
+      const orgnrs = orgnrsFromGroup(group)
+      const primary = group.orgs[0]
+      addCircleMarker(group.lat, group.lng, group.orgType, orgnrs, group.orgCount, primary ?? null)
     }
   }
 
@@ -136,9 +116,7 @@ export function createLeafletDotsLayer(
       }
       rebuild()
     },
-    setClustering() {
-      // Clustering requires MapLibre; ignored in Leaflet fallback.
-    },
+    setClustering() {},
     setStale(nextStale) {
       stale = nextStale
       rebuild()
@@ -148,6 +126,7 @@ export function createLeafletDotsLayer(
         layer.remove()
       } else if (!map.hasLayer(layer)) {
         layer.addTo(map)
+        rebuild()
       }
     },
     bringToFront() {

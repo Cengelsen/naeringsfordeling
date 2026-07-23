@@ -31,7 +31,7 @@ yarn server        # terminal 1
 yarn dev           # terminal 2
 ```
 
-**Adresser** (default view) uses pre-exported district GeoJSON at zoom &lt; 15 — same predefined fylke/kommune/grunnkrets boundaries as Distrikter, with one baked org-type blend colour per region. Individual addresses from zoom 15. No organisation fetch at aggregate zoom. Run `yarn export-district-colors` after syncing the database (also runs as part of `yarn export-map-tiles`).
+**Adresser** (default view) uses Leaflet district GeoJSON at zoom &lt; 15 (fylke → kommune → grunnkrets), with MapLibre kept warm underneath so address circles appear at zoom **15** without rebuilding the overlay. One circle per unique address (`adresse_id` or lat/lng); co-located orgs share a marker (larger stroke) and are listed on click. Address count in the panel updates at every zoom. Run `yarn export-district-colors` after syncing; for fast z15 use `yarn download-points` / `yarn export-map-tiles`.
 
 Åpne [http://localhost:5173](http://localhost:5173).
 
@@ -378,12 +378,12 @@ Basekartet er Leaflet (OSM-raster). Prikkene tegnes i et transparent MapLibre GL
 
 Bygger en **zoom-pyramide** med distriktsfliser (fylke/kommune som i «Distrikter»), grunnkretser og enkeltadresser ved høy zoom:
 
-| Lag | Zoom | Innhold |
-|-----|------|---------|
-| `districts_fylke_poly` | 4–6 | Fylkepolygoner med én forhåndsbakt blandingfarge per fylke |
-| `districts_kommune_poly` | 7–11 | Kommunepolygoner med én forhåndsbakt blandingfarge per kommune |
-| `grunnkretser_poly` | 12–14 | Kartverket-grunnkretser med én forhåndsbakt blandingfarge per grunnkrets |
-| `organizations` | 15–18 | Enkeltadresser (klikkbare) |
+| Lag | Tippecanoe zoom | Innhold |
+|-----|-----------------|---------|
+| `districts_fylke_poly` | 4–6 | Fylkepolygoner (PMTiles LOD fallback) |
+| `districts_kommune_poly` | 7–11 | Kommunepolygoner (fallback) |
+| `grunnkretser_poly` | 12–14 | Grunnkretser (fallback) |
+| `organizations` | bake 13–18, paint Leaflet ≥15 | Én sirkel per adresse |
 
 Fargen for distrikter og grunnkretser beregnes ved **tile-export** (`mixOrgTypeColors` i `orgTypeColors.ts`): vektet RGB-blanding av org.type-spektrumet. Klienten leser bare `color` fra vektorflisene — ingen runtime-beregning eller org-henting for disse zoom-båndene.
 
@@ -500,13 +500,13 @@ Ved oppstart kjører `probeVectorTiles()`: HEAD på `/data/points.pmtiles` + fet
 
 **Aggregat-zoom (under `dotsDetailMinZoom`, standard 15):** prioritet:
 
-1. **Distrikts-GeoJSON** (`public/data/districts/`) — Leaflet-polygoner med samme forhåndsdefinerte fylke/kommune/grunnkrets-geometri som «Distrikter» (foretrukket)
-2. **PMTiles LOD-lag** — fallback hvis distrikts-GeoJSON mangler men `points.pmtiles` har aggregatlag
+1. **Distrikts-GeoJSON** (`public/data/districts/`) — Leaflet-polygoner (foretrukket; samme geometri som «Distrikter»)
+2. **PMTiles LOD-lag** — fallback hvis distrikts-GeoJSON mangler
 3. Ellers: kommune-omriss + tydelig melding om manglende export
 
-Ingen organisasjons-henting per viewport på aggregat-zoom. Tall i panelet kommer fra `viewport-summary`.
+MapLibre org-overlay holdes montert under aggregat (tom LOD) og prefetcher fliser; adresseprikker males først ved z15 via `minzoom`. Tall i panelet (`addressesInBbox`) oppdateres på alle zoomnivåer.
 
-**Detalj-zoom (15+):** alle geokodede adresser i kartutsnittet — fra PMTiles når UI-filtrene matcher bake-in-filtrene, ellers uten sampling via API.
+**Detalj-zoom (15+):** én sirkel per unik adresse. Flere org. på samme adresse = større radius/stroke; klikk åpner alle `orgnrs`. Ingen dynamiske split-square-ikoner.
 
 Vektormodus krever i tillegg:
 - WebGL/MapLibre fungerer
@@ -520,15 +520,14 @@ Hvis brukeren skrur av konkurs-/avviklingsfilter eller krever kun MVA-registrert
 - Source `org-dots`: `type: 'vector'`, URL `pmtiles://{origin}/data/points.pmtiles`
 - Layer `org-points`: `circle` med `source-layer: organizations`
 - Aggregat-lag (fylke/kommune/grunnkretser): forhåndsbakt `fill-color` fra `color`-property
-- Enkeltadresser: farge via `match` på `orgType`; radius interpoleres med zoom
+- Enkeltadresser: én `circle`-layer; farge via `match` på `orgType`; multi-org via større radius/stroke
 - Org-typefilter på aggregater: client-side `setFilter` på `dominantOrgType` — ingen ny nedlasting
-- **Ingen MapLibre-clustering** i vektormodus; tippecanoe håndterer tetthet via drop/coalesce
+- **Ingen MapLibre-clustering** og **ingen dynamiske ikoner** — tippecanoe + zoom-LOD
 
 **GeoJSON-modus** (API eller JSON-tiles):
 
-- Source uten clustering; lag `org-points`
-- Samme koordinat får litt jitter slik at overlappende punkter skilles
-- Klikk: `queryRenderedFeatures` (10 px) → popup via `/api/organizations/:orgnr`
+- Source uten clustering; lag `org-points` (én sirkel per adresse, forhåndsgruppert fra API)
+- Klikk: `queryRenderedFeatures` (10 px) → popup via batch/cache (`POST /api/organizations/batch`) + tile-hint for umiddelbar tekst
 
 Vite setter `Accept-Ranges: bytes` på `.pmtiles` slik at klienten kan hente fliser med HTTP range requests i `yarn dev` / `yarn preview`.
 
@@ -540,7 +539,7 @@ Valgfri statisk cache (kjøres ikke i CI). Grupperer punkter per `kommunenummer`
 
 ### 4. Fallback: SQLite API
 
-`GET /api/organizations/points` spørrer R-tree (`orgs_rtree`) med bbox og filtre. Zoom-baserte grenser og caching (minne + IndexedDB) begrenser hvor mye som hentes. Brukes når PMTiles ikke er tilgjengelig eller filtrene ikke matcher bake-in.
+`GET /api/organizations/points` spørrer R-tree (`orgs_rtree`) med bbox og filtre, deretter **grupperer til én feature per adresse** (`adresse_id` eller avrundet lat/lng) med `orgCount` / `orgnrs` / `colorMixKey`. Zoom-baserte grenser og caching (minne + IndexedDB) begrenser hvor mye som hentes. Brukes når PMTiles ikke er tilgjengelig eller filtrene ikke matcher bake-in.
 
 ### 5. Fallback: Leaflet uten WebGL
 
@@ -580,6 +579,7 @@ Workflow: [`.github/workflows/sync-organizations.yml`](.github/workflows/sync-or
 | `GET /api/organizations` | Geokodede organisasjoner for kart (prikker) |
 | `GET /api/organizations/points` | Viewport-punkter (bbox / R-tree) |
 | `GET /api/organizations/:orgnr` | Enkeltorganisasjon (popup) |
+| `POST /api/organizations/batch` | Flere organisasjoner (adresse-popup, max 100) |
 
 ## Bygg
 

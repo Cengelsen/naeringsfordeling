@@ -249,8 +249,7 @@ export function createDistrictColorLayer(
     },
     hide() {
       visible = false
-      loadGeneration += 1
-      root.clearLayers()
+      // Keep GeoJSON in memory so zooming back to aggregate is instant.
       root.remove()
     },
     remove() {

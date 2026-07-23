@@ -68,6 +68,8 @@ export interface DotsLoadState {
   /** True when MapLibre could not start (e.g. WebGL disabled in LibreWolf) */
   webglUnavailable?: boolean
   viewportSummary?: ViewportSummary | null
+  /** True while viewport address/org stats are being calculated. */
+  statsLoading?: boolean
   renderedFeatureCount?: number
   statsApproximate?: boolean
 }
@@ -75,6 +77,8 @@ export interface DotsLoadState {
 export interface ViewportSummary {
   totalInViewport: number
   geocodedInBbox: number
+  /** Unique addresses among geocoded orgs in the bbox (all zoom levels). */
+  addressesInBbox: number
   ungeocodedInViewport: number
   byOrgType: Record<string, number>
   renderMode: 'aggregate' | 'individual'
@@ -151,6 +155,15 @@ export interface OrganizationPoint {
   naeringskode?: string | null
   employeeBand?: import('./utils/employeeBands').EmployeeBand
   entityKind?: 'enhet' | 'underenhet'
+  /** Kartverket address id when geocoded; used to group co-located orgs. */
+  adresseId?: string | null
+  /**
+   * When set, this point is already one feature per address (API/bake).
+   * `orgnrs` lists all organisations at the address.
+   */
+  orgCount?: number
+  orgnrs?: string
+  typeList?: string
 }
 
 export interface KommuneFeatureProperties {

@@ -1,5 +1,5 @@
 import maplibregl from 'maplibre-gl'
-import { Protocol } from 'pmtiles'
+import { PMTiles, Protocol } from 'pmtiles'
 import { DETAIL_MIN_ZOOM } from '../lodConfig'
 import { assetUrl } from '../utils/assets'
 
@@ -31,17 +31,157 @@ export interface VectorTilesManifest {
   generatedAt?: string
 }
 
-let protocolRegistered = false
+let sharedProtocol: Protocol | null = null
 
 export function ensurePmtilesProtocol() {
-  if (protocolRegistered) return
-  maplibregl.addProtocol('pmtiles', new Protocol().tile)
-  protocolRegistered = true
+  if (sharedProtocol) return
+  sharedProtocol = new Protocol()
+  maplibregl.addProtocol('pmtiles', sharedProtocol.tile)
 }
 
 export function vectorTilesSourceUrl(): string {
   const base = `${location.origin}${VECTOR_TILES_PATH}`
   return `pmtiles://${base}`
+}
+
+function absoluteTilesUrl(): string {
+  return `${location.origin}${VECTOR_TILES_PATH}`
+}
+
+function sharedPmtiles(): PMTiles {
+  ensurePmtilesProtocol()
+  const url = absoluteTilesUrl()
+  let tiles = sharedProtocol!.get(url)
+  if (!tiles) {
+    tiles = new PMTiles(url)
+    sharedProtocol!.add(tiles)
+  }
+  return tiles
+}
+
+/** Web-mercator tile x/y range covering a WGS84 bbox at zoom z. */
+export function tileRangeForBbox(
+  west: number,
+  south: number,
+  east: number,
+  north: number,
+  z: number,
+): { minX: number; maxX: number; minY: number; maxY: number } {
+  const n = 2 ** z
+  const lonToX = (lon: number) => Math.floor(((lon + 180) / 360) * n)
+  const latToY = (lat: number) => {
+    const rad = (lat * Math.PI) / 180
+    return Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n)
+  }
+  const minX = Math.max(0, lonToX(west))
+  const maxX = Math.min(n - 1, lonToX(east))
+  const minY = Math.max(0, latToY(north))
+  const maxY = Math.min(n - 1, latToY(south))
+  return { minX, maxX, minY, maxY }
+}
+
+function padBounds(
+  bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number },
+  padRatio: number,
+): { west: number; south: number; east: number; north: number } {
+  const west = bounds.getWest()
+  const south = bounds.getSouth()
+  const east = bounds.getEast()
+  const north = bounds.getNorth()
+  const padX = (east - west) * padRatio
+  const padY = (north - south) * padRatio
+  return {
+    west: west - padX,
+    south: south - padY,
+    east: east + padX,
+    north: north + padY,
+  }
+}
+
+/** Prefer tiles near viewport centre when the range exceeds the request budget. */
+function prioritizeTiles(
+  minX: number,
+  maxX: number,
+  minY: number,
+  maxY: number,
+  limit: number,
+): Array<{ x: number; y: number }> {
+  const cx = (minX + maxX) / 2
+  const cy = (minY + maxY) / 2
+  const tiles: Array<{ x: number; y: number; d: number }> = []
+  for (let x = minX; x <= maxX; x += 1) {
+    for (let y = minY; y <= maxY; y += 1) {
+      const dx = x - cx
+      const dy = y - cy
+      tiles.push({ x, y, d: dx * dx + dy * dy })
+    }
+  }
+  tiles.sort((a, b) => a.d - b.d)
+  return tiles.slice(0, limit).map(({ x, y }) => ({ x, y }))
+}
+
+async function prefetchZoomLevel(
+  west: number,
+  south: number,
+  east: number,
+  north: number,
+  zoom: number,
+  maxTiles: number,
+): Promise<void> {
+  const { minX, maxX, minY, maxY } = tileRangeForBbox(west, south, east, north, zoom)
+  const width = maxX - minX + 1
+  const height = maxY - minY + 1
+  if (width <= 0 || height <= 0) return
+
+  const selected =
+    width * height <= maxTiles
+      ? (() => {
+          const list: Array<{ x: number; y: number }> = []
+          for (let x = minX; x <= maxX; x += 1) {
+            for (let y = minY; y <= maxY; y += 1) list.push({ x, y })
+          }
+          return list
+        })()
+      : prioritizeTiles(minX, maxX, minY, maxY, maxTiles)
+
+  const tiles = sharedPmtiles()
+  await Promise.all(selected.map(({ x, y }) => tiles.getZxy(zoom, x, y).catch(() => null)))
+}
+
+/**
+ * Warm the shared PMTiles cache for organization tiles around the viewport.
+ * Call while still on grunnkretser so z15 paint is mostly cache hits.
+ * Prefetches paint zoom and (when different) bake zoom; centre-first when dense.
+ */
+export async function prefetchOrganizationTiles(
+  bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number },
+  options: { leafletZoom: number; bakedMinZoom?: number } = { leafletZoom: DETAIL_MIN_ZOOM },
+): Promise<void> {
+  const bakedMin = options.bakedMinZoom ?? Math.max(0, DETAIL_MIN_ZOOM - 2)
+  const paintZoom = Math.max(0, DETAIL_MIN_ZOOM - 1)
+  const leafletZoom = options.leafletZoom
+  // GL zoom MapLibre uses near/at detail.
+  const primaryZoom = Math.max(bakedMin, Math.min(18, Math.max(leafletZoom - 1, paintZoom)))
+  const padded = padBounds(bounds, 0.2)
+  // Higher budget near detail (smaller tiles); still centre-first if dense.
+  const maxTiles = primaryZoom >= paintZoom ? 120 : primaryZoom >= bakedMin ? 80 : 48
+
+  const jobs = [
+    prefetchZoomLevel(padded.west, padded.south, padded.east, padded.north, primaryZoom, maxTiles),
+  ]
+  if (bakedMin < primaryZoom) {
+    jobs.push(
+      prefetchZoomLevel(
+        padded.west,
+        padded.south,
+        padded.east,
+        padded.north,
+        bakedMin,
+        Math.min(64, maxTiles),
+      ),
+    )
+  }
+  await Promise.all(jobs)
 }
 
 export function isPolygonLodLayer(name: string): boolean {
@@ -74,8 +214,7 @@ export function pointsLayerFromManifest(
   manifest: VectorTilesManifest | null | undefined,
 ): VectorTilesLayerSpec | null {
   const spec = manifest?.layers?.find((layer) => layer.name === VECTOR_TILES_LAYER)
-  // maplibre-gl-leaflet: GL zoom = Leaflet zoom - 1
-  const glMinZoom = Math.max(0, DETAIL_MIN_ZOOM - 1)
+  const glMinZoom = Math.max(0, DETAIL_MIN_ZOOM - 2)
   if (spec) {
     return { ...spec, minZoom: Math.min(spec.minZoom, glMinZoom), maxZoom: 24 }
   }
@@ -88,7 +227,6 @@ export function pointsLayerFromManifest(
 /**
  * True when the organizations PMTiles band includes the MapLibre zoom used at
  * Leaflet detail (GL = Leaflet − 1) and tippecanoe did not rate-drop points.
- * Older archives baked from z15 and/or used densest/rate dropping.
  */
 export function orgDetailTilesCoverLeafletZoom(
   manifest: VectorTilesManifest | null | undefined,

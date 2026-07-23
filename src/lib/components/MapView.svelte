@@ -27,10 +27,12 @@
     fetchOrganizationDetail,
     fetchOrganizationLocation,
     fetchKonsernstruktur,
+    fetchOrganizationsBatch,
     lookupOrganizationLocal,
     fetchOrganizationPoints,
     fetchViewportSummary,
     limitForZoom,
+    seedOrganizationDetail,
   } from '../services/api'
   import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
   import {
@@ -46,6 +48,7 @@
     lodTilesAvailable,
     orgDetailTilesCoverLeafletZoom,
     pointsLayerFromManifest,
+    prefetchOrganizationTiles,
     probeVectorTiles,
     vectorTilesSourceUrl,
     type VectorTilesManifest,
@@ -134,7 +137,10 @@
       orgDetailTilesCoverLeafletZoom(vectorTilesManifest, settings.dotsDetailMinZoom),
   )
 
-  /** PMTiles aggregate layers — used only when district GeoJSON is unavailable. */
+  /**
+   * PMTiles aggregate fill layers — only when district GeoJSON is unavailable.
+   * Leaflet district GeoJSON is the reliable primary path for grunnkretser.
+   */
   const pmtilesLodReady = $derived(
     vectorTilesReady && !districtColorsReady && lodTilesAvailable(vectorTilesManifest),
   )
@@ -143,9 +149,15 @@
     settings.visualization === 'dots' && mapZoom < settings.dotsDetailMinZoom,
   )
 
-  /** Use vector source for the dots controller (warm LOD / detail PMTiles). */
+  /**
+   * MapLibre vector overlay only when it can actually render something useful:
+   * - address tiles at detail, and/or
+   * - PMTiles LOD fills (no district GeoJSON).
+   * Do NOT mount a vector overlay merely because aggregateZoomActive — that
+   * created a useless GL context and forced mode flips on z15 without tiles.
+   */
   const useVectorDotsController = $derived(
-    vectorTilesReady && (aggregateZoomActive || detailOrgTilesReady),
+    vectorTilesReady && (pmtilesLodReady || detailOrgTilesReady),
   )
 
   const currentDetailLevel = $derived(
@@ -190,10 +202,7 @@
 
   const totalVisible = $derived(
     settings.visualization === 'dots'
-      ? (dotsState.viewportSummary?.geocodedInBbox ??
-        (!aggregateZoomActive && detailOrgTilesReady
-          ? (dotsState.renderedFeatureCount ?? 0)
-          : filterPointsByMapFilters(allPoints, settings).length))
+      ? (dotsState.statsLoading ? null : (dotsState.viewportSummary?.addressesInBbox ?? null))
       : counts.reduce((sum, c) => sum + c.count, 0),
   )
 
@@ -406,18 +415,66 @@
     return point ? organizationFromPoint(point) : null
   }
 
+  function seedHint(hint?: Partial<OrganizationPoint> | null) {
+    if (!hint?.orgnr || !hint.navn) return
+    const org = organizationFromPoint({
+      orgnr: hint.orgnr,
+      orgType: hint.orgType ?? '',
+      lat: hint.lat ?? 0,
+      lng: hint.lng ?? 0,
+      navn: hint.navn,
+      orgTypeLabel: hint.orgTypeLabel,
+      addressText: hint.addressText,
+      postnummer: hint.postnummer,
+      kommunenummer: hint.kommunenummer,
+    })
+    if (org) seedOrganizationDetail(org)
+  }
+
   async function resolveOrganization(orgnr: string): Promise<Organization> {
     const fromPoints = resolveOrganizationFromPoints(orgnr)
-    if (fromPoints) return fromPoints
+    if (fromPoints) {
+      seedOrganizationDetail(fromPoints)
+      return fromPoints
+    }
 
     const local = await lookupOrganizationLocal(orgnr)
-    if (local) return local
+    if (local) {
+      seedOrganizationDetail(local)
+      return local
+    }
 
     return fetchOrganizationDetail(orgnr)
   }
 
   async function resolveOrganizations(orgnrs: string[]): Promise<Organization[]> {
-    return Promise.all(orgnrs.map((orgnr) => resolveOrganization(orgnr)))
+    const fromPoints = new Map<string, Organization>()
+    const missing: string[] = []
+
+    for (const orgnr of orgnrs) {
+      const pointOrg = resolveOrganizationFromPoints(orgnr)
+      if (pointOrg) {
+        seedOrganizationDetail(pointOrg)
+        fromPoints.set(normalizeOrgnr(orgnr), pointOrg)
+      } else {
+        missing.push(orgnr)
+      }
+    }
+
+    if (missing.length === 0) {
+      return orgnrs
+        .map((orgnr) => fromPoints.get(normalizeOrgnr(orgnr)))
+        .filter((org): org is Organization => org != null)
+    }
+
+    const fetched = await fetchOrganizationsBatch(missing)
+    for (const org of fetched) {
+      fromPoints.set(normalizeOrgnr(org.orgnr), org)
+    }
+
+    return orgnrs
+      .map((orgnr) => fromPoints.get(normalizeOrgnr(orgnr)))
+      .filter((org): org is Organization => org != null)
   }
 
   function showOrganizationDetails(org: Organization, latlng: L.LatLng, note?: string) {
@@ -429,13 +486,38 @@
       .openOn(map)
   }
 
-  async function showOrganizationPopup(orgnr: string, latlng: L.LatLng, note?: string) {
+  async function showOrganizationPopup(
+    orgnr: string,
+    latlng: L.LatLng,
+    note?: string,
+    hint?: Partial<OrganizationPoint> | null,
+  ) {
     if (!map) return
 
+    seedHint(hint)
     const popup = L.popup({ maxWidth: 360, className: 'org-popup' })
       .setLatLng(latlng)
       .setContent('Laster organisasjon…')
       .openOn(map)
+
+    const hinted =
+      hint?.orgnr && hint.navn
+        ? organizationFromPoint({
+            orgnr: hint.orgnr,
+            orgType: hint.orgType ?? '',
+            lat: latlng.lat,
+            lng: latlng.lng,
+            navn: hint.navn,
+            orgTypeLabel: hint.orgTypeLabel,
+            addressText: hint.addressText,
+            postnummer: hint.postnummer,
+            kommunenummer: hint.kommunenummer,
+          })
+        : null
+    if (hinted) {
+      const extra = note ? `<br/><em>${note}</em>` : ''
+      popup.setContent(`${orgPopupHtml(hinted)}${extra}`)
+    }
 
     map.once('popupclose', clearKonsernOverlay)
 
@@ -461,13 +543,24 @@
     }
   }
 
-  async function showAddressPopup(orgnrs: string[], latlng: L.LatLng) {
+  async function showAddressPopup(
+    orgnrs: string[],
+    latlng: L.LatLng,
+    hint?: Partial<OrganizationPoint> | null,
+  ) {
     if (!map) return
 
+    seedHint(hint)
     const popup = L.popup({ maxWidth: 360, className: 'address-popup' })
       .setLatLng(latlng)
       .setContent('Laster organisasjoner…')
       .openOn(map)
+
+    if (hint?.addressText && hint?.postnummer) {
+      popup.setContent(
+        `<p class="address-popup-header"><strong>${hint.addressText}, ${hint.postnummer}</strong></p><p class="address-popup-summary">Laster ${orgnrs.length} organisasjoner…</p>`,
+      )
+    }
 
     try {
       const orgs = await resolveOrganizations(orgnrs)
@@ -527,11 +620,15 @@
     }
   }
 
-  function handleMarkerClick(orgnrs: string[], latlng: L.LatLng) {
+  function handleMarkerClick(
+    orgnrs: string[],
+    latlng: L.LatLng,
+    hint?: Partial<OrganizationPoint> | null,
+  ) {
     if (orgnrs.length === 1) {
-      void showOrganizationPopup(orgnrs[0]!, latlng)
+      void showOrganizationPopup(orgnrs[0]!, latlng, undefined, hint)
     } else {
-      void showAddressPopup(orgnrs, latlng)
+      void showAddressPopup(orgnrs, latlng, hint)
     }
   }
 
@@ -633,6 +730,35 @@
     districtColorController = null
   }
 
+  function hideDistrictColorLayer() {
+    districtColorController?.hide()
+  }
+
+  function ensureBaseKommuner() {
+    if (!map || !geojson) return
+    if (geoLayer) {
+      geoLayer.bringToBack()
+      return
+    }
+    geoLayer = L.geoJSON(geojson, {
+      style: (feature) => styleKommuneFeature(feature as KommuneFeature),
+    }).addTo(map)
+  }
+
+  function prefetchDetailTiles() {
+    if (!map || !detailOrgTilesReady) return
+    const zoom = map.getZoom()
+    // Warm org tiles one Leaflet zoom before detail (and at detail).
+    if (zoom < settings.dotsDetailMinZoom - 2) return
+    const bakedMin =
+      vectorTilesManifest?.layers?.find((layer) => layer.name === 'organizations')?.minZoom ??
+      settings.dotsDetailMinZoom - 2
+    void prefetchOrganizationTiles(map.getBounds(), {
+      leafletZoom: Math.max(zoom, settings.dotsDetailMinZoom),
+      bakedMinZoom: bakedMin,
+    })
+  }
+
   function fylkerInBounds(): string[] {
     const fylker = new Set<string>()
     for (const kommunenummer of kommunerInBounds()) {
@@ -682,9 +808,8 @@
     if (!map) return
 
     const vectorMode = useVectorDotsController
-    // Keep MapLibre mounted during aggregate zoom (empty LOD) so z15 dots appear
-    // instantly. Grunnkretser use Leaflet district GeoJSON — more reliable than
-    // mixing PMTiles fill zoom bands with maplibre-gl-leaflet.
+    // Keep MapLibre mounted under aggregate zoom with *empty* LOD so address
+    // tiles warm. Grunnkretser stay on Leaflet district GeoJSON (reliable).
     const lodLayers = pmtilesLodReady ? aggregateLayersFromManifest(vectorTilesManifest) : []
     const useLod = lodLayers.length > 0
     const vectorUrl = vectorMode ? vectorTilesSourceUrl() : null
@@ -769,7 +894,9 @@
       next.webglUnavailable === current.webglUnavailable &&
       next.renderedFeatureCount === current.renderedFeatureCount &&
       next.statsApproximate === current.statsApproximate &&
+      next.statsLoading === current.statsLoading &&
       next.viewportSummary?.geocodedInBbox === current.viewportSummary?.geocodedInBbox &&
+      next.viewportSummary?.addressesInBbox === current.viewportSummary?.addressesInBbox &&
       next.viewportSummary?.ungeocodedInViewport === current.viewportSummary?.ungeocodedInViewport &&
       next.viewportSummary?.renderMode === current.viewportSummary?.renderMode
     ) {
@@ -780,6 +907,11 @@
   }
 
   function updateRenderedFeatureCount() {
+    // Only meaningful for address circles at detail zoom — LOD fills are not "prikker".
+    if (map && map.getZoom() < settings.dotsDetailMinZoom) {
+      updateDotsState({ renderedFeatureCount: 0 })
+      return
+    }
     const count = dotsController?.countRenderedFeatures?.() ?? 0
     updateDotsState({ renderedFeatureCount: count })
   }
@@ -792,6 +924,13 @@
     const bbox = mapBbox(map.getBounds())
     const token = ++summaryToken
 
+    // Never show stale/partial stats while recalculating.
+    updateDotsState({
+      statsLoading: true,
+      viewportSummary: null,
+      statsApproximate: false,
+    })
+
     try {
       const { summary, approximate } = await fetchViewportSummary(settings, {
         bbox,
@@ -801,6 +940,7 @@
       if (token !== summaryToken) return
 
       updateDotsState({
+        statsLoading: false,
         viewportSummary: summary,
         statsApproximate: approximate,
         geocoded: summary.geocodedInBbox,
@@ -812,6 +952,8 @@
     } catch (err) {
       if (token !== summaryToken) return
       updateDotsState({
+        statsLoading: false,
+        viewportSummary: null,
         message: err instanceof Error ? err.message : 'Kunne ikke hente statistikk for utsnittet',
       })
     }
@@ -902,16 +1044,13 @@
   }
 
   function applyVectorTilesState(options: { includeViewportSummary?: boolean } = {}) {
+    hideDistrictColorLayer()
     ensureDotsController()
     dotsController?.setVisible(true)
     applyDotFilters()
     dotsController?.setStale(false)
     dotsController?.bringToFront()
-    // Second paint after Leaflet zoom settles — GL overlay can lag one frame.
-    requestAnimationFrame(() => {
-      dotsController?.setVisible(true)
-      updateRenderedFeatureCount()
-    })
+    prefetchDetailTiles()
     updateDotsState({
       loading: false,
       phase: 'idle',
@@ -931,18 +1070,19 @@
     const zoom = map.getZoom()
     const atAggregateZoom = zoom < settings.dotsDetailMinZoom
 
+    // Primary aggregate: Leaflet district GeoJSON + warm MapLibre only when
+    // address PMTiles can paint at z15 (otherwise skip the GL overlay).
     if (atAggregateZoom && districtColorsReady) {
-      // Keep MapLibre warm (hidden) so z15 address dots appear immediately.
-      if (vectorTilesReady) {
+      if (detailOrgTilesReady) {
         ensureDotsController()
-        dotsController?.setVisible(false)
-      } else {
+        // Address circles self-gate via minzoom (Leaflet z15 → GL z14).
+        dotsController?.setVisible(true)
+        prefetchDetailTiles()
+      } else if (!useVectorDotsController) {
+        // No usable vector overlay for this filter/tile set — free GL if leftover.
         removeDotsController()
       }
-      if (geoLayer) {
-        geoLayer.remove()
-        geoLayer = null
-      }
+      ensureBaseKommuner()
       ensureDistrictColorLayer()
       updateDotsState({
         loading: false,
@@ -954,21 +1094,17 @@
       return
     }
 
+    // Fallback aggregate: PMTiles LOD fills when district GeoJSON is missing.
     if (atAggregateZoom && pmtilesLodReady) {
-      removeDistrictColorLayer()
-      if (geoLayer) {
-        geoLayer.remove()
-        geoLayer = null
-      }
+      hideDistrictColorLayer()
       applyVectorTilesState({ includeViewportSummary: true })
       return
     }
 
     if (atAggregateZoom) {
-      removeDistrictColorLayer()
+      hideDistrictColorLayer()
       removeDotsController()
-      renderBaseKommuner()
-      if (geoLayer) geoLayer.bringToBack()
+      ensureBaseKommuner()
       updateDotsState({
         loading: false,
         phase: 'idle',
@@ -979,10 +1115,9 @@
       return
     }
 
-    // Detail zoom: individual addresses
-    removeDistrictColorLayer()
-    renderBaseKommuner()
-    if (geoLayer) geoLayer.bringToBack()
+    // Detail zoom: hide districts (keep in memory), show address circles.
+    hideDistrictColorLayer()
+    ensureBaseKommuner()
 
     if (detailOrgTilesReady) {
       applyVectorTilesState({ includeViewportSummary: true })
@@ -1074,6 +1209,7 @@
 
   const DOTS_MOVE_RELOAD_DELAY_MS = 400
   const DOTS_FILTER_RELOAD_DELAY_MS = 300
+  let lastPrefetchAt = 0
 
   function scheduleDotsReload(delay = DOTS_FILTER_RELOAD_DELAY_MS) {
     if (settings.visualization !== 'dots' || orgFocusActive) return
@@ -1084,10 +1220,27 @@
   }
 
   function scheduleDotsReloadOnMove() {
+    // Warm address tiles immediately; do not wait for the debounced loadDots.
+    if (untrack(() => detailOrgTilesReady)) {
+      prefetchDetailTiles()
+    }
     scheduleDotsReload(DOTS_MOVE_RELOAD_DELAY_MS)
   }
 
+  function schedulePrefetchDuringMove() {
+    if (!untrack(() => detailOrgTilesReady) || !map) return
+    const zoom = map.getZoom()
+    if (zoom < settings.dotsDetailMinZoom - 2) return
+    const now = performance.now()
+    if (now - lastPrefetchAt < 120) return
+    lastPrefetchAt = now
+    prefetchDetailTiles()
+  }
+
   function scheduleDotsReloadOnZoom() {
+    if (untrack(() => detailOrgTilesReady)) {
+      prefetchDetailTiles()
+    }
     scheduleDotsReload(0)
   }
 
@@ -1265,6 +1418,7 @@
     }).addTo(map)
 
     map.on('moveend', scheduleDotsReloadOnMove)
+    map.on('move', schedulePrefetchDuringMove)
     map.on('zoomend', handleMapZoomEnd)
 
     const resizeObserver = new ResizeObserver(() => {
@@ -1278,6 +1432,7 @@
       clearTimeout(boundsTimer)
       resizeObserver.disconnect()
       map?.off('moveend', scheduleDotsReloadOnMove)
+      map?.off('move', schedulePrefetchDuringMove)
       map?.off('zoomend', handleMapZoomEnd)
       removeDistrictColorLayer()
       removeDotsController()
@@ -1400,13 +1555,21 @@
     {#if orgFocusActive}
       Organisasjon · OpenStreetMap
     {:else if settings.visualization === 'dots'}
-      {totalVisible.toLocaleString('nb-NO')} geokodede i utsnittet
-      {#if dotsState.viewportSummary && dotsState.viewportSummary.ungeocodedInViewport > 0}
-        · {dotsState.viewportSummary.ungeocodedInViewport.toLocaleString('nb-NO')} uten kartkoordinat
+      {#if dotsState.statsLoading || totalVisible == null}
+        Beregner adresser…
+      {:else}
+        {totalVisible.toLocaleString('nb-NO')} adresser i utsnittet
+        {#if dotsState.viewportSummary && dotsState.viewportSummary.geocodedInBbox !== totalVisible}
+          · {dotsState.viewportSummary.geocodedInBbox.toLocaleString('nb-NO')} org.
+        {/if}
+        {#if dotsState.viewportSummary && dotsState.viewportSummary.ungeocodedInViewport > 0}
+          · {dotsState.viewportSummary.ungeocodedInViewport.toLocaleString('nb-NO')} uten kartkoordinat
+        {/if}
       {/if}
       · {dotsSourceLabel}
     {:else}
-      {totalVisible.toLocaleString('nb-NO')} organisasjoner i visningen
+      {typeof totalVisible === 'number' ? totalVisible.toLocaleString('nb-NO') : '—'} organisasjoner i
+      visningen
     {/if}
   </div>
 </div>
