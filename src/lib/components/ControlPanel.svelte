@@ -294,10 +294,12 @@
         <span class="stat-label">Adresser i utsnittet</span>
       </div>
     {/if}
-    <div class="stat">
-      <span class="stat-value">{isFylkeLevel ? fylker.length : kommuner.length}</span>
-      <span class="stat-label">{isFylkeLevel ? 'Fylker' : 'Kommuner'}</span>
-    </div>
+    {#if !isDotsView}
+      <div class="stat">
+        <span class="stat-value">{isFylkeLevel ? fylker.length : kommuner.length}</span>
+        <span class="stat-label">{isFylkeLevel ? 'Fylker' : 'Kommuner'}</span>
+      </div>
+    {/if}
   </section>
 
   {#if loading.loading}

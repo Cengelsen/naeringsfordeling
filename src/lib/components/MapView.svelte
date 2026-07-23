@@ -31,6 +31,7 @@
     lookupOrganizationLocal,
     fetchOrganizationPoints,
     fetchViewportSummary,
+    fetchDistrictStats,
     limitForZoom,
     seedOrganizationDetail,
   } from '../services/api'
@@ -64,6 +65,7 @@
     type DistrictColorsManifest,
   } from '../map/districtColors'
   import { createDotsLayer, type DotsLayerController } from '../map/dotsLayer'
+  import { forEachPathLayer } from '../map/pathLayers'
   import Legend from './Legend.svelte'
   import OrgTypeLegend from './OrgTypeLegend.svelte'
 
@@ -796,6 +798,7 @@
       selectedKommune: settings.selectedKommune,
     })
     districtColorController.show()
+    districtColorController.bringToFront()
 
     // Prefetch grunnkretser for the visible fylker while still on kommune zoom.
     const layer = activeDistrictLayer(districtColorsManifest, map.getZoom())
@@ -1282,39 +1285,105 @@
     }
   }
 
-  function bindHoverHighlight(layer: L.Layer) {
-    layer.on({
+  function formatOrgTypeBreakdownFromRecord(byOrgType: Record<string, number>): string {
+    const lines = Object.entries(byOrgType)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 6)
+      .map(([kode, count]) => {
+        const label = orgForms.find((form) => form.kode === kode)?.beskrivelse ?? kode
+        return `${label}: ${count.toLocaleString('nb-NO')}`
+      })
+    if (lines.length === 0) return ''
+    return `<br><br>${lines.join('<br>')}`
+  }
+
+  async function showDistrictStatsPopup(options: {
+    level: 'fylke' | 'kommune'
+    districtId: string
+    label: string
+    latlng: L.LatLng
+    fallbackTotal: number
+  }) {
+    if (!map) return
+
+    const levelLabel = options.level === 'fylke' ? 'Fylke' : 'Kommune'
+    const popup = L.popup({ maxWidth: 320 })
+      .setLatLng(options.latlng)
+      .setContent(`<strong>${options.label}</strong><br>Laster…`)
+      .openOn(map)
+
+    try {
+      const stats = await fetchDistrictStats(options.level, options.districtId, settings)
+      const total = stats.total > 0 ? stats.total : options.fallbackTotal
+      const breakdown = formatOrgTypeBreakdownFromRecord(stats.byOrgType)
+      popup.setContent(
+        `<strong>${options.label}</strong><br>
+         ${levelLabel} ${options.districtId}<br>
+         <strong>${total.toLocaleString('nb-NO')}</strong> organisasjoner${breakdown}`,
+      )
+    } catch {
+      popup.setContent(
+        `<strong>${options.label}</strong><br>
+         ${levelLabel} ${options.districtId}<br>
+         <strong>${options.fallbackTotal.toLocaleString('nb-NO')}</strong> organisasjoner`,
+      )
+    }
+  }
+
+  function bindHoverHighlight(path: L.Path, featureLayer: L.Layer) {
+    path.on({
       mouseover: (e) => {
         const target = e.target as L.Path
-        target.setStyle({ weight: 2.5, color: '#0ea5e9', opacity: 1 })
+        target.setStyle({ weight: 2.5, color: '#0ea5e9', opacity: 1, fillOpacity: 0.9 })
         target.bringToFront()
+        map?.getContainer().style.setProperty('cursor', 'pointer')
       },
-      mouseout: (e) => {
-        geoLayer?.resetStyle(e.target as L.Layer)
+      mouseout: () => {
+        geoLayer?.resetStyle(featureLayer)
+        map?.getContainer().style.removeProperty('cursor')
       },
+    })
+  }
+
+  function bindDistrictLayerEvents(
+    layer: L.Layer,
+    options: {
+      level: 'fylke' | 'kommune'
+      districtId: string
+      label: string
+      fallbackTotal: number
+    },
+  ) {
+    forEachPathLayer(layer, (path) => {
+      path.on('click', (event) => {
+        L.DomEvent.stopPropagation(event)
+        void showDistrictStatsPopup({
+          ...options,
+          latlng: event.latlng,
+        })
+      })
+      bindHoverHighlight(path, layer)
     })
   }
 
   function bindKommuneEvents(layer: L.Layer, feature: KommuneFeature) {
     const props = feature.properties
-    const count = kommuneCount(props.kommunenummer)
-    layer.bindPopup(
-      `<strong>${props.kommunenavn ?? props.name}</strong><br/>
-       Kommune ${props.kommunenummer}<br/>
-       <strong>${count.toLocaleString('nb-NO')}</strong> organisasjoner`,
-    )
-    bindHoverHighlight(layer)
+    bindDistrictLayerEvents(layer, {
+      level: 'kommune',
+      districtId: props.kommunenummer,
+      label: props.kommunenavn ?? props.name ?? props.kommunenummer,
+      fallbackTotal: kommuneCount(props.kommunenummer),
+    })
   }
 
   function bindFylkeEvents(layer: L.Layer, feature: FylkeFeature) {
     const props = feature.properties
-    const count = fylkeCount(props.fylkesnummer)
-    layer.bindPopup(
-      `<strong>${props.fylkesnavn}</strong><br/>
-       Fylke ${props.fylkesnummer}<br/>
-       <strong>${count.toLocaleString('nb-NO')}</strong> organisasjoner`,
-    )
-    bindHoverHighlight(layer)
+    bindDistrictLayerEvents(layer, {
+      level: 'fylke',
+      districtId: props.fylkesnummer,
+      label: props.fylkesnavn,
+      fallbackTotal: fylkeCount(props.fylkesnummer),
+    })
   }
 
   function renderChoropleth() {

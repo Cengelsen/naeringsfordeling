@@ -8,6 +8,7 @@ import {
   type DistrictColorFeature,
   type DistrictColorsManifest,
 } from './districtColors'
+import { forEachPathLayer } from './pathLayers'
 
 export interface DistrictColorLayerOptions {
   onFeatureClick: (feature: DistrictColorFeature, latlng: L.LatLng) => void
@@ -28,6 +29,7 @@ export interface DistrictColorController {
   prefetchUpcoming(fylker: string[]): void
   show(): void
   hide(): void
+  bringToFront(): void
   remove(): void
 }
 
@@ -202,21 +204,25 @@ export function createDistrictColorLayer(
       style: (feature) => styleFeature(feature as DistrictColorFeature),
       onEachFeature: (feature, layer) => {
         const typed = feature as DistrictColorFeature
-        layer.on('click', (event: L.LeafletMouseEvent) => {
-          L.DomEvent.stopPropagation(event)
-          options.onFeatureClick(typed, event.latlng)
-        })
-        layer.on({
-          mouseover: (event: L.LeafletMouseEvent) => {
-            const target = event.target as L.Path
-            if (!featureVisible(typed)) return
-            target.setStyle({ weight: 2, opacity: 1, fillOpacity: 0.65 })
-            if ('bringToFront' in target) target.bringToFront()
-          },
-          mouseout: (event: L.LeafletMouseEvent) => {
-            const target = event.target as L.Path
-            target.setStyle(styleFeature(typed))
-          },
+        forEachPathLayer(layer, (path) => {
+          path.on('click', (event: L.LeafletMouseEvent) => {
+            L.DomEvent.stopPropagation(event)
+            options.onFeatureClick(typed, event.latlng)
+          })
+          path.on({
+            mouseover: (event: L.LeafletMouseEvent) => {
+              if (!featureVisible(typed)) return
+              const target = event.target as L.Path
+              target.setStyle({ weight: 2, opacity: 1, fillOpacity: 0.65 })
+              target.bringToFront()
+              map.getContainer().style.cursor = 'pointer'
+            },
+            mouseout: (event: L.LeafletMouseEvent) => {
+              const target = event.target as L.Path
+              target.setStyle(styleFeature(typed))
+              map.getContainer().style.cursor = ''
+            },
+          })
         })
       },
     }).addTo(root)
@@ -251,6 +257,10 @@ export function createDistrictColorLayer(
       visible = false
       // Keep GeoJSON in memory so zooming back to aggregate is instant.
       root.remove()
+    },
+    bringToFront() {
+      const candidate = root as L.Layer & { bringToFront?: () => void }
+      candidate.bringToFront?.()
     },
     remove() {
       visible = false

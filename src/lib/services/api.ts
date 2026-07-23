@@ -290,6 +290,48 @@ function aggregateMunicipalityCounts(
     .sort((a, b) => a.kommunenummer.localeCompare(b.kommunenummer))
 }
 
+function aggregateDistrictStats(
+  rows: MunicipalityBreakdownRow[],
+  filters: MapFilters,
+  level: 'fylke' | 'kommune',
+  districtId: string,
+): { total: number; byOrgType: Record<string, number> } {
+  const byOrgType: Record<string, number> = {}
+  let total = 0
+
+  for (const row of rows) {
+    if (!breakdownRowMatchesFilters(row, filters)) continue
+    const rowDistrictId =
+      level === 'fylke' ? row.kommunenummer.slice(0, 2) : row.kommunenummer
+    if (rowDistrictId !== districtId) continue
+    byOrgType[row.org_type] = (byOrgType[row.org_type] ?? 0) + row.count
+    total += row.count
+  }
+
+  return { total, byOrgType }
+}
+
+export interface DistrictStats {
+  total: number
+  byOrgType: Record<string, number>
+}
+
+export async function fetchDistrictStats(
+  level: 'fylke' | 'kommune',
+  districtId: string,
+  filters: MapFilters,
+): Promise<DistrictStats> {
+  if (STATIC_API) {
+    const rows = await loadMunicipalityBreakdown()
+    return aggregateDistrictStats(rows, filters, level, districtId)
+  }
+
+  const params = filtersToParams(filters)
+  params.set('level', level)
+  params.set('id', districtId)
+  return apiFetch<DistrictStats>(`/api/district-stats?${params.toString()}`)
+}
+
 function searchStaticOrganizations(
   query: string,
   limit: number,

@@ -239,6 +239,44 @@ app.get('/api/municipality-counts', (c) => {
   })
 })
 
+app.get('/api/district-stats', (c) => {
+  const level = c.req.query('level')
+  const districtId = c.req.query('id')
+  if (level !== 'fylke' && level !== 'kommune') {
+    return c.json({ error: 'level must be fylke or kommune' }, 400)
+  }
+  if (!districtId) {
+    return c.json({ error: 'id query parameter is required' }, 400)
+  }
+
+  const filters = parseFilters(c.req)
+  const { conditions, params } = buildFilterQuery(filters, false)
+  appendAreaFilters(filters, conditions, params)
+
+  const kommuneExpr = effectiveKommunenummerExpr()
+  const districtExpr = level === 'fylke' ? `substr(${kommuneExpr}, 1, 2)` : kommuneExpr
+  conditions.push(`${districtExpr} = ?`)
+  params.push(districtId)
+
+  const rows = db
+    .prepare(
+      `SELECT org_type, COUNT(*) AS count
+       FROM organizations
+       WHERE ${conditions.join(' AND ')} AND ${kommuneExpr} IS NOT NULL
+       GROUP BY org_type`,
+    )
+    .all(...params) as Array<{ org_type: string; count: number }>
+
+  const byOrgType: Record<string, number> = {}
+  let total = 0
+  for (const row of rows) {
+    byOrgType[row.org_type] = row.count
+    total += row.count
+  }
+
+  return c.json({ total, byOrgType })
+})
+
 app.get('/api/viewport-summary', (c) => {
   const filters = parseFilters(c.req)
   if (!filters.bbox) {
