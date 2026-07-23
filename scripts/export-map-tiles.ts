@@ -145,9 +145,13 @@ async function main() {
   const total = countGeocodedPoints(db)
   const orgTypes = collectOrgTypes(db)
 
-  console.log('Exporting district color GeoJSON (predefined geography)…')
-  const districtColors = exportDistrictColorAssets(db, join(outputDir, 'districts'))
-  console.log(`  Wrote ${districtColors.manifestPath}`)
+  if (process.env.SKIP_DISTRICT_COLORS === '1') {
+    console.log('Skipping district color GeoJSON (SKIP_DISTRICT_COLORS=1)')
+  } else {
+    console.log('Exporting district color GeoJSON (predefined geography)…')
+    const districtColors = exportDistrictColorAssets(db, join(outputDir, 'districts'))
+    console.log(`  Wrote ${districtColors.manifestPath}`)
+  }
 
   const bandMbtiles: string[] = []
   const tempFiles: string[] = []
@@ -192,6 +196,9 @@ async function main() {
       continue
     }
 
+    // Keep every address at detail zoom. maplibre-gl-leaflet uses GL zoom =
+    // Leaflet zoom - 1, so tips start at DETAIL_MIN_ZOOM - 1 (see lod-grid).
+    // Do not use --drop-densest-as-needed: it emptied dense urban tiles.
     const points = await exportLayerMbtiles(
       tempPrefix,
       'organizations',
@@ -202,7 +209,7 @@ async function main() {
         const count = exportPointsNdjson(db, stream)
         console.log(`  ${spec.layer}: ${count.toLocaleString('nb-NO')} individual addresses`)
       },
-      ['--drop-densest-as-needed', '--coalesce-densest-as-needed', '--maximum-tile-bytes=2000000'],
+      ['--no-tile-size-limit', '--drop-rate=1', `--base-zoom=${spec.minZoom}`],
     )
     tempFiles.push(points.ndjsonPath, points.mbtilesPath)
     bandMbtiles.push(points.mbtilesPath)
@@ -247,6 +254,7 @@ async function main() {
         format: 'pmtiles',
         path: '/data/points.pmtiles',
         layers,
+        preserveAllPoints: true,
         filters: {
           excludeKonkurs: true,
           excludeUnderAvvikling: true,

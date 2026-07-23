@@ -20,6 +20,8 @@ export interface VectorTilesManifest {
   path: string
   orgTypes: string[]
   layers?: VectorTilesLayerSpec[]
+  /** True when tippecanoe kept every address (`--drop-rate=1`). */
+  preserveAllPoints?: boolean
   filters: {
     excludeKonkurs: boolean
     excludeUnderAvvikling: boolean
@@ -72,14 +74,32 @@ export function pointsLayerFromManifest(
   manifest: VectorTilesManifest | null | undefined,
 ): VectorTilesLayerSpec | null {
   const spec = manifest?.layers?.find((layer) => layer.name === VECTOR_TILES_LAYER)
+  // maplibre-gl-leaflet: GL zoom = Leaflet zoom - 1
+  const glMinZoom = Math.max(0, DETAIL_MIN_ZOOM - 1)
   if (spec) {
-    // Clamp so older manifests (z16+) still show addresses from DETAIL_MIN_ZOOM.
-    return { ...spec, minZoom: Math.min(spec.minZoom, DETAIL_MIN_ZOOM) }
+    return { ...spec, minZoom: Math.min(spec.minZoom, glMinZoom), maxZoom: 24 }
   }
   if (manifest?.layer) {
-    return { name: manifest.layer, minZoom: DETAIL_MIN_ZOOM, maxZoom: 24 }
+    return { name: manifest.layer, minZoom: glMinZoom, maxZoom: 24 }
   }
   return null
+}
+
+/**
+ * True when the organizations PMTiles band includes the MapLibre zoom used at
+ * Leaflet detail (GL = Leaflet − 1) and tippecanoe did not rate-drop points.
+ * Older archives baked from z15 and/or used densest/rate dropping.
+ */
+export function orgDetailTilesCoverLeafletZoom(
+  manifest: VectorTilesManifest | null | undefined,
+  leafletDetailMinZoom: number = DETAIL_MIN_ZOOM,
+): boolean {
+  if (!manifest?.preserveAllPoints) return false
+  const bakedMin =
+    manifest.layers?.find((layer) => layer.name === VECTOR_TILES_LAYER)?.minZoom ??
+    (manifest.layer === VECTOR_TILES_LAYER ? leafletDetailMinZoom : null)
+  if (bakedMin == null) return false
+  return bakedMin <= Math.max(0, leafletDetailMinZoom - 1)
 }
 
 export async function loadVectorTilesManifest(): Promise<VectorTilesManifest | null> {

@@ -27,6 +27,8 @@
     "export-points": "tsx scripts/export-point-tiles.ts",
     "export-map-tiles": "tsx scripts/export-map-tiles.ts",
     "export-district-colors": "tsx scripts/export-district-colors.ts",
+    "rebuild-org-tiles": "tsx scripts/rebuild-org-tiles.ts",
+    "rebuild-org-tiles:norway": "DATABASE_PATH=data/norway.db tsx scripts/rebuild-org-tiles.ts",
     "export-map-tiles:norway": "DATABASE_PATH=data/norway.db tsx scripts/export-map-tiles.ts",
     "export-vector-tiles": "tsx scripts/export-map-tiles.ts",
     "download-db": "bash scripts/download-db.sh",

@@ -198,10 +198,10 @@ export function createMaplibreDotsLayer(
   const vectorMode = Boolean(options.vectorTilesUrl)
   const lodLayers = options.lodLayers ?? []
   const pointsLayerSpec = options.pointsLayer ?? null
-  // Show address points as soon as Leaflet reaches detail zoom. Keep minzoom at
-  // dotsDetailMinZoom so aggregate zoom still hides them while MapLibre stays warm.
-  const pointsMinZoom = options.dotsDetailMinZoom
-  const pointsMaxZoom = pointsLayerSpec?.maxZoom ?? 24
+  // maplibre-gl-leaflet drives the GL map at LeafletZoom - 1. So Leaflet z15 →
+  // MapLibre z14; layer minzoom must use that offset or dots never appear at z15.
+  const pointsMinZoom = Math.max(0, options.dotsDetailMinZoom - 1)
+  const pointsMaxZoom = 24
   const pointsSourceLayer = pointsLayerSpec?.name ?? VECTOR_TILES_LAYER
   let ready = false
   let styleReady = false
@@ -789,8 +789,20 @@ export function createMaplibreDotsLayer(
       if (ready) applyOpacity()
     },
     setVisible(visible) {
-      container.style.visibility = visible ? 'visible' : 'hidden'
+      // Keep the canvas laid out while "hidden". visibility:hidden / display:none
+      // zeroes the WebGL backing store; after that, dots often never reappear.
       container.style.opacity = visible ? '1' : '0'
+      container.style.visibility = 'visible'
+      if (visible) {
+        requestAnimationFrame(() => {
+          try {
+            mlMap.resize()
+            mlMap.triggerRepaint()
+          } catch {
+            // ignore if GL context is mid-teardown
+          }
+        })
+      }
     },
     bringToFront() {
       const pane = glLayer.getPane()

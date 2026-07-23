@@ -44,6 +44,7 @@
   import {
     aggregateLayersFromManifest,
     lodTilesAvailable,
+    orgDetailTilesCoverLeafletZoom,
     pointsLayerFromManifest,
     probeVectorTiles,
     vectorTilesSourceUrl,
@@ -123,6 +124,16 @@
       canUseStaticTiles(settings),
   )
 
+  /**
+   * Org PMTiles cover Leaflet detail only when baked from GL zoom (Leaflet−1).
+   * Older archives (organizations minZoom 15) miss Leaflet z15 and were also
+   * tippecanoe densest-dropped — fall back to the live API for those.
+   */
+  const detailOrgTilesReady = $derived(
+    vectorTilesReady &&
+      orgDetailTilesCoverLeafletZoom(vectorTilesManifest, settings.dotsDetailMinZoom),
+  )
+
   /** PMTiles aggregate layers — used only when district GeoJSON is unavailable. */
   const pmtilesLodReady = $derived(
     vectorTilesReady && !districtColorsReady && lodTilesAvailable(vectorTilesManifest),
@@ -130,6 +141,11 @@
 
   const aggregateZoomActive = $derived(
     settings.visualization === 'dots' && mapZoom < settings.dotsDetailMinZoom,
+  )
+
+  /** Use vector source for the dots controller (warm LOD / detail PMTiles). */
+  const useVectorDotsController = $derived(
+    vectorTilesReady && (aggregateZoomActive || detailOrgTilesReady),
   )
 
   const currentDetailLevel = $derived(
@@ -144,7 +160,7 @@
   const dotsSourceLabel = $derived.by(() => {
     if (districtColorsReady && aggregateZoomActive) return 'distriktsfliser'
     if (pmtilesLodReady && aggregateZoomActive) return 'vektorfliser (LOD)'
-    if (vectorTilesReady) return 'vektorfliser'
+    if (detailOrgTilesReady) return 'vektorfliser'
     if (webglUnavailable) return 'Leaflet-fallback'
     return 'SQLite-database'
   })
@@ -175,7 +191,7 @@
   const totalVisible = $derived(
     settings.visualization === 'dots'
       ? (dotsState.viewportSummary?.geocodedInBbox ??
-        (!aggregateZoomActive && vectorTilesReady
+        (!aggregateZoomActive && detailOrgTilesReady
           ? (dotsState.renderedFeatureCount ?? 0)
           : filterPointsByMapFilters(allPoints, settings).length))
       : counts.reduce((sum, c) => sum + c.count, 0),
@@ -665,7 +681,7 @@
   function ensureDotsController() {
     if (!map) return
 
-    const vectorMode = vectorTilesReady
+    const vectorMode = useVectorDotsController
     // Keep MapLibre mounted during aggregate zoom (empty LOD) so z15 dots appear
     // instantly. Grunnkretser use Leaflet district GeoJSON — more reliable than
     // mixing PMTiles fill zoom bands with maplibre-gl-leaflet.
@@ -805,6 +821,7 @@
     const visiblePoints = filterPointsByMapFilters(nextPoints, settings)
     allPoints = nextPoints
     points = visiblePoints
+    dotsController?.setVisible(true)
     dotsController?.setPoints(visiblePoints)
     applyDotFilters()
     dotsController?.setStale(false)
@@ -834,7 +851,7 @@
       return
     }
     applyDotFilters()
-    if (untrack(() => vectorTilesReady)) {
+    if (untrack(() => detailOrgTilesReady)) {
       updateRenderedFeatureCount()
       return
     }
@@ -890,6 +907,11 @@
     applyDotFilters()
     dotsController?.setStale(false)
     dotsController?.bringToFront()
+    // Second paint after Leaflet zoom settles — GL overlay can lag one frame.
+    requestAnimationFrame(() => {
+      dotsController?.setVisible(true)
+      updateRenderedFeatureCount()
+    })
     updateDotsState({
       loading: false,
       phase: 'idle',
@@ -962,12 +984,13 @@
     renderBaseKommuner()
     if (geoLayer) geoLayer.bringToBack()
 
-    if (vectorTilesReady) {
+    if (detailOrgTilesReady) {
       applyVectorTilesState({ includeViewportSummary: true })
       return
     }
 
     ensureDotsController()
+    dotsController?.setVisible(true)
 
     const targetKommuner = kommunerInBounds()
     const bounds = map.getBounds()
@@ -1296,7 +1319,7 @@
     dotsCache.clear()
     if (
       dotsController &&
-      dotsControllerUsesVector !== vectorTilesReady
+      dotsControllerUsesVector !== useVectorDotsController
     ) {
       removeDotsController()
     }
