@@ -389,19 +389,31 @@ function ensureFts(db: Database.Database) {
   rebuildFts(db)
 }
 
+function ftsIndexIsSearchable(db: Database.Database): boolean {
+  const orgCount = (
+    db.prepare('SELECT COUNT(*) AS count FROM organizations').get() as { count: number }
+  ).count
+  if (orgCount === 0) return true
+
+  try {
+    const hit = db
+      .prepare('SELECT 1 FROM organizations_fts WHERE organizations_fts MATCH ? LIMIT 1')
+      .get('a*') as { 1: number } | undefined
+    return hit != null
+  } catch {
+    return false
+  }
+}
+
 function ensureFtsPopulated(db: Database.Database) {
-  const ftsCount = (
-    db.prepare('SELECT COUNT(*) AS count FROM organizations_fts').get() as { count: number }
+  if (ftsIndexIsSearchable(db)) return
+
+  const orgCount = (
+    db.prepare('SELECT COUNT(*) AS count FROM organizations').get() as { count: number }
   ).count
 
-  if (ftsCount === 0) {
-    const orgCount = (
-      db.prepare('SELECT COUNT(*) AS count FROM organizations').get() as { count: number }
-    ).count
-
-    if (orgCount > 0) {
-      db.exec(`INSERT INTO organizations_fts(organizations_fts) VALUES('rebuild')`)
-    }
+  if (orgCount > 0) {
+    db.exec(`INSERT INTO organizations_fts(organizations_fts) VALUES('rebuild')`)
   }
 }
 

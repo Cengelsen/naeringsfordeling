@@ -19,6 +19,6 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ['dist/', 'node_modules/', '.svelte-kit/', 'public/sw.js'],
+    ignores: ['dist/', 'node_modules/', '.svelte-kit/'],
   },
 )

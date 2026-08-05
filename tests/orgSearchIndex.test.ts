@@ -38,6 +38,18 @@ describe('searchOrgSearchIndex', () => {
     expect(results.every((r) => r.navn.toLowerCase().includes('bergen'))).toBe(true)
   })
 
+  it('finds by word within name', () => {
+    const results = searchOrgSearchIndex(index, 'Fiske', 10)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.navn).toBe('Bergen Fiskehandel AS')
+  })
+
+  it('finds by word prefix within name', () => {
+    const results = searchOrgSearchIndex(index, 'fiskehandel', 10)
+    expect(results).toHaveLength(1)
+    expect(results[0]?.navn).toBe('Bergen Fiskehandel AS')
+  })
+
   it('finds by orgnr', () => {
     const results = searchOrgSearchIndex(index, '123456789', 10)
     expect(results).toHaveLength(1)

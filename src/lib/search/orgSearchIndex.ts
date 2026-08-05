@@ -7,15 +7,30 @@ export interface OrgSearchIndex {
   orgnrSorted: OrganizationSearchHit[]
   byOrgnr: Map<string, OrganizationSearchHit>
   nameBuckets: Map<string, number[]>
+  wordBuckets: Map<string, number[]>
 }
 
-function nameBucketKey(navnLower: string): string {
-  return navnLower.slice(0, 3).padEnd(3, ' ')
+function nameBucketKey(text: string): string {
+  return text.slice(0, 3).padEnd(3, ' ')
+}
+
+function addToBucket(buckets: Map<string, number[]>, key: string, index: number) {
+  const bucket = buckets.get(key)
+  if (bucket) {
+    bucket.push(index)
+  } else {
+    buckets.set(key, [index])
+  }
+}
+
+function nameWords(navnLower: string): string[] {
+  return navnLower.split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 2)
 }
 
 export function buildOrgSearchIndex(rows: OrganizationSearchHit[]): OrgSearchIndex {
   const navnLower = new Array<string>(rows.length)
   const nameBuckets = new Map<string, number[]>()
+  const wordBuckets = new Map<string, number[]>()
   const byOrgnr = new Map<string, OrganizationSearchHit>()
 
   for (let index = 0; index < rows.length; index++) {
@@ -24,12 +39,9 @@ export function buildOrgSearchIndex(rows: OrganizationSearchHit[]): OrgSearchInd
     navnLower[index] = lower
     byOrgnr.set(normalizeOrgnr(row.orgnr), row)
 
-    const key = nameBucketKey(lower)
-    const bucket = nameBuckets.get(key)
-    if (bucket) {
-      bucket.push(index)
-    } else {
-      nameBuckets.set(key, [index])
+    addToBucket(nameBuckets, nameBucketKey(lower), index)
+    for (const word of nameWords(lower)) {
+      addToBucket(wordBuckets, nameBucketKey(word), index)
     }
   }
 
@@ -39,6 +51,7 @@ export function buildOrgSearchIndex(rows: OrganizationSearchHit[]): OrgSearchInd
     orgnrSorted: [...rows].sort((left, right) => left.orgnr.localeCompare(right.orgnr)),
     byOrgnr,
     nameBuckets,
+    wordBuckets,
   }
 }
 
@@ -66,18 +79,35 @@ function searchOrgnrPrefix(
   return results
 }
 
-function nameBucketCandidates(index: OrgSearchIndex, lower: string): number[] {
+function collectBucketCandidates(
+  buckets: Map<string, number[]>,
+  lower: string,
+  seen: Set<number>,
+) {
   if (lower.length >= 3) {
-    return index.nameBuckets.get(nameBucketKey(lower)) ?? []
+    const indices = buckets.get(nameBucketKey(lower))
+    if (indices) {
+      for (const index of indices) seen.add(index)
+    }
+    return
   }
 
-  const candidates: number[] = []
-  for (const [key, indices] of index.nameBuckets) {
+  for (const [key, indices] of buckets) {
     if (key.startsWith(lower)) {
-      candidates.push(...indices)
+      for (const index of indices) seen.add(index)
     }
   }
-  return candidates
+}
+
+function nameBucketCandidates(index: OrgSearchIndex, lower: string): number[] {
+  const seen = new Set<number>()
+  collectBucketCandidates(index.nameBuckets, lower, seen)
+
+  for (const word of nameWords(lower)) {
+    collectBucketCandidates(index.wordBuckets, word, seen)
+  }
+
+  return [...seen]
 }
 
 function collectNameMatches(

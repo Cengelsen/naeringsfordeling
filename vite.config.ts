@@ -1,21 +1,6 @@
-import fs from 'node:fs'
 import path from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
-
-function swCacheVersion(): Plugin {
-  return {
-    name: 'sw-cache-version',
-    writeBundle(options) {
-      const swPath = path.join(options.dir ?? 'dist', 'sw.js')
-      if (fs.existsSync(swPath)) {
-        let content = fs.readFileSync(swPath, 'utf-8')
-        content = content.replace('__BUILD_TIMESTAMP__', Date.now().toString())
-        fs.writeFileSync(swPath, content)
-      }
-    },
-  }
-}
 
 function pmtilesHeaders(): Plugin {
   return {
@@ -41,10 +26,26 @@ function pmtilesHeaders(): Plugin {
   }
 }
 
+const cacheVersion = Date.now().toString()
+
 // https://vite.dev/config/
 export default defineConfig({
   base: process.env.GITHUB_PAGES === 'true' ? (process.env.VITE_BASE ?? '/') : '/',
-  plugins: [svelte(), pmtilesHeaders(), swCacheVersion()],
+  define: {
+    __CACHE_VERSION__: JSON.stringify(cacheVersion),
+  },
+  plugins: [svelte(), pmtilesHeaders()],
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(import.meta.dirname, 'index.html'),
+        sw: path.resolve(import.meta.dirname, 'src/sw.ts'),
+      },
+      output: {
+        entryFileNames: (chunk) => (chunk.name === 'sw' ? 'sw.js' : 'assets/[name]-[hash].js'),
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': {

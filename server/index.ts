@@ -414,6 +414,10 @@ app.get('/api/organizations/search', (c) => {
        LIMIT ?`,
     ).all(`${ftsQuery}*`, limit) as SearchRow[]
   } catch {
+    rows = []
+  }
+
+  if (rows.length === 0) {
     const pattern = `%${raw.replace(/[%_]/g, '')}%`
     rows = cachedPrepare(
       `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
