@@ -305,10 +305,21 @@ function rebuildTableIfNeeded(db: Database.Database, tableName: string, newDdl: 
 
   if (!needsRebuild) return
 
+  const oldColumns = (
+    db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
+  ).map((c) => c.name)
+
   const tmpName = `${tableName}__rebuild_tmp`
   db.exec(`ALTER TABLE ${tableName} RENAME TO ${tmpName}`)
   db.exec(newDdl)
-  db.exec(`INSERT OR IGNORE INTO ${tableName} SELECT * FROM ${tmpName}`)
+
+  const newColumns = (
+    db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>
+  ).map((c) => c.name)
+
+  const shared = oldColumns.filter((c) => newColumns.includes(c))
+  const cols = shared.join(', ')
+  db.exec(`INSERT OR IGNORE INTO ${tableName} (${cols}) SELECT ${cols} FROM ${tmpName}`)
   db.exec(`DROP TABLE ${tmpName}`)
 }
 
