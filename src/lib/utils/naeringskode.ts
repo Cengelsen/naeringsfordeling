@@ -101,4 +101,4 @@ export function naeringskodeSectionLabel(section: string, fallbackLabel?: string
   return section
 }
 
-export { sectionMatchesFilter } from '../../shared/naeringskode.js'
+export { sectionMatchesFilter } from '../../../shared/naeringskode'

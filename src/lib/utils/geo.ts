@@ -92,9 +92,9 @@ export function buildFylkeGeojson(
   return collection
 }
 
-import { extendBounds, ringBounds, type GeoBounds } from '../../shared/geo-bounds.js'
-export { geoBoundsIntersects, geoBoundsCenter, extendBounds, ringBounds } from '../../shared/geo-bounds.js'
-export type { GeoBounds } from '../../shared/geo-bounds.js'
+import { extendBounds, ringBounds, type GeoBounds } from '../../../shared/geo-bounds'
+export { geoBoundsIntersects, geoBoundsCenter, extendBounds, ringBounds } from '../../../shared/geo-bounds'
+export type { GeoBounds } from '../../../shared/geo-bounds'
 
 export function featureGeoBounds(feature: KommuneFeature): GeoBounds | null {
   const geometry = feature.geometry

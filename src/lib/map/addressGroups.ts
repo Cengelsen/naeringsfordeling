@@ -1,7 +1,7 @@
 import type { OrganizationPoint } from '../types'
 
-export { LOCATION_PRECISION, locationKey, addressGroupKey } from '../../shared/address-groups.js'
-import { addressGroupKey } from '../../shared/address-groups.js'
+export { LOCATION_PRECISION, locationKey, addressGroupKey } from '../../../shared/address-groups'
+import { addressGroupKey } from '../../../shared/address-groups'
 
 export interface LocationGroup {
   lat: number

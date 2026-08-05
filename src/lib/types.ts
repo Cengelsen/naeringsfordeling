@@ -17,8 +17,8 @@ export interface BrregAddress {
   landkode?: string
 }
 
-export type { MapFilters, EntityKind } from '../../shared/types.js'
-import type { MapFilters } from '../../shared/types.js'
+export type { MapFilters, EntityKind } from '../../shared/types'
+import type { MapFilters } from '../../shared/types'
 
 export type VisualizationMode = 'choropleth' | 'dots'
 export type DistrictLevel = 'fylke' | 'kommune'
