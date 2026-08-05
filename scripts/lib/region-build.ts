@@ -278,7 +278,7 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
   }
 
   mkdirSync(dirname(options.outputPath), { recursive: true })
-  const db = openDatabase(options.outputPath)
+  const db = openDatabase(options.outputPath, { runBackfill: true })
 
   console.log(`Bygger regionsdatabase: ${regionLabel(descriptor)}`)
   console.log(`  Output: ${options.outputPath}`)

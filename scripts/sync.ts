@@ -60,7 +60,7 @@ function validateArgs(args: ReturnType<typeof parseArgs>) {
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   validateArgs(args)
-  const db = openDatabase()
+  const db = openDatabase(undefined, { runBackfill: true })
 
   console.log(`Synkroniserer database: ${DEFAULT_DB_PATH}`)
   const mode = args.geocodeOnly

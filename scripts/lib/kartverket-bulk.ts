@@ -48,6 +48,10 @@ export function ensureKartverketSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_kv_text_lookup
       ON kartverket_addresses(postnummer, adresse_tekst_norm);
+
+    CREATE INDEX IF NOT EXISTS idx_kv_kommunenummer
+      ON kartverket_addresses(kommunenummer)
+      WHERE kommunenummer IS NOT NULL;
   `)
 }
 

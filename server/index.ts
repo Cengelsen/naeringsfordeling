@@ -30,6 +30,25 @@ if (!existsSync(dbPath)) {
 const db = openDatabase(dbPath)
 const app = new Hono()
 
+const stmtCache = new Map<string, ReturnType<typeof db.prepare>>()
+const STMT_CACHE_MAX = 64
+
+function cachedPrepare(sql: string) {
+  const cached = stmtCache.get(sql)
+  if (cached) {
+    stmtCache.delete(sql)
+    stmtCache.set(sql, cached)
+    return cached
+  }
+  const stmt = db.prepare(sql)
+  stmtCache.set(sql, stmt)
+  if (stmtCache.size > STMT_CACHE_MAX) {
+    const oldest = stmtCache.keys().next().value!
+    stmtCache.delete(oldest)
+  }
+  return stmt
+}
+
 const KONSERN_CACHE_TTL_MS = 60 * 60 * 1000
 const KONSERN_CACHE_MAX_SIZE = 500
 const konsernCache = new Map<string, { expiresAt: number; data: unknown }>()
@@ -138,18 +157,15 @@ function queryOrganizationPoints(
   if (query.useRtree) {
     const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
     raw = fetchLimit == null
-      ? (db
-          .prepare(
+      ? (cachedPrepare(
             `SELECT ${POINT_SELECT}
              FROM organizations o
              INNER JOIN orgs_rtree r ON r.id = o.rowid
              WHERE r.maxLng >= ? AND r.minLng <= ?
                AND r.maxLat >= ? AND r.minLat <= ?
                AND ${query.conditions.join(' AND ')}`,
-          )
-          .all(minLng, maxLng, minLat, maxLat, ...query.params) as OrganizationPointRow[])
-      : (db
-          .prepare(
+          ).all(minLng, maxLng, minLat, maxLat, ...query.params) as OrganizationPointRow[])
+      : (cachedPrepare(
             `SELECT ${POINT_SELECT}
              FROM organizations o
              INNER JOIN orgs_rtree r ON r.id = o.rowid
@@ -157,26 +173,21 @@ function queryOrganizationPoints(
                AND r.maxLat >= ? AND r.minLat <= ?
                AND ${query.conditions.join(' AND ')}
              LIMIT ?`,
-          )
-          .all(minLng, maxLng, minLat, maxLat, ...query.params, fetchLimit) as OrganizationPointRow[])
+          ).all(minLng, maxLng, minLat, maxLat, ...query.params, fetchLimit) as OrganizationPointRow[])
   } else {
     appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
     raw = fetchLimit == null
-      ? (db
-          .prepare(
+      ? (cachedPrepare(
             `SELECT ${POINT_SELECT}
              FROM organizations o
              WHERE ${query.conditions.join(' AND ')}`,
-          )
-          .all(...query.params) as OrganizationPointRow[])
-      : (db
-          .prepare(
+          ).all(...query.params) as OrganizationPointRow[])
+      : (cachedPrepare(
             `SELECT ${POINT_SELECT}
              FROM organizations o
              WHERE ${query.conditions.join(' AND ')}
              LIMIT ?`,
-          )
-          .all(...query.params, fetchLimit) as OrganizationPointRow[])
+          ).all(...query.params, fetchLimit) as OrganizationPointRow[])
   }
 
   const rows =
@@ -227,14 +238,12 @@ app.get('/api/municipality-counts', (c) => {
   appendAreaFilters(filters, conditions, params)
 
   const kommuneExpr = effectiveKommunenummerExpr()
-  const rows = db
-    .prepare(
-      `SELECT ${kommuneExpr} AS kommunenummer, COUNT(*) AS count
-       FROM organizations
-       WHERE ${conditions.join(' AND ')} AND ${kommuneExpr} IS NOT NULL
-       GROUP BY ${kommuneExpr}`,
-    )
-    .all(...params) as Array<{ kommunenummer: string; count: number }>
+  const rows = cachedPrepare(
+    `SELECT ${kommuneExpr} AS kommunenummer, COUNT(*) AS count
+     FROM organizations
+     WHERE ${conditions.join(' AND ')} AND ${kommuneExpr} IS NOT NULL
+     GROUP BY ${kommuneExpr}`,
+  ).all(...params) as Array<{ kommunenummer: string; count: number }>
 
   return c.json({
     counts: rows.map((row) => ({
@@ -263,14 +272,12 @@ app.get('/api/district-stats', (c) => {
   conditions.push(`${districtExpr} = ?`)
   params.push(districtId)
 
-  const rows = db
-    .prepare(
-      `SELECT org_type, COUNT(*) AS count
-       FROM organizations
-       WHERE ${conditions.join(' AND ')} AND ${kommuneExpr} IS NOT NULL
-       GROUP BY org_type`,
-    )
-    .all(...params) as Array<{ org_type: string; count: number }>
+  const rows = cachedPrepare(
+    `SELECT org_type, COUNT(*) AS count
+     FROM organizations
+     WHERE ${conditions.join(' AND ')} AND ${kommuneExpr} IS NOT NULL
+     GROUP BY org_type`,
+  ).all(...params) as Array<{ org_type: string; count: number }>
 
   const byOrgType: Record<string, number> = {}
   let total = 0
@@ -397,28 +404,24 @@ app.get('/api/organizations/search', (c) => {
   let rows: SearchRow[]
   try {
     if (!ftsQuery) throw new Error('empty query')
-    rows = db
-      .prepare(
-        `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.kommunenummer, o.lat, o.lng
-         FROM organizations_fts fts
-         INNER JOIN organizations o ON o.rowid = fts.rowid
-         WHERE organizations_fts MATCH ?
-           AND o.deleted = 0
-         ORDER BY rank
-         LIMIT ?`,
-      )
-      .all(`${ftsQuery}*`, limit) as SearchRow[]
+    rows = cachedPrepare(
+      `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.kommunenummer, o.lat, o.lng
+       FROM organizations_fts fts
+       INNER JOIN organizations o ON o.rowid = fts.rowid
+       WHERE organizations_fts MATCH ?
+         AND o.deleted = 0
+       ORDER BY rank
+       LIMIT ?`,
+    ).all(`${ftsQuery}*`, limit) as SearchRow[]
   } catch {
     const pattern = `%${raw.replace(/[%_]/g, '')}%`
-    rows = db
-      .prepare(
-        `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
-         FROM organizations
-         WHERE deleted = 0 AND navn LIKE ? COLLATE NOCASE
-         ORDER BY LENGTH(navn), navn
-         LIMIT ?`,
-      )
-      .all(pattern, limit) as SearchRow[]
+    rows = cachedPrepare(
+      `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
+       FROM organizations
+       WHERE deleted = 0 AND navn LIKE ? COLLATE NOCASE
+       ORDER BY LENGTH(navn), navn
+       LIMIT ?`,
+    ).all(pattern, limit) as SearchRow[]
   }
 
   return c.json({ results: rows.map(mapRow) })
@@ -503,6 +506,24 @@ function organizationFromDetailRow(row: OrganizationDetailRow) {
 }
 
 const BATCH_ORG_MAX = 100
+const BATCH_SIZES = [1, 5, 10, 25, 50, 100] as const
+const batchStmts = new Map(
+  BATCH_SIZES.map((n) => [
+    n,
+    db.prepare(
+      `SELECT ${ORG_DETAIL_SELECT} FROM organizations
+       WHERE deleted = 0 AND orgnr IN (${Array(n).fill('?').join(',')})`,
+    ),
+  ]),
+)
+
+function batchLookup(orgnrs: string[]): OrganizationDetailRow[] {
+  const size = BATCH_SIZES.find((s) => s >= orgnrs.length) ?? BATCH_SIZES[BATCH_SIZES.length - 1]
+  const stmt = batchStmts.get(size)!
+  const padded = [...orgnrs]
+  while (padded.length < size) padded.push('')
+  return stmt.all(...padded) as OrganizationDetailRow[]
+}
 
 /** One round-trip for address popups listing many orgs at the same marker. */
 app.post('/api/organizations/batch', async (c) => {
@@ -530,15 +551,7 @@ app.post('/api/organizations/batch', async (c) => {
     return c.json({ organizations: [] })
   }
 
-  const placeholders = orgnrs.map(() => '?').join(',')
-  const rows = db
-    .prepare(
-      `SELECT ${ORG_DETAIL_SELECT}
-       FROM organizations
-       WHERE deleted = 0 AND orgnr IN (${placeholders})`,
-    )
-    .all(...orgnrs) as OrganizationDetailRow[]
-
+  const rows = batchLookup(orgnrs)
   const byOrgnr = new Map(rows.map((row) => [row.orgnr, organizationFromDetailRow(row)]))
   const organizations = orgnrs
     .map((orgnr) => byOrgnr.get(orgnr))
@@ -583,29 +596,25 @@ app.get('/api/organizations', (c) => {
 
   if (query.useRtree) {
     const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
-    rows = db
-      .prepare(
-        `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.address_text, o.postnummer,
-                o.kommunenummer, o.lat, o.lng
-         FROM organizations o
-         INNER JOIN orgs_rtree r ON r.id = o.rowid
-         WHERE r.maxLng >= ? AND r.minLng <= ?
-           AND r.maxLat >= ? AND r.minLat <= ?
-           AND ${query.conditions.join(' AND ')}
-         LIMIT ?`,
-      )
-      .all(minLng, maxLng, minLat, maxLat, ...query.params, limit) as typeof rows
+    rows = cachedPrepare(
+      `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.address_text, o.postnummer,
+              o.kommunenummer, o.lat, o.lng
+       FROM organizations o
+       INNER JOIN orgs_rtree r ON r.id = o.rowid
+       WHERE r.maxLng >= ? AND r.minLng <= ?
+         AND r.maxLat >= ? AND r.minLat <= ?
+         AND ${query.conditions.join(' AND ')}
+       LIMIT ?`,
+    ).all(minLng, maxLng, minLat, maxLat, ...query.params, limit) as typeof rows
   } else {
     appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
-    rows = db
-      .prepare(
-        `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.address_text, o.postnummer,
-                o.kommunenummer, o.lat, o.lng
-         FROM organizations o
-         WHERE ${query.conditions.join(' AND ')}
-         LIMIT ?`,
-      )
-      .all(...query.params, limit) as typeof rows
+    rows = cachedPrepare(
+      `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.address_text, o.postnummer,
+              o.kommunenummer, o.lat, o.lng
+       FROM organizations o
+       WHERE ${query.conditions.join(' AND ')}
+       LIMIT ?`,
+    ).all(...query.params, limit) as typeof rows
   }
 
   const organizations = rows.map((row) => ({
@@ -628,6 +637,14 @@ app.get('/api/organizations', (c) => {
 })
 
 const port = Number(process.env.PORT ?? 3001)
+
+function shutdown() {
+  db.pragma('optimize')
+  db.close()
+  process.exit(0)
+}
+process.on('SIGTERM', shutdown)
+process.on('SIGINT', shutdown)
 
 console.log(`API server on http://localhost:${port}`)
 console.log(`Database: ${dbPath}`)

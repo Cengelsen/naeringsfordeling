@@ -68,7 +68,7 @@ async function main() {
     removeDatabaseFiles(dbPath)
   }
 
-  const db = openDatabase(dbPath)
+  const db = openDatabase(dbPath, { runBackfill: true })
 
   console.log(`Bygger SQLite-database: ${dbPath}`)
   console.log('Kilder: norway.db → BRREG referansecache → API (kun med --allow-api)')

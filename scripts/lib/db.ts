@@ -6,6 +6,8 @@ export const DEFAULT_DB_PATH = process.env.DATABASE_PATH ?? 'data/organizations.
 
 const SQLITE_SIDECAR_SUFFIXES = ['-wal', '-shm', '-journal'] as const
 
+const CURRENT_SCHEMA_VERSION = 1
+
 const ORGANIZATION_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: 'entity_kind', ddl: "TEXT NOT NULL DEFAULT 'enhet'" },
   { name: 'overordnet_enhet', ddl: 'TEXT' },
@@ -30,13 +32,40 @@ export function removeDatabaseFiles(path = DEFAULT_DB_PATH) {
   }
 }
 
-export function openDatabase(path = DEFAULT_DB_PATH): Database.Database {
+export interface OpenDatabaseOptions {
+  runBackfill?: boolean
+}
+
+export function openDatabase(
+  path = DEFAULT_DB_PATH,
+  options: OpenDatabaseOptions = {},
+): Database.Database {
   mkdirSync(dirname(path), { recursive: true })
   const db = new Database(path)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
-  migrate(db)
+  db.pragma('busy_timeout = 5000')
+  migrate(db, options.runBackfill ?? false)
   return db
+}
+
+/** Backfill computed columns that may be NULL after schema upgrades. */
+export function runPendingBackfills(db: Database.Database) {
+  db.exec(`
+    UPDATE organizations SET
+      employee_band = CASE
+        WHEN har_registrert_antall_ansatte = 0 OR antall_ansatte IS NULL THEN 'unknown'
+        WHEN antall_ansatte = 0 THEN '0'
+        WHEN antall_ansatte <= 4 THEN '1-4'
+        WHEN antall_ansatte <= 19 THEN '5-19'
+        ELSE '20+'
+      END
+    WHERE employee_band IS NULL;
+
+    UPDATE organizations SET
+      naeringskode_section = substr(naeringskode, 1, 2)
+    WHERE naeringskode_section IS NULL AND naeringskode IS NOT NULL AND length(naeringskode) >= 2;
+  `)
 }
 
 function ensureColumns(db: Database.Database) {
@@ -75,31 +104,64 @@ function ensureColumns(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_naeringskode_section
       ON organizations(naeringskode_section)
       WHERE deleted = 0;
-  `)
 
-  db.exec(`
-    UPDATE organizations SET
-      employee_band = CASE
-        WHEN har_registrert_antall_ansatte = 0 OR antall_ansatte IS NULL THEN 'unknown'
-        WHEN antall_ansatte = 0 THEN '0'
-        WHEN antall_ansatte <= 4 THEN '1-4'
-        WHEN antall_ansatte <= 19 THEN '5-19'
-        ELSE '20+'
-      END
-    WHERE employee_band IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_org_entity_section_band
+      ON organizations(entity_kind, naeringskode_section, employee_band)
+      WHERE deleted = 0 AND lat IS NOT NULL;
 
-    UPDATE organizations SET
-      naeringskode_section = substr(naeringskode, 1, 2)
-    WHERE naeringskode_section IS NULL AND naeringskode IS NOT NULL AND length(naeringskode) >= 2;
+    CREATE INDEX IF NOT EXISTS idx_org_entity_kommune
+      ON organizations(entity_kind, kommunenummer)
+      WHERE deleted = 0;
   `)
 }
 
-function migrate(db: Database.Database) {
+function getSchemaVersion(db: Database.Database): number {
+  return (db.pragma('user_version', { simple: true }) as number) ?? 0
+}
+
+function setSchemaVersion(db: Database.Database, version: number) {
+  db.pragma(`user_version = ${version}`)
+}
+
+function migrate(db: Database.Database, runBackfill: boolean) {
+  const version = getSchemaVersion(db)
+
+  if (version >= CURRENT_SCHEMA_VERSION) {
+    ensureOrgsRtree(db)
+    ensureFtsPopulated(db)
+    return
+  }
+
+  // Version 0 -> 1: full schema creation + improvements
+  if (version < 1) {
+    migrateToV1(db)
+  }
+
+  if (runBackfill) {
+    runPendingBackfills(db)
+  }
+
+  ensureOrgsRtree(db)
+  ensureFts(db)
+  ensureFtsPopulated(db)
+  setSchemaVersion(db, CURRENT_SCHEMA_VERSION)
+}
+
+function tableExists(db: Database.Database, name: string): boolean {
+  const row = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(name)
+  return row != null
+}
+
+function migrateToV1(db: Database.Database) {
+  const isExistingDb = tableExists(db, 'organizations')
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
-    );
+    ) WITHOUT ROWID;
 
     CREATE TABLE IF NOT EXISTS address_cache (
       cache_key TEXT PRIMARY KEY,
@@ -111,37 +173,65 @@ function migrate(db: Database.Database) {
       matrikkel_key TEXT,
       kommunenummer_geo TEXT,
       geocode_quality TEXT
-    );
+    ) WITHOUT ROWID;
+  `)
 
-    CREATE TABLE IF NOT EXISTS organizations (
-      orgnr TEXT PRIMARY KEY,
-      navn TEXT NOT NULL,
-      org_type TEXT NOT NULL,
-      org_type_label TEXT NOT NULL,
-      address_text TEXT,
-      postnummer TEXT,
-      kommunenummer TEXT,
-      address_key TEXT,
-      lat REAL,
-      lng REAL,
-      konkurs INTEGER NOT NULL DEFAULT 0,
-      under_avvikling INTEGER NOT NULL DEFAULT 0,
-      vat_registered INTEGER NOT NULL DEFAULT 0,
-      deleted INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL,
-      entity_kind TEXT NOT NULL DEFAULT 'enhet',
-      overordnet_enhet TEXT,
-      naeringskode TEXT,
-      naeringskode_label TEXT,
-      antall_ansatte INTEGER,
-      har_registrert_antall_ansatte INTEGER NOT NULL DEFAULT 0,
-      er_i_konsern INTEGER NOT NULL DEFAULT 0,
-      adresse_id TEXT,
-      matrikkel_key TEXT,
-      kommunenummer_geo TEXT,
-      geocode_quality TEXT
-    );
+  if (!isExistingDb) {
+    db.exec(`
+      CREATE TABLE organizations (
+        orgnr TEXT PRIMARY KEY,
+        navn TEXT NOT NULL,
+        org_type TEXT NOT NULL,
+        org_type_label TEXT NOT NULL,
+        address_text TEXT,
+        postnummer TEXT,
+        kommunenummer TEXT,
+        address_key TEXT,
+        lat REAL,
+        lng REAL,
+        konkurs INTEGER NOT NULL DEFAULT 0,
+        under_avvikling INTEGER NOT NULL DEFAULT 0,
+        vat_registered INTEGER NOT NULL DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        entity_kind TEXT NOT NULL DEFAULT 'enhet',
+        overordnet_enhet TEXT REFERENCES organizations(orgnr) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED,
+        naeringskode TEXT,
+        naeringskode_label TEXT,
+        antall_ansatte INTEGER,
+        har_registrert_antall_ansatte INTEGER NOT NULL DEFAULT 0,
+        er_i_konsern INTEGER NOT NULL DEFAULT 0,
+        adresse_id TEXT,
+        matrikkel_key TEXT,
+        kommunenummer_geo TEXT,
+        geocode_quality TEXT,
+        employee_band TEXT,
+        naeringskode_section TEXT
+      ) STRICT;
+    `)
+  } else {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS organizations (
+        orgnr TEXT PRIMARY KEY,
+        navn TEXT NOT NULL,
+        org_type TEXT NOT NULL,
+        org_type_label TEXT NOT NULL,
+        address_text TEXT,
+        postnummer TEXT,
+        kommunenummer TEXT,
+        address_key TEXT,
+        lat REAL,
+        lng REAL,
+        konkurs INTEGER NOT NULL DEFAULT 0,
+        under_avvikling INTEGER NOT NULL DEFAULT 0,
+        vat_registered INTEGER NOT NULL DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+    `)
+  }
 
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_org_kommune
       ON organizations(kommunenummer)
       WHERE deleted = 0;
@@ -166,19 +256,60 @@ function migrate(db: Database.Database) {
       ON organizations(address_key)
       WHERE deleted = 0 AND address_key IS NOT NULL;
 
+    CREATE INDEX IF NOT EXISTS idx_cache_failed
+      ON address_cache(cache_key)
+      WHERE failed = 1;
+
     CREATE VIRTUAL TABLE IF NOT EXISTS orgs_rtree USING rtree(
       id,
       minLng, maxLng,
       minLat, maxLat
     );
+  `)
 
+  rebuildTableIfNeeded(db, 'sync_state', `
+    CREATE TABLE sync_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    ) WITHOUT ROWID
+  `)
+  rebuildTableIfNeeded(db, 'address_cache', `
+    CREATE TABLE address_cache (
+      cache_key TEXT PRIMARY KEY,
+      lat REAL,
+      lng REAL,
+      geocoded_at TEXT NOT NULL,
+      failed INTEGER NOT NULL DEFAULT 0,
+      adresse_id TEXT,
+      matrikkel_key TEXT,
+      kommunenummer_geo TEXT,
+      geocode_quality TEXT
+    ) WITHOUT ROWID
   `)
 
   ensureColumns(db)
   ensureAddressCacheColumns(db)
-  ensureOrgsRtree(db)
-  ensureFts(db)
-  ensureFtsPopulated(db)
+}
+
+/** Rebuild a table with new DDL if it exists but lacks WITHOUT ROWID / STRICT. */
+function rebuildTableIfNeeded(db: Database.Database, tableName: string, newDdl: string) {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(tableName) as { sql: string } | undefined
+  if (!row) return
+
+  const currentSql = row.sql.toLowerCase()
+  const needsRebuild =
+    (newDdl.toLowerCase().includes('without rowid') && !currentSql.includes('without rowid')) ||
+    (newDdl.toLowerCase().includes('strict') && !currentSql.includes('strict'))
+
+  if (!needsRebuild) return
+
+  const tmpName = `${tableName}__rebuild_tmp`
+  db.exec(`ALTER TABLE ${tableName} RENAME TO ${tmpName}`)
+  db.exec(newDdl)
+  db.exec(`INSERT OR IGNORE INTO ${tableName} SELECT * FROM ${tmpName}`)
+  db.exec(`DROP TABLE ${tmpName}`)
 }
 
 function rebuildFts(db: Database.Database) {
@@ -197,22 +328,23 @@ function rebuildFts(db: Database.Database) {
   }
 
   db.exec(`
-
     CREATE VIRTUAL TABLE organizations_fts USING fts5(
-      orgnr, navn,
+      navn,
       content='organizations',
-      content_rowid='rowid'
+      content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2',
+      prefix='2,3'
     );
 
     CREATE TRIGGER organizations_fts_insert AFTER INSERT ON organizations BEGIN
-      INSERT INTO organizations_fts(rowid, orgnr, navn) VALUES (new.rowid, new.orgnr, new.navn);
+      INSERT INTO organizations_fts(rowid, navn) VALUES (new.rowid, new.navn);
     END;
     CREATE TRIGGER organizations_fts_delete AFTER DELETE ON organizations BEGIN
-      INSERT INTO organizations_fts(organizations_fts, rowid, orgnr, navn) VALUES('delete', old.rowid, old.orgnr, old.navn);
+      INSERT INTO organizations_fts(organizations_fts, rowid, navn) VALUES('delete', old.rowid, old.navn);
     END;
     CREATE TRIGGER organizations_fts_update AFTER UPDATE ON organizations BEGIN
-      INSERT INTO organizations_fts(organizations_fts, rowid, orgnr, navn) VALUES('delete', old.rowid, old.orgnr, old.navn);
-      INSERT INTO organizations_fts(rowid, orgnr, navn) VALUES (new.rowid, new.orgnr, new.navn);
+      INSERT INTO organizations_fts(organizations_fts, rowid, navn) VALUES('delete', old.rowid, old.navn);
+      INSERT INTO organizations_fts(rowid, navn) VALUES (new.rowid, new.navn);
     END;
   `)
 }
@@ -223,6 +355,10 @@ function ftsSchemaValid(db: Database.Database): boolean {
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'organizations_fts'")
       .get() as { sql: string } | undefined
     if (!row) return false
+
+    const sql = row.sql.toLowerCase()
+    if (sql.includes('orgnr')) return false
+    if (!sql.includes('unicode61')) return false
 
     const triggerCount = (
       db
@@ -276,6 +412,12 @@ function ensureAddressCacheColumns(db: Database.Database) {
     if (existing.has(column.name)) continue
     db.exec(`ALTER TABLE address_cache ADD COLUMN ${column.name} ${column.ddl}`)
   }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_cache_failed
+      ON address_cache(cache_key)
+      WHERE failed = 1;
+  `)
 }
 
 /** Rebuild the spatial R-tree index for O(log n) bbox queries. */

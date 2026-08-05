@@ -118,7 +118,7 @@ async function main() {
     removeDatabaseFiles(args.output)
   }
 
-  const db = openDatabase(args.output)
+  const db = openDatabase(args.output, { runBackfill: true })
 
   console.log('Bygger nasjonal SQLite-database')
   console.log(`  Output: ${args.output}`)
