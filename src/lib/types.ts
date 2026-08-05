@@ -17,17 +17,8 @@ export interface BrregAddress {
   landkode?: string
 }
 
-export interface MapFilters {
-  orgTypes: string[]
-  excludeKonkurs: boolean
-  excludeUnderAvvikling: boolean
-  vatRegisteredOnly: boolean
-  naeringskodeSections: string[]
-  employeeBands: import('./utils/employeeBands').EmployeeBand[]
-  entityKinds: ('enhet' | 'underenhet')[]
-  konsernMode: boolean
-  konsernMembersOnly: boolean
-}
+export type { MapFilters, EntityKind } from '../../shared/types.js'
+import type { MapFilters } from '../../shared/types.js'
 
 export type VisualizationMode = 'choropleth' | 'dots'
 export type DistrictLevel = 'fylke' | 'kommune'

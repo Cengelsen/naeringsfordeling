@@ -139,6 +139,8 @@
   init()
 </script>
 
+<a href="#map" class="skip-link">Hopp til kart</a>
+
 <main class="layout" class:panel-collapsed={panelCollapsed}>
   <div class="panel-slot">
     <ControlPanel
@@ -209,6 +211,20 @@
 
   :global(*) {
     box-sizing: border-box;
+  }
+
+  .skip-link {
+    position: absolute;
+    top: -40px;
+    left: 0;
+    background: #0369a1;
+    color: white;
+    padding: 8px 16px;
+    z-index: 10000;
+    transition: top 0.2s;
+  }
+  .skip-link:focus {
+    top: 0;
   }
 
   .layout {

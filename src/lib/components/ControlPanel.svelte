@@ -212,6 +212,7 @@
         aria-expanded={orgLookupOpen}
         aria-controls="org-lookup-list"
         aria-autocomplete="list"
+        aria-activedescendant={orgLookupActiveIndex >= 0 ? `org-option-${orgLookupActiveIndex}` : undefined}
         aria-label="Søk etter organisasjonsnummer eller navn"
         onfocus={onOrgLookupFocus}
         onblur={onOrgLookupBlur}
@@ -226,6 +227,7 @@
             <li role="presentation">
               <button
                 type="button"
+                id={`org-option-${index}`}
                 class="lookup-result"
                 class:active={index === orgLookupActiveIndex}
                 role="option"

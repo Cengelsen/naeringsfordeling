@@ -10,6 +10,8 @@ import type { MaplibreDotsController, MaplibreDotsLayerOptions, DotFilters } fro
 import { filterPointsByMapFilters } from './points'
 
 const MAX_LEAFLET_DOTS = 4000
+const POINT_OPACITY_DEFAULT = 0.85
+const POINT_OPACITY_STALE = 0.45
 
 /**
  * Canvas-backed Leaflet fallback when MapLibre/WebGL is unavailable.
@@ -46,7 +48,7 @@ export function createLeafletDotsLayer(
     hint?: Partial<OrganizationPoint> | null,
   ) {
     const radius = pointRadius(orgCount)
-    const opacity = stale ? 0.45 : 0.85
+    const opacity = stale ? POINT_OPACITY_STALE : POINT_OPACITY_DEFAULT
     const color = colorForOrgType(orgType, colorTypes)
     const marker = L.circleMarker([lat, lng], {
       radius,

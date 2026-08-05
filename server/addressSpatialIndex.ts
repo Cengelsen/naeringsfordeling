@@ -111,6 +111,7 @@ function buildIndexes(rows: OrgRow[], filters: ApiFilters): BuiltIndexes {
 }
 
 let allRows: OrgRow[] | null = null
+let dbRef: Database.Database | null = null
 const indexCache = new Map<string, BuiltIndexes>()
 
 function loadAllGeocodedRows(db: Database.Database): OrgRow[] {
@@ -129,6 +130,7 @@ function loadAllGeocodedRows(db: Database.Database): OrgRow[] {
 }
 
 function getIndexes(db: Database.Database, filters: ApiFilters): BuiltIndexes {
+  dbRef = db
   if (!allRows) {
     allRows = loadAllGeocodedRows(db)
   }
@@ -136,7 +138,6 @@ function getIndexes(db: Database.Database, filters: ApiFilters): BuiltIndexes {
   const key = filterFingerprint(filters)
   const cached = indexCache.get(key)
   if (cached) {
-    // LRU bump
     indexCache.delete(key)
     indexCache.set(key, cached)
     return cached
@@ -152,10 +153,16 @@ function getIndexes(db: Database.Database, filters: ApiFilters): BuiltIndexes {
   return built
 }
 
+function scheduleRowRelease() {
+  setTimeout(() => {
+    allRows = null
+  }, 60_000)
+}
+
 /** Load geocoded rows once; build default address index in the background. */
 export function warmAddressSpatialIndex(db: Database.Database) {
   const started = performance.now()
-  // Prefetch rows immediately so the first filtered rebuild is cheaper.
+  dbRef = db
   allRows = loadAllGeocodedRows(db)
   getIndexes(db, {
     orgTypes: [],
@@ -170,6 +177,7 @@ export function warmAddressSpatialIndex(db: Database.Database) {
   const ms = Math.round(performance.now() - started)
   const size = indexCache.values().next().value?.addresses.size ?? 0
   console.log(`Address spatial index ready: ${size.toLocaleString('nb-NO')} addresses (${ms} ms)`)
+  scheduleRowRelease()
 }
 
 export function countViewportSpatial(

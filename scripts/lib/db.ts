@@ -18,6 +18,8 @@ const ORGANIZATION_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: 'matrikkel_key', ddl: 'TEXT' },
   { name: 'kommunenummer_geo', ddl: 'TEXT' },
   { name: 'geocode_quality', ddl: 'TEXT' },
+  { name: 'employee_band', ddl: 'TEXT' },
+  { name: 'naeringskode_section', ddl: 'TEXT' },
 ]
 
 /** Remove main DB file and WAL/SHM/journal sidecars (required for a clean --fresh). */
@@ -65,6 +67,30 @@ function ensureColumns(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_org_konsern
       ON organizations(er_i_konsern)
       WHERE deleted = 0 AND er_i_konsern = 1;
+
+    CREATE INDEX IF NOT EXISTS idx_employee_band
+      ON organizations(employee_band)
+      WHERE deleted = 0;
+
+    CREATE INDEX IF NOT EXISTS idx_naeringskode_section
+      ON organizations(naeringskode_section)
+      WHERE deleted = 0;
+  `)
+
+  db.exec(`
+    UPDATE organizations SET
+      employee_band = CASE
+        WHEN har_registrert_antall_ansatte = 0 OR antall_ansatte IS NULL THEN 'unknown'
+        WHEN antall_ansatte = 0 THEN '0'
+        WHEN antall_ansatte <= 4 THEN '1-4'
+        WHEN antall_ansatte <= 19 THEN '5-19'
+        ELSE '20+'
+      END
+    WHERE employee_band IS NULL;
+
+    UPDATE organizations SET
+      naeringskode_section = substr(naeringskode, 1, 2)
+    WHERE naeringskode_section IS NULL AND naeringskode IS NOT NULL AND length(naeringskode) >= 2;
   `)
 }
 
@@ -145,11 +171,70 @@ function migrate(db: Database.Database) {
       minLng, maxLng,
       minLat, maxLat
     );
+
   `)
 
   ensureColumns(db)
   ensureAddressCacheColumns(db)
   ensureOrgsRtree(db)
+  ensureFts(db)
+  ensureFtsPopulated(db)
+}
+
+function rebuildFts(db: Database.Database) {
+  db.exec(`
+    DROP TRIGGER IF EXISTS organizations_fts_insert;
+    DROP TRIGGER IF EXISTS organizations_fts_delete;
+    DROP TRIGGER IF EXISTS organizations_fts_update;
+  `)
+
+  try {
+    db.exec('DROP TABLE IF EXISTS organizations_fts')
+  } catch {
+    for (const suffix of ['', '_data', '_idx', '_docsize', '_config', '_content']) {
+      try { db.exec(`DROP TABLE IF EXISTS organizations_fts${suffix}`) } catch { /* ignore */ }
+    }
+  }
+
+  db.exec(`
+
+    CREATE VIRTUAL TABLE organizations_fts USING fts5(
+      orgnr, navn,
+      content='organizations',
+      content_rowid='rowid'
+    );
+
+    CREATE TRIGGER organizations_fts_insert AFTER INSERT ON organizations BEGIN
+      INSERT INTO organizations_fts(rowid, orgnr, navn) VALUES (new.rowid, new.orgnr, new.navn);
+    END;
+    CREATE TRIGGER organizations_fts_delete AFTER DELETE ON organizations BEGIN
+      INSERT INTO organizations_fts(organizations_fts, rowid, orgnr, navn) VALUES('delete', old.rowid, old.orgnr, old.navn);
+    END;
+    CREATE TRIGGER organizations_fts_update AFTER UPDATE ON organizations BEGIN
+      INSERT INTO organizations_fts(organizations_fts, rowid, orgnr, navn) VALUES('delete', old.rowid, old.orgnr, old.navn);
+      INSERT INTO organizations_fts(rowid, orgnr, navn) VALUES (new.rowid, new.orgnr, new.navn);
+    END;
+  `)
+}
+
+function ensureFts(db: Database.Database) {
+  rebuildFts(db)
+}
+
+function ensureFtsPopulated(db: Database.Database) {
+  const ftsCount = (
+    db.prepare('SELECT COUNT(*) AS count FROM organizations_fts').get() as { count: number }
+  ).count
+
+  if (ftsCount === 0) {
+    const orgCount = (
+      db.prepare('SELECT COUNT(*) AS count FROM organizations').get() as { count: number }
+    ).count
+
+    if (orgCount > 0) {
+      db.exec(`INSERT INTO organizations_fts(organizations_fts) VALUES('rebuild')`)
+    }
+  }
 }
 
 function ensureAddressCacheColumns(db: Database.Database) {

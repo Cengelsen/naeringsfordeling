@@ -1,4 +1,5 @@
-const CACHE = 'naeringsfordeling-v1'
+const CACHE_VERSION = '__BUILD_TIMESTAMP__'
+const CACHE = `naeringsfordeling-v${CACHE_VERSION}`
 const PRECACHE = ['data/points/manifest.json']
 
 self.addEventListener('install', (event) => {

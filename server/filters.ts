@@ -1,16 +1,7 @@
-import type { EmployeeBand } from '../scripts/lib/employeeBands.js'
-import type { EntityKind } from '../scripts/lib/types.js'
+import type { EmployeeBand } from '../shared/employeeBands.js'
+import type { EntityKind, MapFilters } from '../shared/types.js'
 
-export interface MapFilters {
-  orgTypes: string[]
-  excludeKonkurs: boolean
-  excludeUnderAvvikling: boolean
-  vatRegisteredOnly: boolean
-  naeringskodeSections: string[]
-  employeeBands: EmployeeBand[]
-  entityKinds: EntityKind[]
-  konsernMembersOnly: boolean
-}
+export type { MapFilters }
 
 export function employeeBandSql(tableAlias = ''): string {
   const prefix = tableAlias ? `${tableAlias}.` : ''
@@ -48,14 +39,14 @@ export function buildFilterQuery(filters: MapFilters, geocodedOnly = false, tabl
 
   if (filters.naeringskodeSections.length > 0) {
     conditions.push(
-      `${naeringskodeSectionSql(tableAlias)} IN (${filters.naeringskodeSections.map(() => '?').join(',')})`,
+      `${prefix}naeringskode_section IN (${filters.naeringskodeSections.map(() => '?').join(',')})`,
     )
     params.push(...filters.naeringskodeSections)
   }
 
   if (filters.employeeBands.length > 0) {
     conditions.push(
-      `${employeeBandSql(tableAlias)} IN (${filters.employeeBands.map(() => '?').join(',')})`,
+      `${prefix}employee_band IN (${filters.employeeBands.map(() => '?').join(',')})`,
     )
     params.push(...filters.employeeBands)
   }

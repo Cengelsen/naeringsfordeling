@@ -9,6 +9,7 @@ import {
 } from './filters.js'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { geoBoundsIntersects, extendBounds, ringBounds, type GeoBounds } from '../shared/geo-bounds.js'
 
 export interface ViewportSummary {
   totalInViewport: number
@@ -21,13 +22,6 @@ export interface ViewportSummary {
   kommunerInViewport: number
 }
 
-interface GeoBounds {
-  minLat: number
-  maxLat: number
-  minLng: number
-  maxLng: number
-}
-
 type GeoJsonFeature = {
   properties?: { kommunenummer?: string }
   geometry?: {
@@ -37,36 +31,6 @@ type GeoJsonFeature = {
 }
 
 let kommuneBoundsCache: Map<string, GeoBounds> | null = null
-
-function geoBoundsIntersects(a: GeoBounds, b: GeoBounds): boolean {
-  return !(
-    a.maxLat < b.minLat ||
-    a.minLat > b.maxLat ||
-    a.maxLng < b.minLng ||
-    a.minLng > b.maxLng
-  )
-}
-
-function extendBounds(bounds: GeoBounds, lat: number, lng: number) {
-  bounds.minLat = Math.min(bounds.minLat, lat)
-  bounds.maxLat = Math.max(bounds.maxLat, lat)
-  bounds.minLng = Math.min(bounds.minLng, lng)
-  bounds.maxLng = Math.max(bounds.maxLng, lng)
-}
-
-function ringBounds(ring: number[][]): GeoBounds | null {
-  if (ring.length === 0) return null
-  const bounds: GeoBounds = {
-    minLat: ring[0]![1]!,
-    maxLat: ring[0]![1]!,
-    minLng: ring[0]![0]!,
-    maxLng: ring[0]![0]!,
-  }
-  for (const [lng, lat] of ring) {
-    extendBounds(bounds, lat!, lng!)
-  }
-  return bounds
-}
 
 function featureBounds(feature: GeoJsonFeature): GeoBounds | null {
   const geometry = feature.geometry

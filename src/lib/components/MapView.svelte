@@ -10,7 +10,7 @@
     OrganizationPoint,
     Organisasjonsform,
   } from '../types'
-  import { colorForValue, kommuneScaleMax, roundUpTo10k } from '../utils/colors'
+  import { kommuneScaleMax, roundUpTo10k } from '../utils/colors'
   import {
     buildFylkeGeojson,
     fylkeFromKommune,
@@ -27,13 +27,10 @@
     fetchOrganizationDetail,
     fetchOrganizationLocation,
     fetchKonsernstruktur,
-    fetchOrganizationsBatch,
     lookupOrganizationLocal,
     fetchOrganizationPoints,
-    fetchViewportSummary,
     fetchDistrictStats,
     limitForZoom,
-    seedOrganizationDetail,
   } from '../services/api'
   import { dotsCache, dotsCacheKey, expandBbox } from '../map/dotsCache'
   import {
@@ -43,7 +40,6 @@
     organizationFromPoint,
   } from '../map/points'
   import type { DotFilters } from '../map/maplibreDotsLayer'
-  import { naeringskodeSectionLabel } from '../utils/naeringskode'
   import {
     aggregateLayersFromManifest,
     lodTilesAvailable,
@@ -66,6 +62,26 @@
   } from '../map/districtColors'
   import { createDotsLayer, type DotsLayerController } from '../map/dotsLayer'
   import { forEachPathLayer } from '../map/pathLayers'
+  import {
+    orgPopupHtml,
+    flattenKonsernOrgnrs,
+    konsernTreeHtml,
+    addressPopupHtml,
+    formatOrgTypeBreakdownHtml,
+    formatOrgTypeBreakdownFromRecord,
+    wireKonsernPopupLinks,
+    resolveOrganization,
+    resolveOrganizations,
+    seedHint,
+  } from '../map/organizationPopups'
+  import {
+    loadViewportSummary as loadViewportSummaryImpl,
+  } from '../map/viewportStats'
+  import {
+    styleKommuneFeature as styleKommuneFeatureImpl,
+    styleFylkeFeature as styleFylkeFeatureImpl,
+    bindHoverHighlight as bindHoverHighlightImpl,
+  } from '../map/choroplethRenderer'
   import Legend from './Legend.svelte'
   import OrgTypeLegend from './OrgTypeLegend.svelte'
 
@@ -102,8 +118,8 @@
     message: null,
   })
 
-  let loadToken = 0
-  let summaryToken = 0
+  let loadAbort: AbortController | null = null
+  let summaryAbort: AbortController | null = null
   let boundsTimer: ReturnType<typeof setTimeout> | undefined
   let kommuneBoundsByNummer = new Map<string, GeoBounds>()
   let vectorTilesManifest = $state<VectorTilesManifest | null>(null)
@@ -117,6 +133,7 @@
   let konsernOverlay: L.LayerGroup | null = null
 
   const ORG_LOCATE_ZOOM = 18
+  const PREFETCH_BBOX_EXPANSION = 0.35
 
   /** Pre-rendered district/grunnkrets GeoJSON (preferred aggregate path). */
   const districtColorsReady = $derived(districtColorsManifest !== null)
@@ -298,51 +315,6 @@
     ].join('|')
   }
 
-  function formatEmployeeCount(org: Organization): string {
-    if (org.antallAnsatte == null) return 'Antall ansatte: ukjent'
-    return `Antall ansatte: ${org.antallAnsatte.toLocaleString('nb-NO')}`
-  }
-
-  function orgPopupHtml(org: Organization, konsernHtml = ''): string {
-    const naering = org.naeringskode
-      ? `Næring: ${naeringskodeSectionLabel(org.naeringskode.slice(0, 2), org.naeringskodeLabel)}<br/>`
-      : ''
-    const entityKind =
-      org.entityKind === 'underenhet' && org.overordnetEnhet
-        ? `Underenhet · mor ${org.overordnetEnhet}<br/>`
-        : org.entityKind === 'underenhet'
-          ? 'Underenhet<br/>'
-          : ''
-    const geocode =
-      org.geocodeQuality === 'mismatch'
-        ? '<br/><em>Adressekommune avviker fra BRREG</em>'
-        : ''
-
-    return `<strong>${org.navn}</strong><br/>
-         ${org.orgTypeLabel} (${org.orgType})<br/>
-         Org.nr ${org.orgnr}<br/>
-         ${naering}${formatEmployeeCount(org)}<br/>
-         ${entityKind}${org.addressText}, ${org.postnummer}${geocode}${konsernHtml}`
-  }
-
-  function flattenKonsernOrgnrs(node: import('../types').KonsernNode): string[] {
-    const orgnrs = [node.organisasjonsnummer]
-    for (const child of node.underenheter ?? []) {
-      orgnrs.push(...flattenKonsernOrgnrs(child))
-    }
-    return orgnrs
-  }
-
-  function konsernTreeHtml(node: import('../types').KonsernNode, depth = 0): string {
-    const indent = '&nbsp;'.repeat(depth * 2)
-    const label = node.navn ?? node.organisasjonsnummer
-    const line = `<button type="button" class="konsern-link" data-orgnr="${node.organisasjonsnummer}">${indent}${label} (${node.organisasjonsnummer})</button>`
-    const children = (node.underenheter ?? [])
-      .map((child) => konsernTreeHtml(child, depth + 1))
-      .join('')
-    return `${line}${children}`
-  }
-
   function clearKonsernOverlay() {
     konsernOverlay?.remove()
     konsernOverlay = null
@@ -376,108 +348,6 @@
     }
   }
 
-  function wireKonsernPopupLinks(popup: L.Popup) {
-    const element = popup.getElement()
-    if (!element) return
-
-    element.querySelectorAll<HTMLButtonElement>('.konsern-link').forEach((button) => {
-      button.addEventListener('click', (event) => {
-        event.preventDefault()
-        const orgnr = button.dataset.orgnr
-        if (orgnr) void navigateToOrganization(orgnr)
-      })
-    })
-  }
-
-  function addressPopupHtml(orgs: Organization[]): string {
-    const colorTypes = [...new Set(allPoints.map((point) => point.orgType))].sort()
-    const addressLine =
-      orgs[0]?.addressText && orgs[0]?.postnummer
-        ? `<p class="address-popup-header"><strong>${orgs[0].addressText}, ${orgs[0].postnummer}</strong></p>`
-        : ''
-    const items = orgs
-      .map((org) => {
-        const color = colorForOrgType(org.orgType, colorTypes)
-        return `<div class="address-popup-item">
-            <span class="address-popup-swatch" style="background:${color}"></span>
-            <div>
-              <strong>${org.navn}</strong><br/>
-              ${org.orgTypeLabel} (${org.orgType})<br/>
-              Org.nr ${org.orgnr}
-            </div>
-          </div>`
-      })
-      .join('')
-
-    return `${addressLine}<p class="address-popup-summary">${orgs.length} organisasjoner på denne adressen</p><div class="address-popup-list">${items}</div>`
-  }
-
-  function resolveOrganizationFromPoints(orgnr: string): Organization | null {
-    const point = allPoints.find((entry) => normalizeOrgnr(entry.orgnr) === normalizeOrgnr(orgnr))
-    return point ? organizationFromPoint(point) : null
-  }
-
-  function seedHint(hint?: Partial<OrganizationPoint> | null) {
-    if (!hint?.orgnr || !hint.navn) return
-    const org = organizationFromPoint({
-      orgnr: hint.orgnr,
-      orgType: hint.orgType ?? '',
-      lat: hint.lat ?? 0,
-      lng: hint.lng ?? 0,
-      navn: hint.navn,
-      orgTypeLabel: hint.orgTypeLabel,
-      addressText: hint.addressText,
-      postnummer: hint.postnummer,
-      kommunenummer: hint.kommunenummer,
-    })
-    if (org) seedOrganizationDetail(org)
-  }
-
-  async function resolveOrganization(orgnr: string): Promise<Organization> {
-    const fromPoints = resolveOrganizationFromPoints(orgnr)
-    if (fromPoints) {
-      seedOrganizationDetail(fromPoints)
-      return fromPoints
-    }
-
-    const local = await lookupOrganizationLocal(orgnr)
-    if (local) {
-      seedOrganizationDetail(local)
-      return local
-    }
-
-    return fetchOrganizationDetail(orgnr)
-  }
-
-  async function resolveOrganizations(orgnrs: string[]): Promise<Organization[]> {
-    const fromPoints = new Map<string, Organization>()
-    const missing: string[] = []
-
-    for (const orgnr of orgnrs) {
-      const pointOrg = resolveOrganizationFromPoints(orgnr)
-      if (pointOrg) {
-        seedOrganizationDetail(pointOrg)
-        fromPoints.set(normalizeOrgnr(orgnr), pointOrg)
-      } else {
-        missing.push(orgnr)
-      }
-    }
-
-    if (missing.length === 0) {
-      return orgnrs
-        .map((orgnr) => fromPoints.get(normalizeOrgnr(orgnr)))
-        .filter((org): org is Organization => org != null)
-    }
-
-    const fetched = await fetchOrganizationsBatch(missing)
-    for (const org of fetched) {
-      fromPoints.set(normalizeOrgnr(org.orgnr), org)
-    }
-
-    return orgnrs
-      .map((orgnr) => fromPoints.get(normalizeOrgnr(orgnr)))
-      .filter((org): org is Organization => org != null)
-  }
 
   function showOrganizationDetails(org: Organization, latlng: L.LatLng, note?: string) {
     if (!map) return
@@ -524,7 +394,7 @@
     map.once('popupclose', clearKonsernOverlay)
 
     try {
-      const org = await resolveOrganization(orgnr)
+      const org = await resolveOrganization(orgnr, allPoints)
       const extra = note ? `<br/><em>${note}</em>` : ''
       popup.setContent(`${orgPopupHtml(org)}${extra}`)
 
@@ -535,7 +405,7 @@
           popup.setContent(
             `${orgPopupHtml(org, `<hr/><p><strong>Konsern</strong></p><div class="konsern-tree">${tree}</div>`)}${extra}`,
           )
-          wireKonsernPopupLinks(popup)
+          wireKonsernPopupLinks(popup, (nav) => void navigateToOrganization(nav))
           const members = flattenKonsernOrgnrs(konsern as import('../types').KonsernNode)
           showKonsernOverlay(orgnr, members)
         }
@@ -565,9 +435,9 @@
     }
 
     try {
-      const orgs = await resolveOrganizations(orgnrs)
+      const orgs = await resolveOrganizations(orgnrs, allPoints)
       orgs.sort((a, b) => a.navn.localeCompare(b.navn, 'nb'))
-      popup.setContent(addressPopupHtml(orgs))
+      popup.setContent(addressPopupHtml(orgs, [...new Set(allPoints.map((p) => p.orgType))].sort()))
     } catch (err) {
       popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjoner')
     }
@@ -595,31 +465,13 @@
       info.total != null
         ? `<br>${info.total.toLocaleString('nb-NO')} organisasjoner totalt i ${place}`
         : ''
-    const breakdownLine = formatOrgTypeBreakdownHtml(info.orgTypeBreakdown)
+    const breakdownLine = formatOrgTypeBreakdownHtml(info.orgTypeBreakdown, orgForms)
     L.popup({ maxWidth: 320 })
       .setLatLng(info.latlng)
       .setContent(
         `<strong>${place}</strong>${totalLine}${breakdownLine}<br><em>Zoom inn for enkeltadresser</em>`,
       )
       .openOn(map)
-  }
-
-  function formatOrgTypeBreakdownHtml(breakdownJson?: string): string {
-    if (!breakdownJson) return ''
-    try {
-      const breakdown = JSON.parse(breakdownJson) as Record<string, number>
-      const lines = Object.entries(breakdown)
-        .sort((left, right) => right[1] - left[1])
-        .slice(0, 6)
-        .map(([kode, count]) => {
-          const label = orgForms.find((form) => form.kode === kode)?.beskrivelse ?? kode
-          return `${label}: ${count.toLocaleString('nb-NO')}`
-        })
-      if (lines.length === 0) return ''
-      return `<br><br>${lines.join('<br>')}`
-    } catch {
-      return ''
-    }
   }
 
   function handleMarkerClick(
@@ -920,46 +772,20 @@
   }
 
   async function loadViewportSummary() {
-    if (!map || settings.visualization !== 'dots' || orgFocusActive) return
-
-    const targetKommuner = kommunerInBounds()
-    const zoom = map.getZoom()
-    const bbox = mapBbox(map.getBounds())
-    const token = ++summaryToken
-
-    // Never show stale/partial stats while recalculating.
-    updateDotsState({
-      statsLoading: true,
-      viewportSummary: null,
-      statsApproximate: false,
+    return loadViewportSummaryImpl({
+      getMap: () => map,
+      getSettings: () => settings,
+      isOrgFocusActive: () => orgFocusActive,
+      getKommunerInBounds: kommunerInBounds,
+      getBbox: (bounds) => mapBbox(bounds),
+      updateDotsState,
+      updateRenderedFeatureCount,
+      abortPrevious() {
+        summaryAbort?.abort()
+        summaryAbort = new AbortController()
+        return summaryAbort.signal
+      },
     })
-
-    try {
-      const { summary, approximate } = await fetchViewportSummary(settings, {
-        bbox,
-        zoom,
-        kommunenumre: targetKommuner,
-      })
-      if (token !== summaryToken) return
-
-      updateDotsState({
-        statsLoading: false,
-        viewportSummary: summary,
-        statsApproximate: approximate,
-        geocoded: summary.geocodedInBbox,
-        organizations: summary.geocodedInBbox,
-        skipped: summary.ungeocodedInViewport,
-        kommuner: summary.kommunerInViewport,
-      })
-      updateRenderedFeatureCount()
-    } catch (err) {
-      if (token !== summaryToken) return
-      updateDotsState({
-        statsLoading: false,
-        viewportSummary: null,
-        message: err instanceof Error ? err.message : 'Kunne ikke hente statistikk for utsnittet',
-      })
-    }
   }
 
   function applyPoints(nextPoints: OrganizationPoint[], truncated: boolean, kommuner: number) {
@@ -1012,7 +838,7 @@
     targetKommuner: string[],
     zoom: number,
   ) {
-    const expanded = expandBbox(bbox, 0.35)
+    const expanded = expandBbox(bbox, PREFETCH_BBOX_EXPANSION)
     const key = dotsCacheKey({
       bbox: expanded,
       kommunenumre: targetKommuner,
@@ -1167,7 +993,10 @@
       return
     }
 
-    const token = ++loadToken
+    loadAbort?.abort()
+    loadAbort = new AbortController()
+    const signal = loadAbort.signal
+
     dotsController?.setStale(true)
     updateDotsState({
       loading: true,
@@ -1182,9 +1011,9 @@
         kommunenumre: targetKommuner,
         zoom,
         limit: limitForZoom(zoom),
-      })
+      }, signal)
 
-      if (token !== loadToken) return
+      if (signal.aborted) return
 
       await dotsCache.set(cacheKey, {
         points: result.points,
@@ -1196,7 +1025,7 @@
       prefetchExpanded(bbox, targetKommuner, zoom)
       void loadViewportSummary()
     } catch (err) {
-      if (token !== loadToken) return
+      if (signal.aborted) return
       dotsController?.setStale(false)
       updateDotsState({
         loading: false,
@@ -1248,53 +1077,22 @@
   }
 
   function styleKommuneFeature(feature?: KommuneFeature) {
-    const kommunenummer = feature?.properties.kommunenummer ?? ''
-    const visible = isKommuneVisible(kommunenummer)
-    const count = visible ? kommuneCount(kommunenummer) : 0
-
-    if (settings.visualization === 'dots') {
-      return {
-        fillColor: '#64748b',
-        weight: visible ? 1 : 0.3,
-        opacity: visible ? 0.55 : 0.2,
-        color: '#475569',
-        fillOpacity: visible ? 0.08 : 0.03,
-      }
-    }
-
-    return {
-      fillColor: colorForValue(count, maxCount, settings.colorScheme),
-      weight: visible ? 1 : 0.3,
-      opacity: visible ? 1 : 0.35,
-      color: '#475569',
-      fillOpacity: visible ? 0.78 : 0.15,
-    }
+    return styleKommuneFeatureImpl(feature, {
+      isVisible: isKommuneVisible,
+      getCount: kommuneCount,
+      visualization: settings.visualization,
+      maxCount,
+      colorScheme: settings.colorScheme,
+    })
   }
 
   function styleFylkeFeature(feature?: FylkeFeature) {
-    const fylkesnummer = feature?.properties.fylkesnummer ?? ''
-    const visible = isFylkeVisible(fylkesnummer)
-    const count = visible ? fylkeCount(fylkesnummer) : 0
-
-    return {
-      fillColor: colorForValue(count, maxCount, settings.colorScheme),
-      weight: visible ? 1 : 0.3,
-      opacity: visible ? 1 : 0.35,
-      color: '#475569',
-      fillOpacity: visible ? 0.78 : 0.15,
-    }
-  }
-
-  function formatOrgTypeBreakdownFromRecord(byOrgType: Record<string, number>): string {
-    const lines = Object.entries(byOrgType)
-      .sort((left, right) => right[1] - left[1])
-      .slice(0, 6)
-      .map(([kode, count]) => {
-        const label = orgForms.find((form) => form.kode === kode)?.beskrivelse ?? kode
-        return `${label}: ${count.toLocaleString('nb-NO')}`
-      })
-    if (lines.length === 0) return ''
-    return `<br><br>${lines.join('<br>')}`
+    return styleFylkeFeatureImpl(feature, {
+      isVisible: isFylkeVisible,
+      getCount: fylkeCount,
+      maxCount,
+      colorScheme: settings.colorScheme,
+    })
   }
 
   async function showDistrictStatsPopup(options: {
@@ -1315,7 +1113,7 @@
     try {
       const stats = await fetchDistrictStats(options.level, options.districtId, settings)
       const total = stats.total > 0 ? stats.total : options.fallbackTotal
-      const breakdown = formatOrgTypeBreakdownFromRecord(stats.byOrgType)
+      const breakdown = formatOrgTypeBreakdownFromRecord(stats.byOrgType, orgForms)
       popup.setContent(
         `<strong>${options.label}</strong><br>
          ${levelLabel} ${options.districtId}<br>
@@ -1331,17 +1129,9 @@
   }
 
   function bindHoverHighlight(path: L.Path, featureLayer: L.Layer) {
-    path.on({
-      mouseover: (e) => {
-        const target = e.target as L.Path
-        target.setStyle({ weight: 2.5, color: '#0ea5e9', opacity: 1, fillOpacity: 0.9 })
-        target.bringToFront()
-        map?.getContainer().style.setProperty('cursor', 'pointer')
-      },
-      mouseout: () => {
-        geoLayer?.resetStyle(featureLayer)
-        map?.getContainer().style.removeProperty('cursor')
-      },
+    bindHoverHighlightImpl(path, featureLayer, {
+      getMap: () => map,
+      getGeoLayer: () => geoLayer,
     })
   }
 
@@ -1579,7 +1369,7 @@
 </script>
 
 <div class="map-shell">
-  <div class="map" bind:this={mapContainer}></div>
+  <div class="map" bind:this={mapContainer} role="application" aria-label="Organisasjonskart" id="map"></div>
 
   {#if !orgFocusActive && settings.visualization === 'dots' && orgTypeLegendItems.length > 0}
     <div class="legend-wrap">

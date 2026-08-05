@@ -6,6 +6,7 @@ import { assetUrl } from '../utils/assets'
 export const VECTOR_TILES_PATH = assetUrl('data/points.pmtiles')
 export const VECTOR_TILES_MANIFEST = assetUrl('data/points/manifest.json')
 export const VECTOR_TILES_LAYER = 'organizations'
+const MAX_PREFETCH_TILES_DETAIL = 120
 
 export interface VectorTilesLayerSpec {
   name: string
@@ -164,7 +165,7 @@ export async function prefetchOrganizationTiles(
   const primaryZoom = Math.max(bakedMin, Math.min(18, Math.max(leafletZoom - 1, paintZoom)))
   const padded = padBounds(bounds, 0.2)
   // Higher budget near detail (smaller tiles); still centre-first if dense.
-  const maxTiles = primaryZoom >= paintZoom ? 120 : primaryZoom >= bakedMin ? 80 : 48
+  const maxTiles = primaryZoom >= paintZoom ? MAX_PREFETCH_TILES_DETAIL : primaryZoom >= bakedMin ? 80 : 48
 
   const jobs = [
     prefetchZoomLevel(padded.west, padded.south, padded.east, padded.north, primaryZoom, maxTiles),

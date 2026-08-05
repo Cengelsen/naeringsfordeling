@@ -52,7 +52,8 @@ export interface BrregUpdate {
   endringstype: string
 }
 
-export type EntityKind = 'enhet' | 'underenhet'
+export type { EntityKind } from '../../shared/types.js'
+import type { EntityKind } from '../../shared/types.js'
 
 export type GeocodeQuality = 'verified' | 'fallback' | 'mismatch' | 'failed'
 

@@ -22,6 +22,8 @@ import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
 const SOURCE_ID = 'org-dots'
 const POINT_LAYER_ID = 'org-points'
 const CLICK_TOLERANCE_PX = 10
+const POINT_OPACITY_DEFAULT = 0.88
+const POINT_OPACITY_STALE = 0.45
 
 function aggregateLayerId(sourceLayer: string): string {
   return `org-${sourceLayer}`
@@ -294,7 +296,7 @@ export function createMaplibreDotsLayer(
   }
 
   function applyOpacity() {
-    const pointOpacity = stale ? 0.45 : 0.88
+    const pointOpacity = stale ? POINT_OPACITY_STALE : POINT_OPACITY_DEFAULT
     const fillOpacity = stale ? 0.28 : 0.42
 
     for (const spec of lodLayers) {
@@ -390,7 +392,7 @@ export function createMaplibreDotsLayer(
           0.75,
         ],
         'circle-stroke-color': '#0f172a',
-        'circle-opacity': 0.88,
+        'circle-opacity': POINT_OPACITY_DEFAULT,
       },
     })
   }

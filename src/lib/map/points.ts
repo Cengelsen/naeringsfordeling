@@ -43,7 +43,12 @@ export function organizationFromPoint(point: OrganizationPoint): Organization | 
 }
 
 export function normalizeOrgnr(orgnr: string): string {
-  return orgnr.replace(/\D/g, '')
+  let result = ''
+  for (let i = 0; i < orgnr.length; i++) {
+    const code = orgnr.charCodeAt(i)
+    if (code >= 48 && code <= 57) result += orgnr[i]
+  }
+  return result
 }
 
 export function fromCompactPoints(points: CompactPoint[]): OrganizationPoint[] {
@@ -133,24 +138,6 @@ export async function fetchKommunePointTile(
   } catch {
     return null
   }
-}
-
-/** @deprecated Use fetchViewportPointTiles */
-export async function fetchKommunePointTiles(
-  kommunenumre: string[],
-  bbox?: [number, number, number, number],
-): Promise<OrganizationPoint[] | null> {
-  if (bbox) {
-    const { fetchViewportPointTiles } = await import('./pointTiles')
-    return fetchViewportPointTiles(kommunenumre, bbox)
-  }
-
-  if (kommunenumre.length === 0) return null
-
-  const results = await Promise.all(kommunenumre.map((nr) => fetchKommunePointTile(nr)))
-  if (results.every((result) => result == null)) return null
-
-  return results.flatMap((result) => result ?? [])
 }
 
 export function canUseStaticTiles(filters: MapFilters): boolean {

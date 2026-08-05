@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { BrregAddress, BrregEntity, BrregUnderenhet, EntityKind, GeocodeQuality } from './types.js'
 import { addressCacheKey, pickAddressLine, type GeocodeResult } from './geocode.js'
+import { employeeBand } from './employeeBands.js'
 
 export function entityAddress(entity: BrregEntity | BrregUnderenhet): BrregAddress | null {
   if ('beliggenhetsadresse' in entity) {
@@ -52,6 +53,8 @@ function baseRecord(
     matrikkel_key: null as string | null,
     kommunenummer_geo: null as string | null,
     geocode_quality: null as GeocodeQuality | null,
+    employee_band: employeeBand(entity.antallAnsatte ?? null, entity.harRegistrertAntallAnsatte ?? false),
+    naeringskode_section: entity.naeringskode1?.kode?.slice(0, 2) ?? null,
   }
 }
 
@@ -69,13 +72,15 @@ const upsertStmt = `
     kommunenummer, address_key, lat, lng, konkurs, under_avvikling,
     vat_registered, deleted, updated_at, entity_kind, overordnet_enhet,
     naeringskode, naeringskode_label, antall_ansatte, har_registrert_antall_ansatte,
-    er_i_konsern, adresse_id, matrikkel_key, kommunenummer_geo, geocode_quality
+    er_i_konsern, adresse_id, matrikkel_key, kommunenummer_geo, geocode_quality,
+    employee_band, naeringskode_section
   ) VALUES (
     @orgnr, @navn, @org_type, @org_type_label, @address_text, @postnummer,
     @kommunenummer, @address_key, @lat, @lng, @konkurs, @under_avvikling,
     @vat_registered, @deleted, @updated_at, @entity_kind, @overordnet_enhet,
     @naeringskode, @naeringskode_label, @antall_ansatte, @har_registrert_antall_ansatte,
-    @er_i_konsern, @adresse_id, @matrikkel_key, @kommunenummer_geo, @geocode_quality
+    @er_i_konsern, @adresse_id, @matrikkel_key, @kommunenummer_geo, @geocode_quality,
+    @employee_band, @naeringskode_section
   )
   ON CONFLICT(orgnr) DO UPDATE SET
     navn = excluded.navn,
@@ -120,7 +125,9 @@ const upsertStmt = `
     geocode_quality = CASE
       WHEN excluded.address_key IS NOT organizations.address_key THEN NULL
       ELSE COALESCE(organizations.geocode_quality, excluded.geocode_quality)
-    END
+    END,
+    employee_band = excluded.employee_band,
+    naeringskode_section = excluded.naeringskode_section
 `
 
 export function upsertEntity(db: Database.Database, entity: BrregEntity, deleted = false) {

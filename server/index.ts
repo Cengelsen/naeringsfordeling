@@ -15,8 +15,6 @@ import {
   appendAreaFilters,
   appendBboxFilter,
   buildFilterQuery,
-  employeeBandSql,
-  naeringskodeSectionSql,
   parseFilters,
   rtreeBboxParams,
 } from './filters.js'
@@ -56,8 +54,8 @@ async function fetchKonsernstruktur(orgnr: string) {
 
 const POINT_SELECT = `o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_text, o.postnummer,
                 o.kommunenummer, o.lat, o.lng, o.adresse_id,
-                ${naeringskodeSectionSql('o')} AS naeringskode,
-                ${employeeBandSql('o')} AS employee_band,
+                o.naeringskode_section AS naeringskode,
+                o.employee_band,
                 o.entity_kind`
 
 app.use('/*', cors())
@@ -388,20 +386,32 @@ app.get('/api/organizations/search', (c) => {
     return c.json({ results: row ? [mapRow(row)] : [] })
   }
 
-  const pattern = `%${raw.replace(/[%_]/g, '')}%`
-  const prefix = `${raw.replace(/[%_]/g, '')}%`
-  const rows = db
-    .prepare(
-      `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
-       FROM organizations
-       WHERE deleted = 0 AND navn LIKE ? COLLATE NOCASE
-       ORDER BY
-         CASE WHEN navn LIKE ? COLLATE NOCASE THEN 0 ELSE 1 END,
-         LENGTH(navn),
-         navn
-       LIMIT ?`,
-    )
-    .all(pattern, prefix, limit) as SearchRow[]
+  const ftsQuery = raw.replace(/['"]/g, '').trim()
+  let rows: SearchRow[]
+  try {
+    rows = db
+      .prepare(
+        `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.kommunenummer, o.lat, o.lng
+         FROM organizations_fts fts
+         INNER JOIN organizations o ON o.rowid = fts.rowid
+         WHERE organizations_fts MATCH ?
+           AND o.deleted = 0
+         ORDER BY rank
+         LIMIT ?`,
+      )
+      .all(`${ftsQuery}*`, limit) as SearchRow[]
+  } catch {
+    const pattern = `%${raw.replace(/[%_]/g, '')}%`
+    rows = db
+      .prepare(
+        `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
+         FROM organizations
+         WHERE deleted = 0 AND navn LIKE ? COLLATE NOCASE
+         ORDER BY LENGTH(navn), navn
+         LIMIT ?`,
+      )
+      .all(pattern, limit) as SearchRow[]
+  }
 
   return c.json({ results: rows.map(mapRow) })
 })

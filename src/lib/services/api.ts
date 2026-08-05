@@ -358,14 +358,14 @@ export function limitForZoom(zoom: number): number {
   return Math.min(MAX_VIEWPORT_DOTS, Math.round(250 * 1.38 ** (z - 4)))
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+async function apiFetch<T>(path: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
   if (STATIC_API) {
     throw new ApiError('Live API er deaktivert i statisk modus')
   }
 
   let response: Response
   try {
-    response = await fetch(`${API_BASE}${path}`, init)
+    response = await fetch(`${API_BASE}${path}`, { ...init, signal })
   } catch {
     throw new ApiError(
       'Kan ikke nå databasen. Start API-et med yarn server og sørg for at organizations.db finnes.',
@@ -530,6 +530,7 @@ async function fetchViewportSummaryStatic(
 export async function fetchViewportSummary(
   filters: MapFilters,
   options: FetchViewportSummaryOptions,
+  signal?: AbortSignal,
 ): Promise<{ summary: ViewportSummary; approximate: boolean }> {
   if (STATIC_API) {
     const summary = await fetchViewportSummaryStatic(filters, options)
@@ -544,6 +545,8 @@ export async function fetchViewportSummary(
 
   const data = await apiFetch<{ summary: ViewportSummary }>(
     `/api/viewport-summary?${params.toString()}`,
+    undefined,
+    signal,
   )
   return { summary: data.summary, approximate: false }
 }
@@ -551,6 +554,7 @@ export async function fetchViewportSummary(
 async function fetchOrganizationPointsFromApi(
   filters: MapFilters,
   options: FetchPointsOptions = {},
+  signal?: AbortSignal,
 ): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
   if (STATIC_API) {
     return fetchOrganizationPointsFromStatic(filters, options)
@@ -581,7 +585,7 @@ async function fetchOrganizationPointsFromApi(
   const data = await apiFetch<{
     points: OrganizationPoint[] | CompactPoint[]
     truncated: boolean
-  }>(`/api/organizations/points?${params.toString()}`)
+  }>(`/api/organizations/points?${params.toString()}`, undefined, signal)
 
   return {
     points: parsePointsResponse(data),
@@ -592,8 +596,9 @@ async function fetchOrganizationPointsFromApi(
 export async function fetchOrganizationPoints(
   filters: MapFilters,
   options: FetchPointsOptions = {},
+  signal?: AbortSignal,
 ): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
-  return fetchOrganizationPointsFromApi(filters, options)
+  return fetchOrganizationPointsFromApi(filters, options, signal)
 }
 
 const ORG_DETAIL_CACHE_MAX = 500
@@ -759,36 +764,4 @@ export async function searchOrganizations(query: string, limit = 8): Promise<Org
     `/api/organizations/search?${params.toString()}`,
   )
   return data.results
-}
-
-/** @deprecated Use fetchOrganizationPoints for dots view */
-export async function fetchOrganizations(
-  kommunenumre: string[],
-  filters: MapFilters,
-  selectedFylke: string,
-  limit = 50000,
-): Promise<{ organizations: Organization[]; truncated: boolean }> {
-  if (STATIC_API) {
-    return { organizations: [], truncated: false }
-  }
-
-  const params = filtersToParams(filters)
-  params.set('limit', String(limit))
-
-  if (kommunenumre.length === 1) {
-    params.set('kommunenummer', kommunenumre[0])
-  } else if (kommunenumre.length > 1) {
-    params.set('kommunenummer', kommunenumre.join(','))
-  } else if (selectedFylke) {
-    params.set('fylke', selectedFylke)
-  }
-
-  const data = await apiFetch<{ organizations: Organization[]; truncated: boolean }>(
-    `/api/organizations?${params.toString()}`,
-  )
-
-  return {
-    organizations: data.organizations,
-    truncated: data.truncated,
-  }
 }
