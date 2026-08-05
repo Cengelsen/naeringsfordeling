@@ -241,9 +241,25 @@ export function orgDetailTilesCoverLeafletZoom(
   return bakedMin <= Math.max(0, leafletDetailMinZoom - 1)
 }
 
+async function fetchWithRetry(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  retries = 2,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(input, init)
+      if (response.ok || response.status < 500 || attempt >= retries) return response
+    } catch (err) {
+      if (attempt >= retries) throw err
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt))
+  }
+}
+
 export async function loadVectorTilesManifest(): Promise<VectorTilesManifest | null> {
   try {
-    const response = await fetch(VECTOR_TILES_MANIFEST)
+    const response = await fetchWithRetry(VECTOR_TILES_MANIFEST)
     if (!response.ok) return null
     return (await response.json()) as VectorTilesManifest
   } catch {
@@ -257,7 +273,7 @@ export async function probeVectorTiles(): Promise<{
 }> {
   try {
     const [head, manifest] = await Promise.all([
-      fetch(VECTOR_TILES_PATH, { method: 'HEAD' }),
+      fetchWithRetry(VECTOR_TILES_PATH, { method: 'HEAD' }),
       loadVectorTilesManifest(),
     ])
     return {

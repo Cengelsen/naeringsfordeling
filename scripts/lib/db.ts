@@ -217,7 +217,28 @@ function rebuildFts(db: Database.Database) {
   `)
 }
 
+function ftsSchemaValid(db: Database.Database): boolean {
+  try {
+    const row = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'organizations_fts'")
+      .get() as { sql: string } | undefined
+    if (!row) return false
+
+    const triggerCount = (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name IN ('organizations_fts_insert', 'organizations_fts_delete', 'organizations_fts_update')",
+        )
+        .get() as { count: number }
+    ).count
+    return triggerCount === 3
+  } catch {
+    return false
+  }
+}
+
 function ensureFts(db: Database.Database) {
+  if (ftsSchemaValid(db)) return
   rebuildFts(db)
 }
 

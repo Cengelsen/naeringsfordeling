@@ -31,11 +31,16 @@ const db = openDatabase(dbPath)
 const app = new Hono()
 
 const KONSERN_CACHE_TTL_MS = 60 * 60 * 1000
+const KONSERN_CACHE_MAX_SIZE = 500
 const konsernCache = new Map<string, { expiresAt: number; data: unknown }>()
 
 async function fetchKonsernstruktur(orgnr: string) {
   const cached = konsernCache.get(orgnr)
-  if (cached && cached.expiresAt > Date.now()) return cached.data
+  if (cached && cached.expiresAt > Date.now()) {
+    konsernCache.delete(orgnr)
+    konsernCache.set(orgnr, cached)
+    return cached.data
+  }
 
   const response = await fetch(
     `https://data.brreg.no/enhetsregisteret/api/konsernstruktur/${orgnr}`,
@@ -49,6 +54,12 @@ async function fetchKonsernstruktur(orgnr: string) {
 
   const data = await response.json()
   konsernCache.set(orgnr, { expiresAt: Date.now() + KONSERN_CACHE_TTL_MS, data })
+
+  if (konsernCache.size > KONSERN_CACHE_MAX_SIZE) {
+    const oldest = konsernCache.keys().next().value!
+    konsernCache.delete(oldest)
+  }
+
   return data
 }
 
@@ -57,6 +68,33 @@ const POINT_SELECT = `o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_t
                 o.naeringskode_section AS naeringskode,
                 o.employee_band,
                 o.entity_kind`
+
+const ORG_DETAIL_SELECT = `orgnr, navn, org_type, org_type_label, address_text, postnummer,
+              kommunenummer, lat, lng, naeringskode, naeringskode_label,
+              antall_ansatte, har_registrert_antall_ansatte, entity_kind,
+              overordnet_enhet, er_i_konsern, geocode_quality, matrikkel_key`
+
+const stmtOrgFormer = db.prepare(
+  `SELECT org_type AS kode, MIN(org_type_label) AS beskrivelse, COUNT(*) AS count
+   FROM organizations WHERE deleted = 0 GROUP BY org_type ORDER BY beskrivelse`,
+)
+const stmtNaeringskoder = db.prepare(
+  `SELECT substr(naeringskode, 1, 2) AS section, MIN(naeringskode_label) AS label, COUNT(*) AS count
+   FROM organizations WHERE deleted = 0 AND naeringskode IS NOT NULL AND length(naeringskode) >= 2
+   GROUP BY section ORDER BY section`,
+)
+const stmtKommuner = db.prepare(
+  `SELECT kommunenummer AS nummer, COUNT(*) AS count
+   FROM organizations WHERE deleted = 0 AND kommunenummer IS NOT NULL
+   GROUP BY kommunenummer ORDER BY kommunenummer`,
+)
+const stmtOrgByOrgnr = db.prepare(
+  `SELECT ${ORG_DETAIL_SELECT} FROM organizations WHERE deleted = 0 AND orgnr = ?`,
+)
+const stmtSearchByOrgnr = db.prepare(
+  `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
+   FROM organizations WHERE deleted = 0 AND orgnr = ?`,
+)
 
 app.use('/*', cors())
 app.use(compress())
@@ -163,34 +201,12 @@ app.get('/api/health', (c) => {
 })
 
 app.get('/api/organisasjonsformer', (c) => {
-  const rows = db
-    .prepare(
-      `SELECT org_type AS kode, MIN(org_type_label) AS beskrivelse, COUNT(*) AS count
-       FROM organizations
-       WHERE deleted = 0
-       GROUP BY org_type
-       ORDER BY beskrivelse`,
-    )
-    .all() as Array<{ kode: string; beskrivelse: string; count: number }>
-
+  const rows = stmtOrgFormer.all() as Array<{ kode: string; beskrivelse: string; count: number }>
   return c.json({ organisasjonsformer: rows.map(({ kode, beskrivelse }) => ({ kode, beskrivelse })) })
 })
 
 app.get('/api/naeringskoder', (c) => {
-  const rows = db
-    .prepare(
-      `SELECT substr(naeringskode, 1, 2) AS section,
-              MIN(naeringskode_label) AS label,
-              COUNT(*) AS count
-       FROM organizations
-       WHERE deleted = 0
-         AND naeringskode IS NOT NULL
-         AND length(naeringskode) >= 2
-       GROUP BY section
-       ORDER BY section`,
-    )
-    .all() as Array<{ section: string; label: string | null; count: number }>
-
+  const rows = stmtNaeringskoder.all() as Array<{ section: string; label: string | null; count: number }>
   return c.json({
     naeringskoder: rows.map((row) => ({
       section: row.section,
@@ -201,16 +217,7 @@ app.get('/api/naeringskoder', (c) => {
 })
 
 app.get('/api/kommuner', (c) => {
-  const rows = db
-    .prepare(
-      `SELECT kommunenummer AS nummer, COUNT(*) AS count
-       FROM organizations
-       WHERE deleted = 0 AND kommunenummer IS NOT NULL
-       GROUP BY kommunenummer
-       ORDER BY kommunenummer`,
-    )
-    .all() as Array<{ nummer: string; count: number }>
-
+  const rows = stmtKommuner.all() as Array<{ nummer: string; count: number }>
   return c.json({ kommuner: rows })
 })
 
@@ -375,20 +382,21 @@ app.get('/api/organizations/search', (c) => {
   })
 
   if (digits.length === 9) {
-    const row = db
-      .prepare(
-        `SELECT orgnr, navn, org_type, org_type_label, kommunenummer, lat, lng
-         FROM organizations
-         WHERE deleted = 0 AND orgnr = ?`,
-      )
-      .get(digits) as SearchRow | undefined
-
+    const row = stmtSearchByOrgnr.get(digits) as SearchRow | undefined
     return c.json({ results: row ? [mapRow(row)] : [] })
   }
 
-  const ftsQuery = raw.replace(/['"]/g, '').trim()
+  const ftsQuery = raw
+    .replace(/[^\w\s\u00C0-\u024F-]/g, '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => `"${token}"`)
+    .join(' ')
+
   let rows: SearchRow[]
   try {
+    if (!ftsQuery) throw new Error('empty query')
     rows = db
       .prepare(
         `SELECT o.orgnr, o.navn, o.org_type, o.org_type_label, o.kommunenummer, o.lat, o.lng
@@ -471,11 +479,6 @@ type OrganizationDetailRow = {
   matrikkel_key: string | null
 }
 
-const ORG_DETAIL_SELECT = `orgnr, navn, org_type, org_type_label, address_text, postnummer,
-              kommunenummer, lat, lng, naeringskode, naeringskode_label,
-              antall_ansatte, har_registrert_antall_ansatte, entity_kind,
-              overordnet_enhet, er_i_konsern, geocode_quality, matrikkel_key`
-
 function organizationFromDetailRow(row: OrganizationDetailRow) {
   return {
     orgnr: row.orgnr,
@@ -546,13 +549,7 @@ app.post('/api/organizations/batch', async (c) => {
 
 app.get('/api/organizations/:orgnr', (c) => {
   const orgnr = c.req.param('orgnr')
-  const row = db
-    .prepare(
-      `SELECT ${ORG_DETAIL_SELECT}
-       FROM organizations
-       WHERE deleted = 0 AND orgnr = ?`,
-    )
-    .get(orgnr) as OrganizationDetailRow | undefined
+  const row = stmtOrgByOrgnr.get(orgnr) as OrganizationDetailRow | undefined
 
   if (!row) {
     return c.json({ error: 'Organisasjon ikke funnet' }, 404)

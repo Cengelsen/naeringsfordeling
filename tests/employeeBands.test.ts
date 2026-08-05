@@ -43,3 +43,46 @@ describe('bandMatchesFilter', () => {
     expect(bandMatchesFilter('20+', ['0', '1-4'])).toBe(false)
   })
 })
+
+describe('employeeBand SQL/TS consistency', () => {
+  /**
+   * Mirrors the SQL CASE from scripts/lib/db.ts:
+   *   WHEN har_registrert_antall_ansatte = 0 OR antall_ansatte IS NULL THEN 'unknown'
+   *   WHEN antall_ansatte = 0 THEN '0'
+   *   WHEN antall_ansatte <= 4 THEN '1-4'
+   *   WHEN antall_ansatte <= 19 THEN '5-19'
+   *   ELSE '20+'
+   */
+  function sqlBand(antallAnsatte: number | null, harRegistrert: number): string {
+    if (harRegistrert === 0 || antallAnsatte === null) return 'unknown'
+    if (antallAnsatte === 0) return '0'
+    if (antallAnsatte <= 4) return '1-4'
+    if (antallAnsatte <= 19) return '5-19'
+    return '20+'
+  }
+
+  const testCases: Array<[number | null, boolean]> = [
+    [null, true],
+    [null, false],
+    [0, true],
+    [0, false],
+    [1, true],
+    [4, true],
+    [5, true],
+    [19, true],
+    [20, true],
+    [100, true],
+    [1000, true],
+    [1, false],
+    [20, false],
+  ]
+
+  it.each(testCases)(
+    'TS matches SQL for antallAnsatte=%s harRegistrert=%s',
+    (antallAnsatte, harRegistrert) => {
+      const tsResult = employeeBand(antallAnsatte, harRegistrert)
+      const sqlResult = sqlBand(antallAnsatte, harRegistrert ? 1 : 0)
+      expect(tsResult).toBe(sqlResult)
+    },
+  )
+})

@@ -666,7 +666,10 @@ export async function fetchOrganizationDetail(orgnr: string): Promise<Organizati
  * Resolve many organisations in as few requests as possible (address popups).
  * Uses LRU cache, then one POST /batch per chunk of up to 100 orgnrs.
  */
-export async function fetchOrganizationsBatch(orgnrs: string[]): Promise<Organization[]> {
+export async function fetchOrganizationsBatch(
+  orgnrs: string[],
+  signal?: AbortSignal,
+): Promise<Organization[]> {
   const unique = [...new Set(orgnrs.map(normalizeOrgnr).filter(Boolean))]
   if (unique.length === 0) return []
 
@@ -690,6 +693,7 @@ export async function fetchOrganizationsBatch(orgnrs: string[]): Promise<Organiz
   }
 
   for (let i = 0; i < missing.length; i += BATCH_ORG_MAX) {
+    signal?.throwIfAborted()
     const chunk = missing.slice(i, i + BATCH_ORG_MAX)
     if (STATIC_API) {
       for (const orgnr of chunk) {
@@ -699,11 +703,15 @@ export async function fetchOrganizationsBatch(orgnrs: string[]): Promise<Organiz
       continue
     }
 
-    const data = await apiFetch<{ organizations: Organization[] }>('/api/organizations/batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ orgnrs: chunk }),
-    })
+    const data = await apiFetch<{ organizations: Organization[] }>(
+      '/api/organizations/batch',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orgnrs: chunk }),
+      },
+      signal,
+    )
     for (const org of data.organizations) {
       resolved.set(normalizeOrgnr(org.orgnr), touchOrgDetailCache(org))
     }
@@ -712,13 +720,17 @@ export async function fetchOrganizationsBatch(orgnrs: string[]): Promise<Organiz
   return unique.map((orgnr) => resolved.get(orgnr)).filter((org): org is Organization => org != null)
 }
 
-export async function fetchKonsernstruktur(orgnr: string): Promise<Konsernstruktur | null> {
+export async function fetchKonsernstruktur(
+  orgnr: string,
+  signal?: AbortSignal,
+): Promise<Konsernstruktur | null> {
   if (STATIC_API) return null
 
   let response: Response
   try {
-    response = await fetch(`${API_BASE}/api/organizations/${orgnr}/konsern`)
-  } catch {
+    response = await fetch(`${API_BASE}/api/organizations/${orgnr}/konsern`, { signal })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') throw err
     throw new ApiError('Kan ikke nå databasen for konsernstruktur.')
   }
 

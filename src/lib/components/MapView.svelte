@@ -26,7 +26,6 @@
   import {
     fetchOrganizationDetail,
     fetchOrganizationLocation,
-    fetchKonsernstruktur,
     lookupOrganizationLocal,
     fetchOrganizationPoints,
     fetchDistrictStats,
@@ -37,7 +36,6 @@
     canUseStaticTiles,
     filterPointsByMapFilters,
     normalizeOrgnr,
-    organizationFromPoint,
   } from '../map/points'
   import type { DotFilters } from '../map/maplibreDotsLayer'
   import {
@@ -63,17 +61,16 @@
   import { createDotsLayer, type DotsLayerController } from '../map/dotsLayer'
   import { forEachPathLayer } from '../map/pathLayers'
   import {
-    orgPopupHtml,
-    flattenKonsernOrgnrs,
-    konsernTreeHtml,
-    addressPopupHtml,
-    formatOrgTypeBreakdownHtml,
     formatOrgTypeBreakdownFromRecord,
-    wireKonsernPopupLinks,
-    resolveOrganization,
-    resolveOrganizations,
-    seedHint,
   } from '../map/organizationPopups'
+  import {
+    showOrganizationDetails as showOrganizationDetailsImpl,
+    showOrganizationPopup as showOrganizationPopupImpl,
+    showAddressPopup as showAddressPopupImpl,
+    handleMarkerClick as handleMarkerClickImpl,
+    handleAggregateClick as handleAggregateClickImpl,
+    type PopupContext,
+  } from '../map/popupController'
   import {
     loadViewportSummary as loadViewportSummaryImpl,
   } from '../map/viewportStats'
@@ -130,7 +127,6 @@
   let webglBannerDismissed = $state(false)
   let orgFocusActive = $state(false)
   let orgMarker: L.CircleMarker | null = null
-  let konsernOverlay: L.LayerGroup | null = null
 
   const ORG_LOCATE_ZOOM = 18
   const PREFETCH_BBOX_EXPANSION = 0.35
@@ -315,132 +311,16 @@
     ].join('|')
   }
 
-  function clearKonsernOverlay() {
-    konsernOverlay?.remove()
-    konsernOverlay = null
+  const popupCtx: PopupContext = {
+    getMap: () => map,
+    getAllPoints: () => allPoints,
+    getSettings: () => settings,
+    getOrgForms: () => orgForms,
+    navigateToOrganization: (orgnr) => void navigateToOrganization(orgnr),
   }
-
-  function showKonsernOverlay(rootOrgnr: string, memberOrgnrs: string[]) {
-    if (!map) return
-    clearKonsernOverlay()
-
-    const rootPoint = allPoints.find(
-      (point) => normalizeOrgnr(point.orgnr) === normalizeOrgnr(rootOrgnr),
-    )
-    if (!rootPoint) return
-
-    konsernOverlay = L.layerGroup().addTo(map)
-    const rootLatLng = L.latLng(rootPoint.lat, rootPoint.lng)
-
-    for (const orgnr of memberOrgnrs) {
-      if (normalizeOrgnr(orgnr) === normalizeOrgnr(rootOrgnr)) continue
-      const member = allPoints.find(
-        (point) => normalizeOrgnr(point.orgnr) === normalizeOrgnr(orgnr),
-      )
-      if (!member) continue
-
-      L.polyline([rootLatLng, L.latLng(member.lat, member.lng)], {
-        color: '#64748b',
-        weight: 1.5,
-        opacity: 0.55,
-        dashArray: '6 6',
-      }).addTo(konsernOverlay)
-    }
-  }
-
 
   function showOrganizationDetails(org: Organization, latlng: L.LatLng, note?: string) {
-    if (!map) return
-    const extra = note ? `<br/><em>${note}</em>` : ''
-    L.popup({ maxWidth: 320 })
-      .setLatLng(latlng)
-      .setContent(`${orgPopupHtml(org)}${extra}`)
-      .openOn(map)
-  }
-
-  async function showOrganizationPopup(
-    orgnr: string,
-    latlng: L.LatLng,
-    note?: string,
-    hint?: Partial<OrganizationPoint> | null,
-  ) {
-    if (!map) return
-
-    seedHint(hint)
-    const popup = L.popup({ maxWidth: 360, className: 'org-popup' })
-      .setLatLng(latlng)
-      .setContent('Laster organisasjon…')
-      .openOn(map)
-
-    const hinted =
-      hint?.orgnr && hint.navn
-        ? organizationFromPoint({
-            orgnr: hint.orgnr,
-            orgType: hint.orgType ?? '',
-            lat: latlng.lat,
-            lng: latlng.lng,
-            navn: hint.navn,
-            orgTypeLabel: hint.orgTypeLabel,
-            addressText: hint.addressText,
-            postnummer: hint.postnummer,
-            kommunenummer: hint.kommunenummer,
-          })
-        : null
-    if (hinted) {
-      const extra = note ? `<br/><em>${note}</em>` : ''
-      popup.setContent(`${orgPopupHtml(hinted)}${extra}`)
-    }
-
-    map.once('popupclose', clearKonsernOverlay)
-
-    try {
-      const org = await resolveOrganization(orgnr, allPoints)
-      const extra = note ? `<br/><em>${note}</em>` : ''
-      popup.setContent(`${orgPopupHtml(org)}${extra}`)
-
-      if (settings.konsernMode && org.erIKonsern) {
-        const konsern = await fetchKonsernstruktur(orgnr)
-        if (konsern) {
-          const tree = konsernTreeHtml(konsern as import('../types').KonsernNode)
-          popup.setContent(
-            `${orgPopupHtml(org, `<hr/><p><strong>Konsern</strong></p><div class="konsern-tree">${tree}</div>`)}${extra}`,
-          )
-          wireKonsernPopupLinks(popup, (nav) => void navigateToOrganization(nav))
-          const members = flattenKonsernOrgnrs(konsern as import('../types').KonsernNode)
-          showKonsernOverlay(orgnr, members)
-        }
-      }
-    } catch (err) {
-      popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjon')
-    }
-  }
-
-  async function showAddressPopup(
-    orgnrs: string[],
-    latlng: L.LatLng,
-    hint?: Partial<OrganizationPoint> | null,
-  ) {
-    if (!map) return
-
-    seedHint(hint)
-    const popup = L.popup({ maxWidth: 360, className: 'address-popup' })
-      .setLatLng(latlng)
-      .setContent('Laster organisasjoner…')
-      .openOn(map)
-
-    if (hint?.addressText && hint?.postnummer) {
-      popup.setContent(
-        `<p class="address-popup-header"><strong>${hint.addressText}, ${hint.postnummer}</strong></p><p class="address-popup-summary">Laster ${orgnrs.length} organisasjoner…</p>`,
-      )
-    }
-
-    try {
-      const orgs = await resolveOrganizations(orgnrs, allPoints)
-      orgs.sort((a, b) => a.navn.localeCompare(b.navn, 'nb'))
-      popup.setContent(addressPopupHtml(orgs, [...new Set(allPoints.map((p) => p.orgType))].sort()))
-    } catch (err) {
-      popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjoner')
-    }
+    showOrganizationDetailsImpl(popupCtx, org, latlng, note)
   }
 
   function handleAggregateClick(info: {
@@ -452,26 +332,7 @@
     districtLevel?: string
     orgTypeBreakdown?: string
   }) {
-    if (!map) return
-    const typeLabel = orgForms.find((form) => form.kode === info.orgType)?.beskrivelse ?? info.orgType
-    const place =
-      info.label ??
-      (info.districtLevel === 'fylke'
-        ? 'Fylke'
-        : info.districtLevel === 'grunnkrets'
-          ? 'Grunnkrets'
-          : 'Kommune')
-    const totalLine =
-      info.total != null
-        ? `<br>${info.total.toLocaleString('nb-NO')} organisasjoner totalt i ${place}`
-        : ''
-    const breakdownLine = formatOrgTypeBreakdownHtml(info.orgTypeBreakdown, orgForms)
-    L.popup({ maxWidth: 320 })
-      .setLatLng(info.latlng)
-      .setContent(
-        `<strong>${place}</strong>${totalLine}${breakdownLine}<br><em>Zoom inn for enkeltadresser</em>`,
-      )
-      .openOn(map)
+    handleAggregateClickImpl(map, orgForms, info)
   }
 
   function handleMarkerClick(
@@ -479,11 +340,7 @@
     latlng: L.LatLng,
     hint?: Partial<OrganizationPoint> | null,
   ) {
-    if (orgnrs.length === 1) {
-      void showOrganizationPopup(orgnrs[0]!, latlng, undefined, hint)
-    } else {
-      void showAddressPopup(orgnrs, latlng, hint)
-    }
+    handleMarkerClickImpl(popupCtx, orgnrs, latlng, hint)
   }
 
   function clearOrgMarker() {
@@ -738,25 +595,7 @@
   function updateDotsState(partial: Partial<DotsLoadState>) {
     const current = untrack(() => dotsState)
     const next = { ...current, ...partial }
-    if (
-      next.loading === current.loading &&
-      next.phase === current.phase &&
-      next.organizations === current.organizations &&
-      next.geocoded === current.geocoded &&
-      next.skipped === current.skipped &&
-      next.kommuner === current.kommuner &&
-      next.message === current.message &&
-      next.webglUnavailable === current.webglUnavailable &&
-      next.renderedFeatureCount === current.renderedFeatureCount &&
-      next.statsApproximate === current.statsApproximate &&
-      next.statsLoading === current.statsLoading &&
-      next.viewportSummary?.geocodedInBbox === current.viewportSummary?.geocodedInBbox &&
-      next.viewportSummary?.addressesInBbox === current.viewportSummary?.addressesInBbox &&
-      next.viewportSummary?.ungeocodedInViewport === current.viewportSummary?.ungeocodedInViewport &&
-      next.viewportSummary?.renderMode === current.viewportSummary?.renderMode
-    ) {
-      return
-    }
+    if (JSON.stringify(next) === JSON.stringify(current)) return
     dotsState = next
     onDotsStateChange?.(next)
   }

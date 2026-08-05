@@ -38,9 +38,24 @@ export type DistrictColorFeature = Feature & {
 
 const layerCache = new Map<string, FeatureCollection>()
 
+async function fetchWithRetry(
+  input: RequestInfo | URL,
+  retries = 2,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(input)
+      if (response.ok || response.status < 500 || attempt >= retries) return response
+    } catch (err) {
+      if (attempt >= retries) throw err
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt))
+  }
+}
+
 export async function loadDistrictColorsManifest(): Promise<DistrictColorsManifest | null> {
   try {
-    const response = await fetch(DISTRICT_COLORS_MANIFEST)
+    const response = await fetchWithRetry(DISTRICT_COLORS_MANIFEST)
     if (!response.ok) return null
     return (await response.json()) as DistrictColorsManifest
   } catch {
