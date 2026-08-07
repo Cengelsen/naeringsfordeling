@@ -513,6 +513,23 @@ export function getStats(db: Database.Database) {
   return { ...stats, rtree: rtree.count }
 }
 
+/** Organizations with a Norwegian postnummer that still lack coordinates. */
+export function countPendingGeocodeWithPostnummer(db: Database.Database): number {
+  return (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM organizations
+         WHERE deleted = 0
+           AND lat IS NULL
+           AND address_key IS NOT NULL
+           AND postnummer IS NOT NULL
+           AND trim(postnummer) != ''`,
+      )
+      .get() as { count: number }
+  ).count
+}
+
 /** Rows that still lack data introduced after an schema upgrade. */
 export function getBackfillStats(db: Database.Database) {
   const row = db

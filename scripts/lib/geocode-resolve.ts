@@ -46,13 +46,11 @@ export function geocodeSourceDescription(
   db: Database.Database,
   options: Pick<GeocodeResolveOptions, 'allowApi' | 'kartverketCacheDir'> = {},
 ): string {
-  const allowApi = options.allowApi ?? true
+  const allowApi = options.allowApi ?? false
   const cacheDir = options.kartverketCacheDir ?? DEFAULT_KARTVERKET_CACHE_DIR
 
   if (kartverketBulkAvailable(db)) {
-    return allowApi
-      ? `lokal Kartverket-database (${kartverketAddressCount(db).toLocaleString('nb-NO')} adresser, deretter API ved miss)`
-      : `lokal Kartverket-database (${kartverketAddressCount(db).toLocaleString('nb-NO')} adresser, kun lokal)`
+    return `lokal Kartverket-database (${kartverketAddressCount(db).toLocaleString('nb-NO')} adresser)`
   }
   if (findCachedKartverketZip(cacheDir)) {
     return allowApi
@@ -62,7 +60,7 @@ export function geocodeSourceDescription(
   return allowApi ? 'Kartverket Adresse-API' : 'ingen lokal Kartverket-data (geokoding hoppes over)'
 }
 
-/** Geocode via local bulk register when available; API only when explicitly allowed. */
+/** Geocode via local bulk register when available; API only when bulk is missing and explicitly allowed. */
 export async function geocodeAddressResolved(
   db: Database.Database,
   address: BrregAddress,
@@ -72,7 +70,7 @@ export async function geocodeAddressResolved(
   if (!address.postnummer) return null
   if (address.landkode && address.landkode !== 'NO') return null
 
-  const allowApi = options.allowApi ?? true
+  const allowApi = options.allowApi ?? false
   const cacheDir = options.kartverketCacheDir ?? DEFAULT_KARTVERKET_CACHE_DIR
 
   await ensureLocalKartverketReady(db, cacheDir)
@@ -83,7 +81,7 @@ export async function geocodeAddressResolved(
       postnummer: address.postnummer,
       kommunenummer: address.kommunenummer ?? null,
     })
-    if (local) return local
+    return local
   }
 
   if (!allowApi) return null

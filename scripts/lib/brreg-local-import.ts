@@ -4,8 +4,8 @@ import {
   BRREG_ENHETER_FILE,
   BRREG_UNDERENHETER_FILE,
   DEFAULT_REFERENCE_CACHE_DIR,
-  importBrregEnheterFromCache,
-  importBrregUnderenheterFromCache,
+  importBrregEnheterFromCacheTransactional,
+  importBrregUnderenheterFromCacheTransactional,
   readReferenceManifest,
   referencePath,
   ensureBrregReferenceCache,
@@ -47,8 +47,8 @@ export async function importBrregForKommuner(
   console.log(`  Enheter fra ${enheterPath}`)
 
   let imported = 0
-  await importBrregEnheterFromCache(enheterPath, async (entity) => {
-    upsertEntity(db, entity, Boolean(entity.slettedato))
+  await importBrregEnheterFromCacheTransactional(db, enheterPath, async (entity) => {
+    upsertEntity(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
     imported += 1
   }, filterEntity)
   console.log(`  ${imported.toLocaleString('nb-NO')} enheter importert`)
@@ -58,8 +58,8 @@ export async function importBrregForKommuner(
   } else if (existsSync(underenheterPath)) {
     let importedUnder = 0
     console.log(`  Underenheter fra ${underenheterPath}`)
-    await importBrregUnderenheterFromCache(underenheterPath, async (entity) => {
-      upsertUnderenhet(db, entity, Boolean(entity.slettedato))
+    await importBrregUnderenheterFromCacheTransactional(db, underenheterPath, async (entity) => {
+      upsertUnderenhet(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
       importedUnder += 1
     }, filterEntity)
     imported += importedUnder
@@ -102,8 +102,8 @@ export async function importBrregNationwideFromCache(
 
   console.log(`Backfill enheter fra ${reference.enheterPath}…`)
   let imported = 0
-  await importBrregEnheterFromCache(reference.enheterPath, async (entity) => {
-    upsertEntity(db, entity, Boolean(entity.slettedato))
+  await importBrregEnheterFromCacheTransactional(db, reference.enheterPath, async (entity) => {
+    upsertEntity(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
     imported += 1
   })
   console.log(`  Oppdatert ${imported.toLocaleString('nb-NO')} enheter`)
@@ -113,8 +113,8 @@ export async function importBrregNationwideFromCache(
     console.log('Hopper over underenheter.')
   } else if (reference.underenheterPath) {
     console.log(`Backfill underenheter fra ${reference.underenheterPath}…`)
-    await importBrregUnderenheterFromCache(reference.underenheterPath, async (entity) => {
-      upsertUnderenhet(db, entity, Boolean(entity.slettedato))
+    await importBrregUnderenheterFromCacheTransactional(db, reference.underenheterPath, async (entity) => {
+      upsertUnderenhet(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
       importedUnder += 1
     })
     console.log(`  Importert/oppdatert ${importedUnder.toLocaleString('nb-NO')} underenheter`)

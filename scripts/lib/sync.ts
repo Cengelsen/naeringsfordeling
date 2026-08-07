@@ -692,7 +692,7 @@ async function runGeocodeLoop(db: Database.Database, options: SyncOptions) {
 
 export async function runSync(db: Database.Database, options: SyncOptions = {}) {
   const statsBefore = getStats(db)
-  const resolved: SyncOptions = { ...options, allowApi: options.allowApi ?? true }
+  const resolved: SyncOptions = { ...options, allowApi: options.allowApi ?? false }
 
   if (resolved.geocodeOnly) {
     if (resolved.regeocodeMetadata) {

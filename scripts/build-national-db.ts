@@ -22,13 +22,14 @@ import {
   rebuildOrgsRtree,
   removeDatabaseFiles,
   setSyncState,
+  countPendingGeocodeWithPostnummer,
 } from './lib/db.js'
 import {
   DEFAULT_REFERENCE_CACHE_DIR,
   describeReferenceCache,
   ensureBrregReferenceCache,
-  importBrregEnheterFromCache,
-  importBrregUnderenheterFromCache,
+  importBrregEnheterFromCacheTransactional,
+  importBrregUnderenheterFromCacheTransactional,
   writeReferenceManifest,
 } from './lib/reference-cache.js'
 import { upsertEntity, upsertUnderenhet } from './lib/organizations.js'
@@ -73,8 +74,8 @@ async function importBrregNationwide(
 
   let imported = 0
   console.log(`  Enheter fra ${reference.enheterPath}…`)
-  await importBrregEnheterFromCache(reference.enheterPath, async (entity) => {
-    upsertEntity(db, entity, Boolean(entity.slettedato))
+  await importBrregEnheterFromCacheTransactional(db, reference.enheterPath, async (entity) => {
+    upsertEntity(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
     imported += 1
   })
   console.log(`  ${imported.toLocaleString('nb-NO')} enheter importert`)
@@ -84,8 +85,8 @@ async function importBrregNationwide(
     console.log('  Underenheter hoppet over (--skip-underenheter).')
   } else if (reference.underenheterPath) {
     console.log(`  Underenheter fra ${reference.underenheterPath}…`)
-    await importBrregUnderenheterFromCache(reference.underenheterPath, async (entity) => {
-      upsertUnderenhet(db, entity, Boolean(entity.slettedato))
+    await importBrregUnderenheterFromCacheTransactional(db, reference.underenheterPath, async (entity) => {
+      upsertUnderenhet(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
       importedUnder += 1
     })
     console.log(`  ${importedUnder.toLocaleString('nb-NO')} underenheter importert`)
@@ -126,59 +127,74 @@ async function main() {
   console.log(`  Kartverket-cache: ${describeKartverketCache(kartverketCacheDir)}`)
   console.log('Kilder: lokale BRREG/Kartverket-filer (nedlastes kun ved manglende cache)')
 
-  if (!args.skipKartverket) {
-    console.log('\nSteg 1/4: Kartverket Adresse (bulk CSV, hele landet)…')
-    await downloadAndImportNationalKartverket(db, {
-      cacheDir: kartverketCacheDir,
-      reuseDownload: args.reuseDownloads,
-      clearExisting: true,
-    })
-    writeReferenceManifest(args.referenceCacheDir, {
-      kartverket_national_cached_at: new Date().toISOString(),
-    })
-    setSyncState(db, 'kartverket_bulk_imported_at', new Date().toISOString())
-  } else {
-    console.log('\nSteg 1/4: Hopper over Kartverket-nedlasting (--skip-kartverket).')
-    const existing = kartverketAddressCount(db)
-    if (existing === 0) {
-      throw new Error(
-        'Ingen Kartverket-adresser i databasen. Fjern --skip-kartverket eller importer Kartverket først.',
-      )
-    }
-    console.log(`  Bruker ${existing.toLocaleString('nb-NO')} eksisterende Kartverket-rader.`)
-  }
-
-  if (!args.skipBrreg) {
-    await importBrregNationwide(db, args.referenceCacheDir, {
-      skipUnderenheter: args.skipUnderenheter,
-      reuseDownloads: args.reuseDownloads,
-      refreshDownloads: args.refreshDownloads,
-    })
-  } else {
-    console.log('\nSteg 2/4: Hopper over BRREG-import (--skip-brreg).')
-    const total = getStats(db).total
-    if (total === 0) {
-      console.log('  Ingen organisasjoner i databasen.')
+  try {
+    if (!args.skipKartverket) {
+      console.log('\nSteg 1/4: Kartverket Adresse (bulk CSV, hele landet)…')
+      await downloadAndImportNationalKartverket(db, {
+        cacheDir: kartverketCacheDir,
+        reuseDownload: args.reuseDownloads,
+        clearExisting: true,
+      })
+      writeReferenceManifest(args.referenceCacheDir, {
+        kartverket_national_cached_at: new Date().toISOString(),
+      })
+      setSyncState(db, 'kartverket_bulk_imported_at', new Date().toISOString())
     } else {
-      console.log(`  ${total.toLocaleString('nb-NO')} eksisterende organisasjoner.`)
+      console.log('\nSteg 1/4: Hopper over Kartverket-nedlasting (--skip-kartverket).')
+      const existing = kartverketAddressCount(db)
+      if (existing === 0) {
+        throw new Error(
+          'Ingen Kartverket-adresser i databasen. Fjern --skip-kartverket eller importer Kartverket først.',
+        )
+      }
+      console.log(`  Bruker ${existing.toLocaleString('nb-NO')} eksisterende Kartverket-rader.`)
     }
-  }
 
-  if (!args.skipGeocode) {
-    console.log('\nSteg 3/4: Geokoder organisasjoner mot lokal Kartverket-database (ingen API)…')
-    if (args.metadataOnly) {
-      await backfillMetadataFromKartverketBulk(db)
+    if (!args.skipBrreg) {
+      await importBrregNationwide(db, args.referenceCacheDir, {
+        skipUnderenheter: args.skipUnderenheter,
+        reuseDownloads: args.reuseDownloads,
+        refreshDownloads: args.refreshDownloads,
+      })
     } else {
-      await geocodeAllFromKartverketBulk(db)
-      await backfillMetadataFromKartverketBulk(db)
+      console.log('\nSteg 2/4: Hopper over BRREG-import (--skip-brreg).')
+      const total = getStats(db).total
+      if (total === 0) {
+        console.log('  Ingen organisasjoner i databasen.')
+      } else {
+        console.log(`  ${total.toLocaleString('nb-NO')} eksisterende organisasjoner.`)
+      }
     }
-  } else {
-    console.log('\nSteg 3/4: Hopper over geokoding (--skip-geocode).')
-  }
 
-  console.log('\nSteg 4/4: Bygger spatialt indeks (R-tree)…')
-  rebuildOrgsRtree(db)
-  setSyncState(db, 'last_sync_at', new Date().toISOString())
+    if (!args.skipGeocode) {
+      console.log('\nSteg 3/4: Geokoder organisasjoner mot lokal Kartverket-database (ingen API)…')
+      if (args.metadataOnly) {
+        await backfillMetadataFromKartverketBulk(db)
+      } else {
+        await geocodeAllFromKartverketBulk(db)
+        await backfillMetadataFromKartverketBulk(db)
+
+        const pendingWithPostnummer = countPendingGeocodeWithPostnummer(db)
+        const pendingTotal = getStats(db).pending_geocode
+        if (pendingWithPostnummer > 0) {
+          console.warn(
+            `\nAdvarsel: ${pendingWithPostnummer.toLocaleString('nb-NO')} organisasjoner med postnummer mangler fortsatt koordinater etter lokal geokoding.`,
+          )
+        }
+        if (pendingTotal > pendingWithPostnummer) {
+          console.warn(
+            `  ${(pendingTotal - pendingWithPostnummer).toLocaleString('nb-NO')} organisasjoner uten postnummer kan ikke geokodes lokalt.`,
+          )
+        }
+      }
+    } else {
+      console.log('\nSteg 3/4: Hopper over geokoding (--skip-geocode).')
+    }
+  } finally {
+    console.log('\nSteg 4/4: Bygger spatialt indeks (R-tree)…')
+    rebuildOrgsRtree(db)
+    setSyncState(db, 'last_sync_at', new Date().toISOString())
+  }
 
   const stats = getStats(db)
   const kartverketCount = kartverketAddressCount(db)
@@ -193,6 +209,9 @@ async function main() {
   console.log(`  Aktive: ${(stats.active ?? 0).toLocaleString('nb-NO')}`)
   console.log(`  Geokodet: ${(stats.geocoded ?? 0).toLocaleString('nb-NO')}`)
   console.log(`  Venter geokoding: ${(stats.pending_geocode ?? 0).toLocaleString('nb-NO')}`)
+  console.log(
+    `  Uten koordinat (med postnummer): ${countPendingGeocodeWithPostnummer(db).toLocaleString('nb-NO')}`,
+  )
   console.log(`  R-tree-punkter: ${(stats.rtree ?? 0).toLocaleString('nb-NO')}`)
 
   db.close()

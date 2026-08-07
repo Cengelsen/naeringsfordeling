@@ -55,8 +55,18 @@ export function ensureKartverketSchema(db: Database.Database) {
   `)
 }
 
+/** Normalize address text for Kartverket lookup (import + BRREG matching). */
 export function normalizeAddressText(text: string): string {
-  return text.trim().toLowerCase()
+  return text
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/^c\/o\s+.+?,\s*/i, '')
+    .replace(/\bp\.?\s*b\.?\s*/g, 'postboks ')
+    .replace(/[.,]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 export function structuredLookupKey(

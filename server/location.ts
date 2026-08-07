@@ -1,9 +1,12 @@
 import type Database from 'better-sqlite3'
-import { geocodeAddressResolved, ensureLocalKartverketReady } from '../scripts/lib/geocode-resolve.js'
+import { ensureLocalKartverketReady } from '../scripts/lib/geocode-resolve.js'
+import {
+  geocodeAddressKeyFromBulk,
+  lookupKartverketAddress,
+} from '../scripts/lib/local-geocode.js'
 import {
   applyGeocodeResult,
   getCachedAddress,
-  saveAddressCache,
 } from '../scripts/lib/organizations.js'
 import { roundCoord } from '../scripts/lib/points.js'
 
@@ -73,23 +76,15 @@ export async function resolveOrganizationLocation(
   if (row.address_text && row.postnummer) {
     await ensureLocalKartverketReady(db)
 
-    const coords = await geocodeAddressResolved(
-      db,
-      {
-        postnummer: row.postnummer,
-        adresse: [row.address_text],
-        kommunenummer: row.kommunenummer ?? undefined,
-        landkode: 'NO',
-      },
-      row.address_text,
-    )
+    const coords = row.address_key
+      ? geocodeAddressKeyFromBulk(db, row.address_key)
+      : lookupKartverketAddress(db, {
+          address_text: row.address_text,
+          postnummer: row.postnummer,
+          kommunenummer: row.kommunenummer,
+        })
 
-    if (row.address_key) {
-      saveAddressCache(db, row.address_key, coords)
-      if (coords) {
-        applyGeocodeResult(db, row.address_key, coords)
-      }
-    } else if (coords) {
+    if (!row.address_key && coords) {
       db.prepare(`UPDATE organizations SET lat = ?, lng = ? WHERE orgnr = ?`).run(
         coords.lat,
         coords.lng,

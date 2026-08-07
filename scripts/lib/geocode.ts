@@ -24,11 +24,57 @@ export function pickAddressLine(lines: string[] | undefined): string | null {
   return fallback || null
 }
 
-export function parseStreetAddress(line: string): { adressenavn: string; nummer: string } | null {
-  const cleaned = line.replace(/^c\/o\s.+/i, '').trim()
-  const match = cleaned.match(/^(.+?)\s+(\d+\s*[A-Za-zæøåÆØÅ]?)$/)
+export function stripDiacritics(text: string): string {
+  return text.normalize('NFD').replace(/\p{M}/gu, '')
+}
+
+export function normalizeStreetName(name: string): string {
+  return stripDiacritics(name).toLowerCase().replace(/\s+/g, ' ').trim()
+}
+
+export function compactStreetName(name: string): string {
+  return normalizeStreetName(name).replace(/\s+/g, '')
+}
+
+export function parseHouseNumberRange(raw: string): number[] | null {
+  const compact = raw.replace(/\s+/g, '')
+  const match = compact.match(/^(\d+)[-/](\d+)$/)
   if (!match) return null
-  return { adressenavn: match[1].trim(), nummer: match[2].replace(/\s+/g, '') }
+  const start = Number(match[1])
+  const end = Number(match[2])
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start || end - start > 30) {
+    return null
+  }
+  return Array.from({ length: end - start + 1 }, (_, index) => start + index)
+}
+
+export function streetNameVariants(name: string): string[] {
+  const trimmed = name.trim()
+  return [...new Set([trimmed, normalizeStreetName(trimmed), compactStreetName(trimmed)].filter(Boolean))]
+}
+
+export function splitHouseNumber(raw: string): { nummer: string; bokstav: string } {
+  const compact = raw.replace(/\s+/g, '')
+  const match = compact.match(/^(\d+)([A-Za-zæøåÆØÅ])?$/)
+  if (!match) return { nummer: compact, bokstav: '' }
+  return { nummer: match[1], bokstav: match[2] ?? '' }
+}
+
+export function parseStreetAddress(
+  line: string,
+): { adressenavn: string; nummer: string; bokstav: string; range?: number[] } | null {
+  const cleaned = line.replace(/^c\/o\s.+/i, '').trim()
+  const match = cleaned.match(/^(.+?)\s+(\d+\s*[/\-]\s*\d+|\d+\s*[A-Za-zæøåÆØÅ]?)$/i)
+  if (!match) return null
+
+  const tail = match[2].replace(/\s+/g, '')
+  const range = parseHouseNumberRange(tail)
+  if (range) {
+    return { adressenavn: match[1].trim(), nummer: tail, bokstav: '', range }
+  }
+
+  const { nummer, bokstav } = splitHouseNumber(match[2])
+  return { adressenavn: match[1].trim(), nummer, bokstav }
 }
 
 export function addressCacheKey(address: BrregAddress, line: string): string {
@@ -115,7 +161,7 @@ export async function geocodeAddress(
     const params = new URLSearchParams({
       postnummer: address.postnummer,
       adressenavn: parsed.adressenavn,
-      nummer: parsed.nummer,
+      nummer: `${parsed.nummer}${parsed.bokstav}`,
     })
     const result = await queryGeonorge(params)
     if (result) {

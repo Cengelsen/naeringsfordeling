@@ -2,7 +2,9 @@ import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSyn
 import { dirname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
+import type Database from 'better-sqlite3'
 import type { BrregEntity, BrregUnderenhet } from './types.js'
+import { nullOrphanOverordnetEnhet } from './organizations.js'
 import { fetchWithRetry } from './rate-limit.js'
 import {
   fetchAllKommuner,
@@ -305,6 +307,45 @@ export async function importBrregUnderenheterFromCache(
     },
     'Importerer underenheter fra lokal BRREG-fil',
   )
+}
+
+async function runDeferredImport(
+  db: Database.Database,
+  importFn: () => Promise<number>,
+): Promise<number> {
+  db.exec('BEGIN DEFERRED')
+  try {
+    const imported = await importFn()
+    const cleared = nullOrphanOverordnetEnhet(db)
+    if (cleared > 0) {
+      console.log(
+        `  Nullstilte ${cleared.toLocaleString('nb-NO')} foreldreløse overordnet_enhet-referanser`,
+      )
+    }
+    db.exec('COMMIT')
+    return imported
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+export async function importBrregEnheterFromCacheTransactional(
+  db: Database.Database,
+  gzipPath: string,
+  onEntity: (entity: BrregEntity) => void | Promise<void>,
+  filter?: (entity: BrregEntity) => boolean,
+): Promise<number> {
+  return runDeferredImport(db, () => importBrregEnheterFromCache(gzipPath, onEntity, filter))
+}
+
+export async function importBrregUnderenheterFromCacheTransactional(
+  db: Database.Database,
+  gzipPath: string,
+  onEntity: (entity: BrregUnderenhet) => void | Promise<void>,
+  filter?: (entity: BrregUnderenhet) => boolean,
+): Promise<number> {
+  return runDeferredImport(db, () => importBrregUnderenheterFromCache(gzipPath, onEntity, filter))
 }
 
 export function brregReferenceAvailable(cacheDir = DEFAULT_REFERENCE_CACHE_DIR): boolean {

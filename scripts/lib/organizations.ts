@@ -66,6 +66,28 @@ export function underenhetToRecord(entity: BrregUnderenhet, deleted = false) {
   return baseRecord(entity, 'underenhet', deleted)
 }
 
+function existingOrgnr(db: Database.Database, orgnr: string | null | undefined): string | null {
+  if (!orgnr) return null
+  return db.prepare('SELECT 1 FROM organizations WHERE orgnr = ?').get(orgnr) ? orgnr : null
+}
+
+/** Clear parent links that do not resolve to an imported organization row. */
+export function nullOrphanOverordnetEnhet(db: Database.Database): number {
+  return db
+    .prepare(
+      `UPDATE organizations
+       SET overordnet_enhet = NULL
+       WHERE overordnet_enhet IS NOT NULL
+         AND overordnet_enhet NOT IN (SELECT orgnr FROM organizations)`,
+    )
+    .run().changes
+}
+
+export interface UpsertOrganizationOptions {
+  /** Keep BRREG parent orgnr during bulk import; resolve dangling links after commit. */
+  deferParentLink?: boolean
+}
+
 const upsertStmt = `
   INSERT INTO organizations (
     orgnr, navn, org_type, org_type_label, address_text, postnummer,
@@ -130,13 +152,29 @@ const upsertStmt = `
     naeringskode_section = excluded.naeringskode_section
 `
 
-export function upsertEntity(db: Database.Database, entity: BrregEntity, deleted = false) {
+export function upsertEntity(
+  db: Database.Database,
+  entity: BrregEntity,
+  deleted = false,
+  options: UpsertOrganizationOptions = {},
+) {
   const record = entityToRecord(entity, deleted)
+  if (!options.deferParentLink) {
+    record.overordnet_enhet = existingOrgnr(db, record.overordnet_enhet)
+  }
   db.prepare(upsertStmt).run({ ...record, lat: null, lng: null })
 }
 
-export function upsertUnderenhet(db: Database.Database, entity: BrregUnderenhet, deleted = false) {
+export function upsertUnderenhet(
+  db: Database.Database,
+  entity: BrregUnderenhet,
+  deleted = false,
+  options: UpsertOrganizationOptions = {},
+) {
   const record = underenhetToRecord(entity, deleted)
+  if (!options.deferParentLink) {
+    record.overordnet_enhet = existingOrgnr(db, record.overordnet_enhet)
+  }
   db.prepare(upsertStmt).run({ ...record, lat: null, lng: null })
 }
 
