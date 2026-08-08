@@ -79,18 +79,8 @@ type OrgRow = {
   kommunenummer: string
   lat: number | null
   lng: number | null
-  naeringskode: string | null
-  naeringskode_label: string | null
-  antall_ansatte: number | null
-  har_registrert_antall_ansatte: number
-  entity_kind: string
-  overordnet_enhet: string | null
-  er_i_konsern: number
-  geocode_quality: string | null
-  matrikkel_key: string | null
 }
 
-const organizations: Record<string, ReturnType<typeof mapOrganization>> = {}
 const searchIndex: Array<
   [string, string, string, string, string, number | null, number | null, string, string]
 > = []
@@ -98,39 +88,13 @@ const searchIndex: Array<
 const orgRows = db
   .prepare(
     `SELECT orgnr, navn, org_type, org_type_label, address_text, postnummer,
-            kommunenummer, lat, lng, naeringskode, naeringskode_label,
-            antall_ansatte, har_registrert_antall_ansatte, entity_kind,
-            overordnet_enhet, er_i_konsern, geocode_quality, matrikkel_key
+            kommunenummer, lat, lng
      FROM organizations
      WHERE deleted = 0`,
   )
   .iterate() as Iterable<OrgRow>
 
-function mapOrganization(row: OrgRow) {
-  return {
-    orgnr: row.orgnr,
-    navn: row.navn,
-    orgType: row.org_type,
-    orgTypeLabel: row.org_type_label,
-    addressText: row.address_text,
-    postnummer: row.postnummer,
-    kommunenummer: row.kommunenummer,
-    lat: row.lat,
-    lng: row.lng,
-    naeringskode: row.naeringskode,
-    naeringskodeLabel: row.naeringskode_label,
-    antallAnsatte: row.antall_ansatte,
-    employeeBand: employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1),
-    entityKind: row.entity_kind,
-    overordnetEnhet: row.overordnet_enhet,
-    erIKonsern: row.er_i_konsern === 1,
-    geocodeQuality: row.geocode_quality,
-    matrikkelKey: row.matrikkel_key,
-  }
-}
-
 for (const row of orgRows) {
-  organizations[row.orgnr] = mapOrganization(row)
   searchIndex.push([
     row.orgnr,
     row.navn,
@@ -144,7 +108,6 @@ for (const row of orgRows) {
   ])
 }
 
-writeJson('organizations.json', { organizations })
 writeJson('search-index.json', { rows: searchIndex }, true)
 
 type GeocodedPointRow = [

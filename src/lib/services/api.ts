@@ -70,7 +70,6 @@ type GeocodedPointRow = [
 ]
 
 let municipalityBreakdownPromise: Promise<MunicipalityBreakdownRow[]> | null = null
-let organizationsPromise: Promise<Record<string, Organization>> | null = null
 let searchIndexPromise: Promise<OrganizationSearchHit[]> | null = null
 let orgSearchIndexPromise: Promise<OrgSearchIndex> | null = null
 let geocodedPointsPromise: Promise<GeocodedPointRow[]> | null = null
@@ -182,13 +181,6 @@ async function loadMunicipalityBreakdown(): Promise<MunicipalityBreakdownRow[]> 
     'municipality-breakdown.json',
   ).then((data) => data.rows)
   return municipalityBreakdownPromise
-}
-
-async function loadOrganizations(): Promise<Record<string, Organization>> {
-  organizationsPromise ??= staticFetch<{ organizations: Record<string, Organization> }>(
-    'organizations.json',
-  ).then((data) => data.organizations)
-  return organizationsPromise
 }
 
 function mapSearchIndexRow(row: SearchIndexRow): OrganizationSearchHit {
