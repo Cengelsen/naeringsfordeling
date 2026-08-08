@@ -386,7 +386,9 @@ async function main() {
 
   await runPhaseInChild('search-index')
 
-  const skipGeocodedPoints = process.env.GEOCODED_POINTS_SKIP_EXPORT === '1'
+  const skipGeocodedPoints =
+    process.env.GEOCODED_POINTS_SKIP_EXPORT === '1' ||
+    existsSync(join(outputDir, 'geocoded-points.json.gz'))
   if (skipGeocodedPoints) {
     console.log('Skipping geocoded-points export (GEOCODED_POINTS_SKIP_EXPORT=1)')
   } else {

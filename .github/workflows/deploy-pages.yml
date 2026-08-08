@@ -41,7 +41,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p public/data/points data
+          mkdir -p public/data/points data public/data/api
 
           yarn download-kommuner
 
@@ -50,6 +50,12 @@ jobs:
             gh release download points --pattern 'manifest.json' --dir public/data/points --clobber
             echo "Loaded vector tiles from release"
             echo "GEOCODED_POINTS_SKIP_EXPORT=1" >> "$GITHUB_ENV"
+
+            if gh release download points --pattern 'geocoded-points.json.gz' --dir public/data/api --clobber 2>/dev/null; then
+              echo "Loaded geocoded points from release"
+            else
+              echo "No geocoded-points.json.gz in points release yet"
+            fi
 
             if gh release download points --pattern 'districts.tar.gz' --dir public/data --clobber 2>/dev/null; then
               tar -C public/data -xzf public/data/districts.tar.gz

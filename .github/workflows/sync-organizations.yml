@@ -124,6 +124,13 @@ jobs:
           yarn export-map-tiles
           tar -C public/data -czf public/data/districts.tar.gz districts
 
+      - name: Export geocoded points (static fallback)
+        env:
+          DATABASE_PATH: data/organizations.db
+          STATIC_API_DIR: public/data/api
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: yarn tsx scripts/export-static-api.ts geocoded-points
+
       - name: Publish vector tiles release
         uses: softprops/action-gh-release@v2
         with:
@@ -139,5 +146,6 @@ jobs:
             public/data/points.pmtiles
             public/data/points/manifest.json
             public/data/districts.tar.gz
+            public/data/api/geocoded-points.json.gz
           make_latest: true
           overwrite_files: true

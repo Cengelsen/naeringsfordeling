@@ -26,6 +26,7 @@ import { buildOrgSearchIndex, searchOrgSearchIndex, type OrgSearchIndex } from '
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
 const STATIC_API = import.meta.env.VITE_STATIC_API === 'true'
+const HAS_PMTILES = import.meta.env.VITE_HAS_PMTILES === 'true'
 const STATIC_API_BASE = assetUrl('data/api')
 
 interface MunicipalityBreakdownRow {
@@ -72,8 +73,8 @@ type GeocodedPointRow = [
 let municipalityBreakdownPromise: Promise<MunicipalityBreakdownRow[]> | null = null
 let searchIndexPromise: Promise<OrganizationSearchHit[]> | null = null
 let orgSearchIndexPromise: Promise<OrgSearchIndex> | null = null
-let geocodedPointsPromise: Promise<GeocodedPointRow[]> | null = null
-let geocodedPointsByKommunePromise: Promise<Map<string, GeocodedPointRow[]>> | null = null
+let geocodedPointsPromise: Promise<GeocodedPointRow[] | null> | null = null
+let geocodedPointsByKommunePromise: Promise<Map<string, GeocodedPointRow[]> | null> | null = null
 
 async function staticFetch<T>(file: string): Promise<T> {
   const response = await fetch(`${STATIC_API_BASE}/${file}`)
@@ -84,24 +85,28 @@ async function staticFetch<T>(file: string): Promise<T> {
 }
 
 async function loadGeocodedPointsOptional(): Promise<GeocodedPointRow[] | null> {
-  try {
-    return await fetchStaticJson<{ rows: GeocodedPointRow[] }>(
-      `${STATIC_API_BASE}/geocoded-points.json`,
-    ).then((data) => data.rows)
-  } catch {
-    return null
-  }
-}
+  if (HAS_PMTILES) return null
 
-async function loadGeocodedPoints(): Promise<GeocodedPointRow[]> {
   geocodedPointsPromise ??= fetchStaticJson<{ rows: GeocodedPointRow[] }>(
     `${STATIC_API_BASE}/geocoded-points.json`,
-  ).then((data) => data.rows)
+  )
+    .then((data) => data.rows)
+    .catch(() => null)
   return geocodedPointsPromise
 }
 
-async function loadGeocodedPointsByKommune(): Promise<Map<string, GeocodedPointRow[]>> {
-  geocodedPointsByKommunePromise ??= loadGeocodedPoints().then((rows) => {
+async function loadGeocodedPoints(): Promise<GeocodedPointRow[]> {
+  const rows = await loadGeocodedPointsOptional()
+  if (!rows) {
+    throw new ApiError('Geokodede punkter mangler')
+  }
+  return rows
+}
+
+async function loadGeocodedPointsByKommune(): Promise<Map<string, GeocodedPointRow[]> | null> {
+  geocodedPointsByKommunePromise ??= loadGeocodedPointsOptional().then((rows) => {
+    if (!rows) return null
+
     const byKommune = new Map<string, GeocodedPointRow[]>()
     for (const row of rows) {
       const kommunenummer = row[4]
@@ -146,16 +151,22 @@ async function fetchOrganizationPointsFromStatic(
   filters: MapFilters,
   options: FetchPointsOptions = {},
 ): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
+  if (HAS_PMTILES) {
+    return { points: [], truncated: false }
+  }
+
   const limit = options.limit ?? (options.zoom != null ? limitForZoom(options.zoom) : 50000)
   const points: OrganizationPoint[] = []
 
-  const rows = options.kommunenumre?.length
-    ? (await loadGeocodedPointsByKommune())
-    : null
+  const byKommune = options.kommunenumre?.length ? await loadGeocodedPointsByKommune() : null
+  const allRows = byKommune ? null : await loadGeocodedPointsOptional()
+  if (!byKommune && !allRows) {
+    return { points: [], truncated: false }
+  }
 
-  const candidates: GeocodedPointRow[] = rows
-    ? options.kommunenumre!.flatMap((kommunenummer) => rows.get(kommunenummer) ?? [])
-    : await loadGeocodedPoints()
+  const candidates: GeocodedPointRow[] = byKommune
+    ? options.kommunenumre!.flatMap((kommunenummer) => byKommune.get(kommunenummer) ?? [])
+    : allRows!
 
   for (const row of candidates) {
     if (!geocodedPointMatchesFilters(row, filters)) continue
