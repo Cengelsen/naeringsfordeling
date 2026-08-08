@@ -22,7 +22,15 @@ const ORGANIZATION_COLUMNS: Array<{ name: string; ddl: string }> = [
   { name: 'geocode_quality', ddl: 'TEXT' },
   { name: 'employee_band', ddl: 'TEXT' },
   { name: 'naeringskode_section', ddl: 'TEXT' },
+  { name: 'brreg_content_hash', ddl: 'TEXT' },
 ]
+
+interface BulkLoadState {
+  savedJournalMode: string
+  savedSynchronous: number
+}
+
+const bulkLoadState = new WeakMap<Database.Database, BulkLoadState>()
 
 /** Remove main DB file and WAL/SHM/journal sidecars (required for a clean --fresh). */
 export function removeDatabaseFiles(path = DEFAULT_DB_PATH) {
@@ -127,6 +135,8 @@ function migrate(db: Database.Database, runBackfill: boolean) {
   const version = getSchemaVersion(db)
 
   if (version >= CURRENT_SCHEMA_VERSION) {
+    ensureColumns(db)
+    ensureAddressCacheColumns(db)
     ensureOrgsRtree(db)
     ensureFtsPopulated(db)
     return
@@ -407,14 +417,84 @@ function ftsIndexIsSearchable(db: Database.Database): boolean {
 
 function ensureFtsPopulated(db: Database.Database) {
   if (ftsIndexIsSearchable(db)) return
+  rebuildFtsIndex(db)
+}
 
+/** Drop FTS triggers so bulk INSERT does not update the index per row. */
+export function disableFtsTriggers(db: Database.Database) {
+  db.exec(`
+    DROP TRIGGER IF EXISTS organizations_fts_insert;
+    DROP TRIGGER IF EXISTS organizations_fts_delete;
+    DROP TRIGGER IF EXISTS organizations_fts_update;
+  `)
+}
+
+/** Rebuild FTS from organizations content and recreate maintenance triggers. */
+export function rebuildFtsIndex(db: Database.Database) {
   const orgCount = (
     db.prepare('SELECT COUNT(*) AS count FROM organizations').get() as { count: number }
   ).count
 
+  if (!ftsSchemaValid(db)) {
+    rebuildFts(db)
+    if (orgCount > 0) {
+      db.exec(`INSERT INTO organizations_fts(organizations_fts) VALUES('rebuild')`)
+    }
+    return
+  }
+
   if (orgCount > 0) {
     db.exec(`INSERT INTO organizations_fts(organizations_fts) VALUES('rebuild')`)
   }
+
+  disableFtsTriggers(db)
+  db.exec(`
+    CREATE TRIGGER organizations_fts_insert AFTER INSERT ON organizations BEGIN
+      INSERT INTO organizations_fts(rowid, navn) VALUES (new.rowid, new.navn);
+    END;
+    CREATE TRIGGER organizations_fts_delete AFTER DELETE ON organizations BEGIN
+      INSERT INTO organizations_fts(organizations_fts, rowid, navn) VALUES('delete', old.rowid, old.navn);
+    END;
+    CREATE TRIGGER organizations_fts_update AFTER UPDATE ON organizations BEGIN
+      INSERT INTO organizations_fts(organizations_fts, rowid, navn) VALUES('delete', old.rowid, old.navn);
+      INSERT INTO organizations_fts(rowid, navn) VALUES (new.rowid, new.navn);
+    END;
+  `)
+}
+
+/** Speed up large imports; pair with endBulkLoad before serving the database. */
+export function beginBulkLoad(db: Database.Database) {
+  if (bulkLoadState.has(db)) return
+
+  bulkLoadState.set(db, {
+    savedJournalMode: db.pragma('journal_mode', { simple: true }) as string,
+    savedSynchronous: db.pragma('synchronous', { simple: true }) as number,
+  })
+
+  db.pragma('journal_mode = MEMORY')
+  db.pragma('synchronous = OFF')
+  db.pragma('temp_store = MEMORY')
+  db.pragma('cache_size = -262144')
+  disableFtsTriggers(db)
+}
+
+/** Restore pragmas and rebuild FTS after bulk import. */
+export function endBulkLoad(db: Database.Database) {
+  rebuildFtsIndex(db)
+
+  const saved = bulkLoadState.get(db)
+  if (saved) {
+    db.pragma(`journal_mode = ${saved.savedJournalMode}`)
+    db.pragma(`synchronous = ${saved.savedSynchronous}`)
+    bulkLoadState.delete(db)
+  } else {
+    db.pragma('journal_mode = WAL')
+    db.pragma('synchronous = NORMAL')
+  }
+}
+
+export function isBulkLoadActive(db: Database.Database): boolean {
+  return bulkLoadState.has(db)
 }
 
 function ensureAddressCacheColumns(db: Database.Database) {

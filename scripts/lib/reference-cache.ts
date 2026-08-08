@@ -1,10 +1,13 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { Readable } from 'node:stream'
 import type Database from 'better-sqlite3'
 import type { BrregEntity, BrregUnderenhet } from './types.js'
 import { nullOrphanOverordnetEnhet } from './organizations.js'
+import { beginBulkLoad, endBulkLoad } from './db.js'
+import { importBrregFromGzip, type BrregImportOptions, type BrregImportResult } from './brreg-import-pipeline.js'
 import { fetchWithRetry } from './rate-limit.js'
 import {
   fetchAllKommuner,
@@ -27,6 +30,9 @@ export interface ReferenceManifest {
   brreg_underenheter_cached_at?: string
   brreg_kommuner_cached_at?: string
   kartverket_national_cached_at?: string
+  brreg_enheter_sha256?: string
+  brreg_underenheter_sha256?: string
+  kartverket_zip_sha256?: string
   last_oppdateringsid?: string
   last_oppdateringsid_underenheter?: string
 }
@@ -87,6 +93,29 @@ function shouldDownload(existingPath: string, reuseDownloads: boolean, refreshDo
   return !existsSync(existingPath)
 }
 
+export function sha256File(path: string): string {
+  const hash = createHash('sha256')
+  hash.update(readFileSync(path))
+  return hash.digest('hex')
+}
+
+export function nationalKartverketZipPath(cacheDir = DEFAULT_REFERENCE_CACHE_DIR): string {
+  return join(cacheDir, 'kartverket', 'Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV.zip')
+}
+
+export function refreshReferenceFileHashes(cacheDir = DEFAULT_REFERENCE_CACHE_DIR): ReferenceManifest {
+  const patch: Partial<ReferenceManifest> = {}
+  const enheterPath = referencePath(cacheDir, BRREG_ENHETER_FILE)
+  const underPath = referencePath(cacheDir, BRREG_UNDERENHETER_FILE)
+  const kartverketPath = nationalKartverketZipPath(cacheDir)
+
+  if (existsSync(enheterPath)) patch.brreg_enheter_sha256 = sha256File(enheterPath)
+  if (existsSync(underPath)) patch.brreg_underenheter_sha256 = sha256File(underPath)
+  if (existsSync(kartverketPath)) patch.kartverket_zip_sha256 = sha256File(kartverketPath)
+
+  return writeReferenceManifest(cacheDir, patch)
+}
+
 async function downloadBinaryToFile(url: string, accept: string, destPath: string, label: string) {
   mkdirSync(dirname(destPath), { recursive: true })
   const response = await fetchWithRetry(
@@ -102,10 +131,16 @@ async function downloadBinaryToFile(url: string, accept: string, destPath: strin
   await pipeline(Readable.fromWeb(response.body as import('node:stream/web').ReadableStream), createWriteStream(destPath))
 }
 
-async function streamJsonGzipArray<T>(
+export interface StreamBrregGzipOptions {
+  quiet?: boolean
+  onRowsRead?: (rowsRead: number) => void
+}
+
+export async function streamBrregGzipArray<T>(
   gzipPath: string,
   onItem: (item: T) => void | Promise<void>,
   label: string,
+  options: StreamBrregGzipOptions = {},
 ): Promise<number> {
   const { chain } = await import('stream-chain')
   const { parser } = await import('stream-json')
@@ -116,10 +151,15 @@ async function streamJsonGzipArray<T>(
   let count = 0
 
   for await (const chunk of jsonPipeline) {
-    await onItem((chunk as { value: T }).value)
+    const result = onItem((chunk as { value: T }).value)
+    if (result instanceof Promise) await result
     count += 1
     if (count % 10000 === 0) {
-      console.log(`  ${label}: ${count.toLocaleString('nb-NO')} rader…`)
+      if (options.quiet) {
+        options.onRowsRead?.(count)
+      } else {
+        console.log(`  ${label}: ${count.toLocaleString('nb-NO')} rader…`)
+      }
     }
   }
 
@@ -164,6 +204,7 @@ export async function ensureBrregEnheterCache(
   }
 
   writeReferenceManifest(cacheDir, manifestPatch)
+  refreshReferenceFileHashes(cacheDir)
   return destPath
 }
 
@@ -207,6 +248,7 @@ export async function ensureBrregUnderenheterCache(
   }
 
   writeReferenceManifest(cacheDir, manifestPatch)
+  refreshReferenceFileHashes(cacheDir)
   return destPath
 }
 
@@ -268,13 +310,19 @@ export async function ensureBrregReferenceCache(
     localOnly: options.localOnly,
   }
 
-  const enheterPath = await ensureBrregEnheterCache(cacheDir, cacheOptions)
-  await ensureKommunerCache(cacheDir, cacheOptions)
+  const enheterPromise = ensureBrregEnheterCache(cacheDir, cacheOptions)
+  const kommunerPromise = ensureKommunerCache(cacheDir, cacheOptions)
+  const underPromise = options.skipUnderenheter
+    ? Promise.resolve(undefined)
+    : ensureBrregUnderenheterCache(cacheDir, cacheOptions)
 
-  let underenheterPath: string | undefined
-  if (!options.skipUnderenheter) {
-    underenheterPath = await ensureBrregUnderenheterCache(cacheDir, cacheOptions)
-  }
+  const [enheterPath, , underenheterPath] = await Promise.all([
+    enheterPromise,
+    kommunerPromise,
+    underPromise,
+  ])
+
+  refreshReferenceFileHashes(cacheDir)
 
   return { enheterPath, underenheterPath, manifest: readReferenceManifest(cacheDir) }
 }
@@ -284,11 +332,11 @@ export async function importBrregEnheterFromCache(
   onEntity: (entity: BrregEntity) => void | Promise<void>,
   filter?: (entity: BrregEntity) => boolean,
 ): Promise<number> {
-  return streamJsonGzipArray<BrregEntity>(
+  return streamBrregGzipArray<BrregEntity>(
     gzipPath,
-    async (entity) => {
+    (entity) => {
       if (filter && !filter(entity)) return
-      await onEntity(entity)
+      return onEntity(entity)
     },
     'Importerer enheter fra lokal BRREG-fil',
   )
@@ -299,53 +347,65 @@ export async function importBrregUnderenheterFromCache(
   onEntity: (entity: BrregUnderenhet) => void | Promise<void>,
   filter?: (entity: BrregUnderenhet) => boolean,
 ): Promise<number> {
-  return streamJsonGzipArray<BrregUnderenhet>(
+  return streamBrregGzipArray<BrregUnderenhet>(
     gzipPath,
-    async (entity) => {
+    (entity) => {
       if (filter && !filter(entity)) return
-      await onEntity(entity)
+      return onEntity(entity)
     },
     'Importerer underenheter fra lokal BRREG-fil',
   )
 }
 
-async function runDeferredImport(
+async function runBulkImport(
   db: Database.Database,
-  importFn: () => Promise<number>,
-): Promise<number> {
+  importFn: () => Promise<BrregImportResult>,
+  options: { quiet?: boolean } = {},
+): Promise<BrregImportResult> {
+  beginBulkLoad(db)
   db.exec('BEGIN DEFERRED')
   try {
-    const imported = await importFn()
+    const result = await importFn()
     const cleared = nullOrphanOverordnetEnhet(db)
-    if (cleared > 0) {
+    if (cleared > 0 && !options.quiet) {
       console.log(
         `  Nullstilte ${cleared.toLocaleString('nb-NO')} foreldreløse overordnet_enhet-referanser`,
       )
     }
     db.exec('COMMIT')
-    return imported
+    return result
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
+  } finally {
+    endBulkLoad(db)
   }
 }
 
 export async function importBrregEnheterFromCacheTransactional(
   db: Database.Database,
   gzipPath: string,
-  onEntity: (entity: BrregEntity) => void | Promise<void>,
   filter?: (entity: BrregEntity) => boolean,
-): Promise<number> {
-  return runDeferredImport(db, () => importBrregEnheterFromCache(gzipPath, onEntity, filter))
+  options: Omit<BrregImportOptions, 'entityKind' | 'filter'> = {},
+): Promise<BrregImportResult> {
+  return runBulkImport(
+    db,
+    () => importBrregFromGzip(db, gzipPath, { entityKind: 'enhet', filter, ...options }),
+    { quiet: options.quiet },
+  )
 }
 
 export async function importBrregUnderenheterFromCacheTransactional(
   db: Database.Database,
   gzipPath: string,
-  onEntity: (entity: BrregUnderenhet) => void | Promise<void>,
   filter?: (entity: BrregUnderenhet) => boolean,
-): Promise<number> {
-  return runDeferredImport(db, () => importBrregUnderenheterFromCache(gzipPath, onEntity, filter))
+  options: Omit<BrregImportOptions, 'entityKind' | 'filter'> = {},
+): Promise<BrregImportResult> {
+  return runBulkImport(
+    db,
+    () => importBrregFromGzip(db, gzipPath, { entityKind: 'underenhet', filter, ...options }),
+    { quiet: options.quiet },
+  )
 }
 
 export function brregReferenceAvailable(cacheDir = DEFAULT_REFERENCE_CACHE_DIR): boolean {

@@ -232,12 +232,16 @@ yarn sync --geocode-only --regeocode-metadata
 
 `yarn build-national-db` bygger én SQLite-fil med **hele landet** uten live API-kall (når referansecache finnes):
 
-1. Laster ned [Matrikkelen Adresse](https://kartkatalog.geonorge.no/) (CSV, EPSG:4258, ~150 MB zip) **til referansecache**
-2. Laster ned BRREG bulk (enheter + underenheter) **til referansecache**
-3. Importerer adresser til tabellen `kartverket_addresses`
-4. Importerer BRREG fra lokale gzip-filer
-5. Geokoder organisasjoner mot lokal Kartverket-database (ingen API)
-6. Bygger R-tree-indeks
+1. Laster ned BRREG bulk og Kartverket zip **parallelt** til referansecache (ved `--fresh`)
+2. Importerer Kartverket og BRREG **parallelt** i separate staging-databaser, flettet til én fil
+3. Geokoder kun organisasjoner som mangler koordinater (lokal Kartverket, ingen API)
+4. Bygger FTS- og R-tree-indekser
+
+Uten `--fresh` brukes **lokal bulk-diff**: BRREG/Kartverket hoppes over når referansefil-hash er uendret; ellers upsertes kun BRREG-rader med endret innhold (`brreg_content_hash`).
+
+`yarn sync --local-only` bruker samme bulk-diff for BRREG (ingen `/oppdateringer`-API).
+
+GitHub Actions kjører `build-national-from-fylker --fresh` (parallelle fylke-prosesser + fletting) i egen jobb, deretter tile-export i en parallell jobb med cache for referansedata og tippecanoe.
 
 Referansedata lagres under `data/cache/reference/` og gjenbrukes automatisk ved nye bygg:
 
@@ -267,6 +271,37 @@ Standard output: `data/norway.db` (overstyr med `--output=` eller `DATABASE_PATH
 | `--skip-geocode` | Importer kun rådata. |
 | `--skip-underenheter` | Importer kun hovedenheter fra BRREG. |
 | `--metadata-only` | Oppdater kun geokode-metadata (krever eksisterende koordinater). |
+| `--no-parallel` | Sekvensiell import (debug / lav minne). |
+
+**BRREG-import (ytelse):** Bulk-import bruker batchede SQLite-skrivinger og valgfrie worker-tråder for record-forberedelse (hash + feltmapping). Kun hovedtråden skriver til databasen.
+
+| Miljøvariabel | Standard | Beskrivelse |
+|---------------|----------|-------------|
+| `BRREG_IMPORT_BATCH_SIZE` | `2000` | Antall rader per SQLite-transaksjon ved bulk-upsert. |
+| `BRREG_IMPORT_WORKERS` | `min(4, CPU-kjerner)` | Worker-tråder for record-forberedelse; sett til `0` for å slå av. |
+| `BRREG_IMPORT_PREPARE_CHUNK` | `500` | Antall BRREG-entiteter per worker-melding. |
+
+**Alternativ nasjonal bygg (15 parallelle fylker + fletting):**
+
+```bash
+yarn build-national-from-fylker --fresh
+yarn build-national-from-fylker --merge-only   # flett eksisterende fylkes-DB-er
+yarn build-national-from-fylker --build-only   # bygg fylker uten fletting
+yarn build-national-from-fylker --jobs=8       # begrens parallellitet (standard: 15)
+```
+
+Bygger hver fylkes-DB fra referansecache (`--from-cache`), venter til alle er ferdige, og fletter til én nasjonal SQLite (`organizations`, `address_cache`, `kartverket_addresses`, indekser). Bruker de 15 gjeldende fylkeskodene (ekskluderer utland/Svalbard-prefikser som `99` uten Kartverket-data). Standard terminalvisning er et fast panel (15 rader + total fremdrift) som oppdateres på plass; hvert fylke bygges i en egen Node-prosess (`--jobs` parallelle prosesser) med fremdrift over IPC.
+
+| Flagg | Beskrivelse |
+|-------|-------------|
+| `--output=PATH` | Nasjonal SQLite (standard: `data/norway.db`). |
+| `--regions-dir=PATH` | Fylkes-DB-er (standard: `data/regions`). |
+| `--jobs=N` | Parallellitet (`FYLKE_BUILD_JOBS`). |
+| `--merge-only` | Kun fletting av eksisterende fylkes-DB-er. |
+| `--build-only` | Kun parallelle fylke-bygg. |
+| `--fresh` | Slett fylkes-DB (ved bygg) og nasjonal output (ved fletting). |
+| `--skip-existing` | Hopp over fylker som allerede har DB-fil. |
+| `--verbose` | Full underprosess-logg (standard: Docker-lignende statuspanel). |
 
 Krever `unzip` på PATH (`dnf install unzip`).
 
@@ -561,12 +596,9 @@ yarn export-vector-tiles
 Workflow: [`.github/workflows/sync-organizations.yml`](.github/workflows/sync-organizations.yml)
 
 - Kjører **hver natt kl. 02:00 UTC** (+ manuell `workflow_dispatch`)
-- Laster ned forrige `organizations.db` fra GitHub Release `database`
-- Kjører inkrementell sync mot BRREG + geokoder nye adresser
-- Publiserer oppdatert database til release `database`
-- Bygger tippecanoe fra source, installerer go-pmtiles
-- Kjører `yarn export-vector-tiles`
-- Publiserer `points.pmtiles` + `manifest.json` til release `points`
+- **Jobb 1 (`build-database`):** `yarn build-national-from-fylker --fresh` — 15 parallelle fylke-bygg, fletting til `data/organizations.db`, publiserer release `database`
+- Cacher `data/cache/reference/` mellom kjøringer (BRREG + Kartverket zips)
+- **Jobb 2 (`build-tiles`):** laster ned database-artifakt, eksporterer PMTiles + distrikts-GeoJSON, publiserer release `points`
 
 ## API-endepunkter
 

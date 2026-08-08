@@ -512,13 +512,19 @@ function runBulkGeocode(
   samples: PendingSample[],
   label: string,
   skipCacheLookup = false,
+  options: {
+    quiet?: boolean
+    onProgress?: (event: { progress?: number; detail?: string }) => void
+  } = {},
 ): { geocoded: number; failed: number; processed: number; orgsUpdated: number } {
   if (samples.length === 0) {
-    console.log(`Ingen adresser å ${label}.`)
+    if (!options.quiet) console.log(`Ingen adresser å ${label}.`)
     return { geocoded: 0, failed: 0, processed: 0, orgsUpdated: 0 }
   }
 
-  console.log(`${label} ${samples.length.toLocaleString('nb-NO')} unike adresser…`)
+  if (!options.quiet) {
+    console.log(`${label} ${samples.length.toLocaleString('nb-NO')} unike adresser…`)
+  }
 
   db.pragma('cache_size = -64000')
 
@@ -544,16 +550,25 @@ function runBulkGeocode(
     if (processed % LOG_EVERY === 0 || processed === samples.length) {
       const elapsedSec = (Date.now() - started) / 1000
       const rate = elapsedSec > 0 ? Math.round(processed / elapsedSec) : processed
-      console.log(
-        `  ${processed.toLocaleString('nb-NO')} / ${samples.length.toLocaleString('nb-NO')} adresser (${rate.toLocaleString('nb-NO')}/s) – ${geocoded.toLocaleString('nb-NO')} treff, ${failed.toLocaleString('nb-NO')} feilet | ${orgsUpdated.toLocaleString('nb-NO')} org.-rader oppdatert`,
-      )
+      if (options.quiet) {
+        options.onProgress?.({
+          progress: processed / samples.length,
+          detail: `${processed.toLocaleString('nb-NO')} addr · ${rate.toLocaleString('nb-NO')}/s`,
+        })
+      } else {
+        console.log(
+          `  ${processed.toLocaleString('nb-NO')} / ${samples.length.toLocaleString('nb-NO')} adresser (${rate.toLocaleString('nb-NO')}/s) – ${geocoded.toLocaleString('nb-NO')} treff, ${failed.toLocaleString('nb-NO')} feilet | ${orgsUpdated.toLocaleString('nb-NO')} org.-rader oppdatert`,
+        )
+      }
     }
   }
 
   const elapsedMin = ((Date.now() - started) / 1000 / 60).toFixed(1)
-  console.log(
-    `Ferdig: ${geocoded.toLocaleString('nb-NO')} treff, ${failed.toLocaleString('nb-NO')} feilet, ${orgsUpdated.toLocaleString('nb-NO')} org.-rader (${elapsedMin} min)`,
-  )
+  if (!options.quiet) {
+    console.log(
+      `Ferdig: ${geocoded.toLocaleString('nb-NO')} treff, ${failed.toLocaleString('nb-NO')} feilet, ${orgsUpdated.toLocaleString('nb-NO')} org.-rader (${elapsedMin} min)`,
+    )
+  }
 
   return { geocoded, failed, processed: samples.length, orgsUpdated }
 }
@@ -589,7 +604,13 @@ export function geocodeAddressKeyFromBulk(
   return result
 }
 
-export function geocodeAllFromKartverketBulk(db: Database.Database): {
+export function geocodeAllFromKartverketBulk(
+  db: Database.Database,
+  options: {
+    quiet?: boolean
+    onProgress?: (event: { progress?: number; detail?: string }) => void
+  } = {},
+): {
   geocoded: number
   failed: number
   processed: number
@@ -602,14 +623,20 @@ export function geocodeAllFromKartverketBulk(db: Database.Database): {
   while (pass < 3) {
     pass += 1
     const cleared = clearPendingGeocodeFailures(db)
-    if (cleared > 0) {
+    if (cleared > 0 && !options.quiet) {
       console.log(`Slettet ${cleared.toLocaleString('nb-NO')} utdaterte feilet geokode-cache-rader.`)
     }
 
     const samples = loadPendingSamples(db)
     if (samples.length === 0) break
 
-    const result = runBulkGeocode(db, samples, pass === 1 ? 'Geokoder' : `Geokoder (runde ${pass})`)
+    const result = runBulkGeocode(
+      db,
+      samples,
+      pass === 1 ? 'Geokoder' : `Geokoder (runde ${pass})`,
+      false,
+      options,
+    )
     geocoded += result.geocoded
     failed += result.failed
     processed += result.processed
@@ -620,12 +647,15 @@ export function geocodeAllFromKartverketBulk(db: Database.Database): {
   return { geocoded, failed, processed }
 }
 
-export function backfillMetadataFromKartverketBulk(db: Database.Database): {
+export function backfillMetadataFromKartverketBulk(
+  db: Database.Database,
+  options: { quiet?: boolean } = {},
+): {
   geocoded: number
   failed: number
   processed: number
 } {
   const samples = loadMetadataSamples(db)
-  const result = runBulkGeocode(db, samples, 'Oppdaterer metadata for', true)
+  const result = runBulkGeocode(db, samples, 'Oppdaterer metadata for', true, options)
   return { geocoded: result.geocoded, failed: result.failed, processed: result.processed }
 }

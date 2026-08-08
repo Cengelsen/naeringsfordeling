@@ -6,6 +6,13 @@ import {
   resolveReferenceCacheDir,
 } from './lib/region-build.js'
 
+function parseNumberArg(argv: string[], name: string): number | undefined {
+  const raw = argv.find((arg) => arg.startsWith(`--${name}=`))?.split('=')[1]
+  if (raw == null || raw === '') return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
+}
+
 function parseArgs(argv: string[]) {
   const fylke = argv.find((arg) => arg.startsWith('--fylke='))?.split('=')[1]
   const kommune = argv.find((arg) => arg.startsWith('--kommune='))?.split('=')[1]
@@ -13,6 +20,7 @@ function parseArgs(argv: string[]) {
   const cacheDir = argv.find((arg) => arg.startsWith('--cache-dir='))?.split('=')[1]
   const nationalDb = argv.find((arg) => arg.startsWith('--national-db='))?.split('=')[1]
   const refreshDownloads = argv.includes('--refresh-downloads')
+  const reportProgress = argv.includes('--report-progress')
 
   let sourceMode: 'auto' | 'cache' | 'national' = 'auto'
   if (argv.includes('--from-cache')) sourceMode = 'cache'
@@ -32,6 +40,11 @@ function parseArgs(argv: string[]) {
     skipUnderenheter: argv.includes('--skip-underenheter'),
     refreshDownloads,
     reuseDownloads: !refreshDownloads,
+    quiet: argv.includes('--quiet') || reportProgress,
+    reportProgress,
+    estimatedBrregOrgs: parseNumberArg(argv, 'estimated-brreg-orgs'),
+    nationalBrregEnheterRows: parseNumberArg(argv, 'national-brreg-enheter-rows'),
+    nationalBrregUnderenheterRows: parseNumberArg(argv, 'national-brreg-underenheter-rows'),
   }
 }
 
@@ -65,6 +78,11 @@ async function main() {
     referenceCacheDir,
     nationalDbPath: args.nationalDbPath,
     sourceMode: args.sourceMode,
+    quiet: args.quiet,
+    reportProgress: args.reportProgress,
+    estimatedBrregOrgs: args.estimatedBrregOrgs,
+    nationalBrregEnheterRows: args.nationalBrregEnheterRows,
+    nationalBrregUnderenheterRows: args.nationalBrregUnderenheterRows,
   })
 }
 

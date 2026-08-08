@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-database:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
@@ -23,13 +23,35 @@ jobs:
           node-version: '22'
           cache: yarn
 
+      - name: Restore reference cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache/reference
+          key: reference-cache-${{ hashFiles('yarn.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            reference-cache-${{ hashFiles('yarn.lock') }}-
+            reference-cache-
+
       - name: Install dependencies
         run: yarn install --frozen-lockfile
 
       - name: Build national database
         env:
           DATABASE_PATH: data/organizations.db
-        run: yarn build-national-db --fresh
+        run: yarn build-national-from-fylker --fresh --jobs=$(nproc)
+
+      - name: Save reference cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache/reference
+          key: reference-cache-${{ hashFiles('yarn.lock') }}-${{ github.run_id }}
+
+      - name: Upload database artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: organizations-db
+          path: data/organizations.db
+          retention-days: 7
 
       - name: Publish database release
         uses: softprops/action-gh-release@v2
@@ -37,8 +59,8 @@ jobs:
           tag_name: database
           name: Organization database
           body: |
-            Full national database built from BRREG + Kartverket bulk data.
-            All geocoding done locally against Kartverket CSV (no API).
+            Full national database built from parallel fylke builds (BRREG + Kartverket bulk),
+            merged into one SQLite file. All geocoding done locally against Kartverket CSV (no API).
 
             Run: ${{ github.run_id }}
             Time: ${{ github.run_started_at }}
@@ -46,13 +68,47 @@ jobs:
           make_latest: true
           overwrite_files: true
 
+  build-tiles:
+    runs-on: ubuntu-latest
+    needs: build-database
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+
+      - name: Restore tippecanoe cache
+        id: tippecanoe-cache
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/tippecanoe
+          key: tippecanoe-${{ runner.os }}-v1
+
       - name: Install tippecanoe
+        if: steps.tippecanoe-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libsqlite3-dev zlib1g-dev
           git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
           make -C /tmp/tippecanoe -j"$(nproc)"
           sudo make -C /tmp/tippecanoe install
+          sudo cp "$(command -v tippecanoe)" /usr/local/bin/tippecanoe
+          sudo cp "$(command -v tile-join)" /usr/local/bin/tile-join
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Download database artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: organizations-db
+          path: data
 
       - name: Install PMTiles CLI
         run: |
@@ -60,6 +116,8 @@ jobs:
             | sudo tar xz -C /usr/local/bin pmtiles
 
       - name: Export map tiles (LOD pyramid)
+        env:
+          DATABASE_PATH: data/organizations.db
         run: |
           yarn download-kommuner
           yarn download-grunnkretser

@@ -26,6 +26,7 @@ import {
   resolveRegionDataSource,
   type RegionDataSource,
 } from './national-db-slice.js'
+import { emitRegionBuildProgress } from './region-build-ipc.js'
 
 export const DEFAULT_REGIONS_DIR = process.env.REGIONS_OUTPUT_DIR ?? 'data/regions'
 
@@ -50,6 +51,49 @@ export interface RegionBuildOptions {
   sourceMode?: 'auto' | 'cache' | 'national'
   /** @deprecated Use referenceCacheDir */
   cacheDir?: string
+  /** Suppress step logging (for parallel orchestrators). */
+  quiet?: boolean
+  /** Emit progress lines for parent process (stdout IPC). */
+  reportProgress?: boolean
+  onProgress?: (event: RegionBuildProgress) => void
+  /** Expected org count for this region (dashboard BRREG progress). */
+  estimatedBrregOrgs?: number
+  nationalBrregEnheterRows?: number
+  nationalBrregUnderenheterRows?: number
+}
+
+export type RegionBuildPhase =
+  | 'starting'
+  | 'kartverket-download'
+  | 'kartverket-import'
+  | 'brreg'
+  | 'geocode'
+  | 'index'
+  | 'done'
+
+export interface RegionBuildProgress {
+  phase: RegionBuildPhase
+  progress?: number
+  detail?: string
+  /** Human-readable phase label (e.g. BRREG enheter 1/2). */
+  displayPhase?: string
+}
+
+function regionLog(options: RegionBuildOptions, ...args: unknown[]) {
+  if (!options.quiet) console.log(...args)
+}
+
+function regionProgress(options: RegionBuildOptions, event: RegionBuildProgress) {
+  if (options.reportProgress) {
+    emitRegionBuildProgress({
+      type: 'progress',
+      phase: event.phase,
+      progress: event.progress,
+      detail: event.detail,
+      displayPhase: event.displayPhase,
+    })
+  }
+  options.onProgress?.(event)
 }
 
 export interface RegionDescriptor {
@@ -191,49 +235,77 @@ export async function resolveRegionDescriptor(
   throw new Error('Region krever --fylke=XX eller --kommune=XXXX.')
 }
 
+export const CURRENT_FYLKE_CODES = [
+  '03',
+  '11',
+  '15',
+  '18',
+  '31',
+  '32',
+  '33',
+  '34',
+  '39',
+  '40',
+  '42',
+  '46',
+  '50',
+  '55',
+  '56',
+] as const
+
+const FYLKE_NAMES: Record<string, string> = {
+  '03': 'Oslo',
+  '11': 'Rogaland',
+  '15': 'Møre og Romsdal',
+  '18': 'Nordland',
+  '21': 'Svalbard',
+  '22': 'Jan Mayen',
+  '31': 'Østfold',
+  '32': 'Akershus',
+  '33': 'Buskerud',
+  '34': 'Innlandet',
+  '39': 'Vestfold',
+  '40': 'Telemark',
+  '42': 'Agder',
+  '46': 'Vestland',
+  '50': 'Trøndelag',
+  '55': 'Troms',
+  '56': 'Finnmark',
+}
+
 function fylkeNameFromKommuner(
   fylkeCode: string,
   kommuner: Array<{ nummer: string; navn: string }>,
 ): string {
-  const FYLKE_NAMES: Record<string, string> = {
-    '03': 'Oslo',
-    '11': 'Rogaland',
-    '15': 'Møre og Romsdal',
-    '18': 'Nordland',
-    '21': 'Svalbard',
-    '31': 'Østfold',
-    '32': 'Akershus',
-    '33': 'Buskerud',
-    '34': 'Innlandet',
-    '39': 'Vestfold',
-    '40': 'Telemark',
-    '42': 'Agder',
-    '46': 'Vestland',
-    '50': 'Trøndelag',
-    '55': 'Troms',
-    '56': 'Finnmark',
-  }
-
   return FYLKE_NAMES[fylkeCode] ?? `Fylke ${fylkeCode}`
 }
 
 export async function listAllFylker(
   referenceCacheDir = DEFAULT_REFERENCE_CACHE_DIR,
-  options: { localOnly?: boolean; nationalDbPath?: string } = {},
+  options: {
+    localOnly?: boolean
+    nationalDbPath?: string
+    /** Only the 15 current mainland fylker (excludes utland/Svalbard pseudo-codes). */
+    currentOnly?: boolean
+  } = {},
 ): Promise<RegionDescriptor[]> {
   const kommuner = await loadKommunerForBuild(referenceCacheDir, {
     localOnly: options.localOnly ?? true,
     nationalDbPath: options.nationalDbPath,
   })
   const codes = [...new Set(kommuner.map((k) => k.nummer.slice(0, 2)))].sort()
+  const allowed =
+    options.currentOnly === true ? new Set<string>(CURRENT_FYLKE_CODES) : null
 
-  return codes.map((code) => ({
-    kind: 'fylke' as const,
-    code,
-    name: fylkeNameFromKommuner(code, kommuner),
-    slug: slugifyRegionName(fylkeNameFromKommuner(code, kommuner)),
-    kommuner: kommuner.filter((k) => k.nummer.slice(0, 2) === code).map((k) => k.nummer).sort(),
-  }))
+  return codes
+    .filter((code) => allowed == null || allowed.has(code))
+    .map((code) => ({
+      kind: 'fylke' as const,
+      code,
+      name: fylkeNameFromKommuner(code, kommuner),
+      slug: slugifyRegionName(fylkeNameFromKommuner(code, kommuner)),
+      kommuner: kommuner.filter((k) => k.nummer.slice(0, 2) === code).map((k) => k.nummer).sort(),
+    }))
 }
 
 export async function listAllKommuner(
@@ -273,16 +345,18 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
   )
 
   if (options.fresh && existsSync(options.outputPath)) {
-    console.log(`Sletter eksisterende database: ${options.outputPath}`)
+    regionLog(options, `Sletter eksisterende database: ${options.outputPath}`)
     removeDatabaseFiles(options.outputPath)
   }
 
   mkdirSync(dirname(options.outputPath), { recursive: true })
   const db = openDatabase(options.outputPath, { runBackfill: true })
 
-  console.log(`Bygger regionsdatabase: ${regionLabel(descriptor)}`)
-  console.log(`  Output: ${options.outputPath}`)
-  console.log(
+  regionProgress(options, { phase: 'starting' })
+  regionLog(options, `Bygger regionsdatabase: ${regionLabel(descriptor)}`)
+  regionLog(options, `  Output: ${options.outputPath}`)
+  regionLog(
+    options,
     source === 'cache'
       ? `  Datakilde: referansecache (${referenceCacheDir})`
       : `  Datakilde: nasjonal SQLite (${nationalDbPath})`,
@@ -295,17 +369,17 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
   setSyncState(db, 'region_data_source', source)
 
   if (source === 'national') {
-    console.log('\nSteg 1/2: Kopierer region fra nasjonal database…')
+    regionLog(options, '\nSteg 1/2: Kopierer region fra nasjonal database…')
     const copied = importRegionFromNationalDb(db, nationalDbPath, descriptor.kommuner, {
       skipUnderenheter: options.skipUnderenheter ?? false,
     })
-    console.log(`  ${copied.organizations.toLocaleString('nb-NO')} organisasjoner`)
-    console.log(`  ${copied.addressCache.toLocaleString('nb-NO')} adresse-cache-rader`)
-    console.log(`  ${copied.kartverket.toLocaleString('nb-NO')} Kartverket-adresser`)
+    regionLog(options, `  ${copied.organizations.toLocaleString('nb-NO')} organisasjoner`)
+    regionLog(options, `  ${copied.addressCache.toLocaleString('nb-NO')} adresse-cache-rader`)
+    regionLog(options, `  ${copied.kartverket.toLocaleString('nb-NO')} Kartverket-adresser`)
     setSyncState(db, 'copied_from_national_db', nationalDbPath)
   } else {
     if (!options.skipKartverket) {
-      console.log('\nSteg 1/4: Kartverket Adresse (regional CSV)…')
+      regionLog(options, '\nSteg 1/4: Kartverket Adresse (regional CSV)…')
       const scope =
         descriptor.kind === 'kommune'
           ? { kommune: descriptor.code }
@@ -314,6 +388,22 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
         cacheDir: kartverketCacheDir,
         reuseDownload: reuseDownloads,
         clearExisting: true,
+        quiet: options.quiet,
+        onProgress: (event) => {
+          if (event.phase === 'download') {
+            regionProgress(options, {
+              phase: 'kartverket-download',
+              progress: event.progress,
+              detail: event.detail,
+            })
+            return
+          }
+          regionProgress(options, {
+            phase: 'kartverket-import',
+            progress: event.progress,
+            detail: event.detail,
+          })
+        },
       })
       setSyncState(db, 'kartverket_bulk_imported_at', new Date().toISOString())
     } else if (!kartverketBulkAvailable(db)) {
@@ -321,36 +411,112 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
     }
 
     if (!options.skipBrreg) {
-      console.log(`\nSteg 2/4: Importerer BRREG for ${descriptor.kommuner.length} kommune(r) fra lokal cache…`)
+      regionLog(
+        options,
+        `\nSteg 2/4: Importerer BRREG for ${descriptor.kommuner.length} kommune(r) fra lokal cache…`,
+      )
+      regionProgress(options, { phase: 'brreg' })
       await importBrregForKommuner(db, descriptor.kommuner, {
         skipUnderenheter: options.skipUnderenheter ?? false,
         referenceCacheDir,
+        quiet: options.quiet,
+        nationalEnheterRows: options.nationalBrregEnheterRows,
+        nationalUnderenheterRows: options.nationalBrregUnderenheterRows,
+        onBrregProgress: (event) => {
+          const hasUnderenheter =
+            !(options.skipUnderenheter ?? false) &&
+            (options.nationalBrregUnderenheterRows ?? 0) > 0
+          const brregSteps = hasUnderenheter ? 2 : 1
+          const stepIndex = event.phase === 'enheter' ? 1 : 2
+          const rowGoal =
+            event.phase === 'enheter'
+              ? options.nationalBrregEnheterRows
+              : options.nationalBrregUnderenheterRows
+          const stepProgress =
+            rowGoal != null && rowGoal > 0 ? Math.min(1, event.rowsRead / rowGoal) : undefined
+
+          let combinedProgress = stepProgress
+          if (brregSteps === 2 && stepProgress != null) {
+            combinedProgress =
+              event.phase === 'enheter' ? stepProgress * 0.5 : 0.5 + stepProgress * 0.5
+          }
+
+          const fileLabel = event.phase === 'enheter' ? 'enheter' : 'underenheter'
+          const displayPhase =
+            brregSteps === 1
+              ? 'BRREG enheter'
+              : `BRREG ${fileLabel} (${stepIndex}/${brregSteps})`
+
+          const rowDetail =
+            rowGoal != null && rowGoal > 0
+              ? `${event.rowsRead.toLocaleString('nb-NO')}/${rowGoal.toLocaleString('nb-NO')} rows in national file`
+              : undefined
+          const detail = [
+            `${event.imported.toLocaleString('nb-NO')} org matched in fylke`,
+            rowDetail,
+            brregSteps === 2 && event.phase === 'underenheter'
+              ? 'step 2: scanning underenheter file'
+              : brregSteps === 2
+                ? 'step 1: scanning enheter file'
+                : 'scanning national enheter file',
+          ]
+            .filter(Boolean)
+            .join(' · ')
+
+          regionProgress(options, {
+            phase: 'brreg',
+            progress: combinedProgress,
+            displayPhase,
+            detail,
+          })
+        },
       })
     }
 
     if (!options.skipGeocode) {
-      console.log('\nSteg 3/4: Geokoder organisasjoner mot lokal Kartverket-database…')
-      await geocodeAllFromKartverketBulk(db)
-      await backfillMetadataFromKartverketBulk(db)
+      regionLog(options, '\nSteg 3/4: Geokoder organisasjoner mot lokal Kartverket-database…')
+      await geocodeAllFromKartverketBulk(db, {
+        quiet: options.quiet,
+        onProgress: (event) => {
+          regionProgress(options, {
+            phase: 'geocode',
+            progress: event.progress,
+            detail: event.detail,
+          })
+        },
+      })
+      await backfillMetadataFromKartverketBulk(db, { quiet: options.quiet })
     } else {
-      console.log('\nSteg 3/4: Hopper over geokoding (--skip-geocode).')
+      regionLog(options, '\nSteg 3/4: Hopper over geokoding (--skip-geocode).')
     }
   }
 
-  console.log(`\nSteg ${source === 'national' ? '2/2' : '4/4'}: Bygger spatialt indeks (R-tree)…`)
+  regionProgress(options, { phase: 'index' })
+  regionLog(options, `\nSteg ${source === 'national' ? '2/2' : '4/4'}: Bygger spatialt indeks (R-tree)…`)
   rebuildOrgsRtree(db)
   setSyncState(db, 'last_sync_at', new Date().toISOString())
 
   const stats = getStats(db)
   const kartverketCount = kartverketAddressCount(db)
 
-  console.log('\nFerdig. Database status:')
-  console.log(`  Fil: ${options.outputPath}`)
-  console.log(`  Region: ${regionLabel(descriptor)}`)
-  console.log(`  Kartverket-adresser: ${kartverketCount.toLocaleString('nb-NO')}`)
-  console.log(`  Organisasjoner totalt: ${stats.total.toLocaleString('nb-NO')}`)
-  console.log(`  Geokodet: ${(stats.geocoded ?? 0).toLocaleString('nb-NO')}`)
-  console.log(`  Venter geokoding: ${(stats.pending_geocode ?? 0).toLocaleString('nb-NO')}`)
+  regionProgress(options, {
+    phase: 'done',
+    detail: `${stats.total.toLocaleString('nb-NO')} org.`,
+  })
+  if (options.reportProgress) {
+    emitRegionBuildProgress({
+      type: 'done',
+      orgTotal: stats.total ?? 0,
+      outputPath: options.outputPath,
+    })
+  }
+  regionLog(options, '\nFerdig. Database status:')
+  regionLog(options, `  Fil: ${options.outputPath}`)
+  regionLog(options, `  Region: ${regionLabel(descriptor)}`)
+  regionLog(options, `  Kartverket-adresser: ${kartverketCount.toLocaleString('nb-NO')}`)
+  regionLog(options, `  Organisasjoner totalt: ${stats.total.toLocaleString('nb-NO')}`)
+  regionLog(options, `  Geokodet: ${(stats.geocoded ?? 0).toLocaleString('nb-NO')}`)
+  regionLog(options, `  Venter geokoding: ${(stats.pending_geocode ?? 0).toLocaleString('nb-NO')}`)
 
   db.close()
   return { descriptor, stats, kartverketCount }

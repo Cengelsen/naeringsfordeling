@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3'
+import { createHash } from 'node:crypto'
 import type { BrregAddress, BrregEntity, BrregUnderenhet, EntityKind, GeocodeQuality } from './types.js'
 import { addressCacheKey, pickAddressLine, type GeocodeResult } from './geocode.js'
 import { employeeBand } from './employeeBands.js'
@@ -16,10 +17,53 @@ export function entityKommunenummer(entity: BrregEntity | BrregUnderenhet): stri
   return address.kommunenummer.padStart(4, '0')
 }
 
+function stableAddressPayload(address: BrregAddress | null) {
+  if (!address) return null
+  return {
+    adresse: address.adresse ?? null,
+    postnummer: address.postnummer ?? null,
+    poststed: address.poststed ?? null,
+    kommune: address.kommune ?? null,
+    kommunenummer: address.kommunenummer ?? null,
+    landkode: address.landkode ?? null,
+  }
+}
+
+/** Stable hash of BRREG fields that affect import / geocoding. */
+export function computeBrregContentHash(entity: BrregEntity | BrregUnderenhet): string {
+  const isUnderenhet = 'beliggenhetsadresse' in entity
+  const payload = {
+    navn: entity.navn,
+    organisasjonsform: entity.organisasjonsform ?? null,
+    address: stableAddressPayload(entityAddress(entity)),
+    naeringskode1: entity.naeringskode1 ?? null,
+    antallAnsatte: entity.antallAnsatte ?? null,
+    harRegistrertAntallAnsatte: entity.harRegistrertAntallAnsatte ?? false,
+    erIKonsern: 'erIKonsern' in entity ? entity.erIKonsern ?? false : false,
+    overordnetEnhet: isUnderenhet
+      ? (entity as BrregUnderenhet).overordnetEnhet
+      : (entity as BrregEntity).overordnetEnhet ?? null,
+    konkurs: entity.konkurs ?? false,
+    underAvvikling: entity.underAvvikling ?? false,
+    registrertIMvaregisteret: entity.registrertIMvaregisteret ?? false,
+    slettedato: entity.slettedato ?? null,
+    entityKind: isUnderenhet ? 'underenhet' : 'enhet',
+  }
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+}
+
+export function loadBrregHashIndex(db: Database.Database): Map<string, string | null> {
+  const rows = db
+    .prepare('SELECT orgnr, brreg_content_hash FROM organizations')
+    .all() as Array<{ orgnr: string; brreg_content_hash: string | null }>
+  return new Map(rows.map((row) => [row.orgnr, row.brreg_content_hash]))
+}
+
 function baseRecord(
   entity: BrregEntity | BrregUnderenhet,
   entityKind: EntityKind,
   deleted: boolean,
+  updatedAt = new Date().toISOString(),
 ) {
   const address = entityAddress(entity)
   const line = address ? pickAddressLine(address.adresse) : null
@@ -38,7 +82,7 @@ function baseRecord(
     under_avvikling: entity.underAvvikling ? 1 : 0,
     vat_registered: entity.registrertIMvaregisteret ? 1 : 0,
     deleted: deleted || entity.slettedato ? 1 : 0,
-    updated_at: new Date().toISOString(),
+    updated_at: updatedAt,
     entity_kind: entityKind,
     overordnet_enhet:
       entityKind === 'underenhet'
@@ -58,12 +102,38 @@ function baseRecord(
   }
 }
 
-export function entityToRecord(entity: BrregEntity, deleted = false) {
-  return baseRecord(entity, 'enhet', deleted)
+export type OrganizationUpsertRecord = ReturnType<typeof baseRecord> & {
+  brreg_content_hash: string
 }
 
-export function underenhetToRecord(entity: BrregUnderenhet, deleted = false) {
-  return baseRecord(entity, 'underenhet', deleted)
+export function entityToRecord(entity: BrregEntity, deleted = false, updatedAt?: string) {
+  return baseRecord(entity, 'enhet', deleted, updatedAt)
+}
+
+export function underenhetToRecord(entity: BrregUnderenhet, deleted = false, updatedAt?: string) {
+  return baseRecord(entity, 'underenhet', deleted, updatedAt)
+}
+
+export function prepareEntityRecord(
+  entity: BrregEntity,
+  deleted: boolean,
+  updatedAt: string,
+): OrganizationUpsertRecord {
+  return {
+    ...entityToRecord(entity, deleted, updatedAt),
+    brreg_content_hash: computeBrregContentHash(entity),
+  }
+}
+
+export function prepareUnderenhetRecord(
+  entity: BrregUnderenhet,
+  deleted: boolean,
+  updatedAt: string,
+): OrganizationUpsertRecord {
+  return {
+    ...underenhetToRecord(entity, deleted, updatedAt),
+    brreg_content_hash: computeBrregContentHash(entity),
+  }
 }
 
 function existingOrgnr(db: Database.Database, orgnr: string | null | undefined): string | null {
@@ -95,14 +165,14 @@ const upsertStmt = `
     vat_registered, deleted, updated_at, entity_kind, overordnet_enhet,
     naeringskode, naeringskode_label, antall_ansatte, har_registrert_antall_ansatte,
     er_i_konsern, adresse_id, matrikkel_key, kommunenummer_geo, geocode_quality,
-    employee_band, naeringskode_section
+    employee_band, naeringskode_section, brreg_content_hash
   ) VALUES (
     @orgnr, @navn, @org_type, @org_type_label, @address_text, @postnummer,
     @kommunenummer, @address_key, @lat, @lng, @konkurs, @under_avvikling,
     @vat_registered, @deleted, @updated_at, @entity_kind, @overordnet_enhet,
     @naeringskode, @naeringskode_label, @antall_ansatte, @har_registrert_antall_ansatte,
     @er_i_konsern, @adresse_id, @matrikkel_key, @kommunenummer_geo, @geocode_quality,
-    @employee_band, @naeringskode_section
+    @employee_band, @naeringskode_section, @brreg_content_hash
   )
   ON CONFLICT(orgnr) DO UPDATE SET
     navn = excluded.navn,
@@ -149,8 +219,40 @@ const upsertStmt = `
       ELSE COALESCE(organizations.geocode_quality, excluded.geocode_quality)
     END,
     employee_band = excluded.employee_band,
-    naeringskode_section = excluded.naeringskode_section
+    naeringskode_section = excluded.naeringskode_section,
+    brreg_content_hash = excluded.brreg_content_hash
 `
+
+const upsertPrepared = new WeakMap<Database.Database, Database.Statement>()
+
+function getUpsertStatement(db: Database.Database): Database.Statement {
+  let stmt = upsertPrepared.get(db)
+  if (!stmt) {
+    stmt = db.prepare(upsertStmt)
+    upsertPrepared.set(db, stmt)
+  }
+  return stmt
+}
+
+export function upsertManyOrganizations(
+  db: Database.Database,
+  records: OrganizationUpsertRecord[],
+  options: UpsertOrganizationOptions = {},
+): void {
+  if (records.length === 0) return
+
+  const insertMany = db.transaction((rows: OrganizationUpsertRecord[]) => {
+    const stmt = getUpsertStatement(db)
+    for (const record of rows) {
+      if (!options.deferParentLink) {
+        record.overordnet_enhet = existingOrgnr(db, record.overordnet_enhet)
+      }
+      stmt.run({ ...record, lat: null, lng: null })
+    }
+  })
+
+  insertMany(records)
+}
 
 export function upsertEntity(
   db: Database.Database,
@@ -158,11 +260,7 @@ export function upsertEntity(
   deleted = false,
   options: UpsertOrganizationOptions = {},
 ) {
-  const record = entityToRecord(entity, deleted)
-  if (!options.deferParentLink) {
-    record.overordnet_enhet = existingOrgnr(db, record.overordnet_enhet)
-  }
-  db.prepare(upsertStmt).run({ ...record, lat: null, lng: null })
+  upsertManyOrganizations(db, [prepareEntityRecord(entity, deleted, new Date().toISOString())], options)
 }
 
 export function upsertUnderenhet(
@@ -171,11 +269,11 @@ export function upsertUnderenhet(
   deleted = false,
   options: UpsertOrganizationOptions = {},
 ) {
-  const record = underenhetToRecord(entity, deleted)
-  if (!options.deferParentLink) {
-    record.overordnet_enhet = existingOrgnr(db, record.overordnet_enhet)
-  }
-  db.prepare(upsertStmt).run({ ...record, lat: null, lng: null })
+  upsertManyOrganizations(
+    db,
+    [prepareUnderenhetRecord(entity, deleted, new Date().toISOString())],
+    options,
+  )
 }
 
 export function markDeleted(db: Database.Database, orgnr: string) {

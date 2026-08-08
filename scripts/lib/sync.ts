@@ -23,6 +23,7 @@ import {
   loadKommunerCache,
 } from './reference-cache.js'
 import { importBrregForKommuner, importBrregNationwideFromCache } from './brreg-local-import.js'
+import { syncBrregFromBulkCache } from './brreg-bulk-sync.js'
 import {
   importEntireNationalDb,
   listKommunerFromNationalDb,
@@ -447,13 +448,24 @@ export async function runFullImport(db: Database.Database) {
 
 export async function runIncrementalSync(
   db: Database.Database,
-  options: Pick<SyncOptions, 'allowApi'> = {},
+  options: Pick<SyncOptions, 'allowApi' | 'referenceCacheDir' | 'skipUnderenheterBackfill' | 'refreshDownloads'> = {},
 ) {
   if (!(options.allowApi ?? false)) {
-    console.log(
-      'Hopper over inkrementell BRREG-sync (lokal modus). Bruk --allow-api for å hente oppdateringer fra BRREG API.',
-    )
-    return 0
+    console.log('Inkrementell BRREG-sync fra lokal bulk (diff, ingen API)…')
+    const result = await syncBrregFromBulkCache(db, {
+      referenceCacheDir: options.referenceCacheDir,
+      skipUnderenheter: options.skipUnderenheterBackfill,
+      refreshDownloads: options.refreshDownloads,
+      localOnly: true,
+    })
+    if (result.skipped) {
+      console.log('Ingen BRREG-endringer i referansecache.')
+    } else {
+      console.log(
+        `Oppdatert ${result.enheterChanged.toLocaleString('nb-NO')} enheter og ${result.underenheterChanged.toLocaleString('nb-NO')} underenheter fra lokal bulk.`,
+      )
+    }
+    return result.enheterChanged + result.underenheterChanged
   }
 
   const lastId = Number(getSyncState(db, LAST_UPDATE_ID_KEY) ?? '0')
@@ -743,7 +755,12 @@ export async function runSync(db: Database.Database, options: SyncOptions = {}) 
         'Databasen mangler nye felt (næringskode, underenheter, osv.). Kjør «yarn sync --backfill» (hele landet) eller «yarn sync --backfill --fylke=46» for fylke-scoped database.',
       )
     }
-    await runIncrementalSync(db, { allowApi: resolved.allowApi })
+    await runIncrementalSync(db, {
+      allowApi: resolved.allowApi,
+      referenceCacheDir: resolved.referenceCacheDir,
+      skipUnderenheterBackfill: resolved.skipUnderenheterBackfill,
+      refreshDownloads: resolved.refreshDownloads,
+    })
     await geocodePending(db, resolved)
   }
 
@@ -839,7 +856,12 @@ export async function runBuildDatabase(db: Database.Database, options: BuildDbOp
         '  (Databasen mangler nye felt – vurder «yarn build-db --backfill --fylke=XX» for fylke-database.)',
       )
     }
-    await runIncrementalSync(db, { allowApi: options.allowApi })
+    await runIncrementalSync(db, {
+      allowApi: options.allowApi,
+      referenceCacheDir: options.referenceCacheDir,
+      skipUnderenheterBackfill: options.skipUnderenheterBackfill,
+      refreshDownloads: options.refreshDownloads,
+    })
   }
 
   if (options.skipGeocode) {

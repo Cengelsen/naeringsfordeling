@@ -12,6 +12,7 @@
     "build-national-db": "tsx scripts/build-national-db.ts",
     "build-region-db": "tsx scripts/build-region-db.ts",
     "build-all-fylker": "tsx scripts/build-all-regions.ts --fylker",
+    "build-national-from-fylker": "tsx scripts/build-national-from-fylker.ts",
     "build-all-kommuner": "tsx scripts/build-all-regions.ts --kommuner",
     "build-all-regions": "tsx scripts/build-all-regions.ts",
     "build-db:dev": "tsx scripts/build-db.ts --dev --fresh",

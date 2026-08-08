@@ -11,7 +11,8 @@ import {
   ensureBrregReferenceCache,
 } from './reference-cache.js'
 import { setSyncState } from './db.js'
-import { entityKommunenummer, upsertEntity, upsertUnderenhet } from './organizations.js'
+import { entityKommunenummer } from './organizations.js'
+import type { BrregEntity, BrregUnderenhet } from './types.js'
 
 const LAST_UPDATE_ID_KEY = 'last_oppdateringsid'
 const LAST_UPDATE_ID_UNDERENHETER_KEY = 'last_oppdateringsid_underenheter'
@@ -24,6 +25,16 @@ export async function importBrregForKommuner(
   options: {
     skipUnderenheter?: boolean
     referenceCacheDir?: string
+    quiet?: boolean
+    /** Total rows in national enheter gzip (for scan progress). */
+    nationalEnheterRows?: number
+    /** Total rows in national underenheter gzip (for scan progress). */
+    nationalUnderenheterRows?: number
+    onBrregProgress?: (event: {
+      phase: 'enheter' | 'underenheter'
+      rowsRead: number
+      imported: number
+    }) => void
   } = {},
 ): Promise<number> {
   const referenceCacheDir = options.referenceCacheDir ?? DEFAULT_REFERENCE_CACHE_DIR
@@ -36,35 +47,85 @@ export async function importBrregForKommuner(
   }
 
   const kommuneSet = new Set(kommuner.map((k) => k.padStart(4, '0')))
-  const filterEntity = (entity: Parameters<typeof upsertEntity>[1]) => {
+  const filterEntity = (entity: BrregEntity | BrregUnderenhet) => {
     const k = entityKommunenummer(entity)
     return k != null && kommuneSet.has(k)
   }
 
   const underenheterPath = referencePath(referenceCacheDir, BRREG_UNDERENHETER_FILE)
 
-  console.log(`  Filtrerer nasjonal BRREG-cache for ${kommuner.length} kommune(r)…`)
-  console.log(`  Enheter fra ${enheterPath}`)
+  if (!options.quiet) {
+    console.log(`  Filtrerer nasjonal BRREG-cache for ${kommuner.length} kommune(r)…`)
+    console.log(`  Enheter fra ${enheterPath}`)
+  }
 
-  let imported = 0
-  await importBrregEnheterFromCacheTransactional(db, enheterPath, async (entity) => {
-    upsertEntity(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
-    imported += 1
-  }, filterEntity)
-  console.log(`  ${imported.toLocaleString('nb-NO')} enheter importert`)
+  let enheterRowsRead = 0
+  let enheterImported = 0
+  const enheterImportOptions = {
+    quiet: options.quiet,
+    onRowsRead: (rowsRead: number) => {
+      enheterRowsRead = rowsRead
+      options.onBrregProgress?.({ phase: 'enheter', rowsRead, imported: enheterImported })
+    },
+    onProgress: (imported: number) => {
+      enheterImported = imported
+      options.onBrregProgress?.({ phase: 'enheter', rowsRead: enheterRowsRead, imported })
+    },
+  }
+
+  const enheterResult = await importBrregEnheterFromCacheTransactional(
+    db,
+    enheterPath,
+    filterEntity,
+    enheterImportOptions,
+  )
+  if (options.onBrregProgress) {
+    options.onBrregProgress({
+      phase: 'enheter',
+      rowsRead: options.nationalEnheterRows ?? enheterRowsRead,
+      imported: enheterResult.scanned,
+    })
+  }
+  if (!options.quiet) {
+    console.log(`  ${enheterResult.scanned.toLocaleString('nb-NO')} enheter importert`)
+  }
+
+  let imported = enheterResult.scanned
 
   if (options.skipUnderenheter) {
-    console.log('  Underenheter hoppet over.')
+    if (!options.quiet) console.log('  Underenheter hoppet over.')
   } else if (existsSync(underenheterPath)) {
-    let importedUnder = 0
-    console.log(`  Underenheter fra ${underenheterPath}`)
-    await importBrregUnderenheterFromCacheTransactional(db, underenheterPath, async (entity) => {
-      upsertUnderenhet(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
-      importedUnder += 1
-    }, filterEntity)
-    imported += importedUnder
-    console.log(`  ${importedUnder.toLocaleString('nb-NO')} underenheter importert`)
-  } else {
+    if (!options.quiet) console.log(`  Underenheter fra ${underenheterPath}`)
+    let underRowsRead = 0
+    let underImported = 0
+    const underResult = await importBrregUnderenheterFromCacheTransactional(
+      db,
+      underenheterPath,
+      filterEntity,
+      {
+        quiet: options.quiet,
+        onRowsRead: (rowsRead) => {
+          underRowsRead = rowsRead
+          options.onBrregProgress?.({ phase: 'underenheter', rowsRead, imported: underImported })
+        },
+        onProgress: (imported) => {
+          underImported = imported
+          options.onBrregProgress?.({ phase: 'underenheter', rowsRead: underRowsRead, imported })
+        },
+      },
+    )
+    if (options.onBrregProgress) {
+      options.onBrregProgress({
+        phase: 'underenheter',
+        rowsRead: options.nationalUnderenheterRows ?? underRowsRead,
+        imported: underResult.scanned,
+      })
+    }
+    imported += underResult.scanned
+    if (!options.quiet) {
+      console.log(`  ${underResult.scanned.toLocaleString('nb-NO')} underenheter importert`)
+    }
+  } else if (!options.quiet) {
     console.log('  Ingen lokal underenheter-fil i referansecache.')
   }
 
@@ -101,26 +162,21 @@ export async function importBrregNationwideFromCache(
   })
 
   console.log(`Backfill enheter fra ${reference.enheterPath}…`)
-  let imported = 0
-  await importBrregEnheterFromCacheTransactional(db, reference.enheterPath, async (entity) => {
-    upsertEntity(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
-    imported += 1
-  })
-  console.log(`  Oppdatert ${imported.toLocaleString('nb-NO')} enheter`)
+  const enheterResult = await importBrregEnheterFromCacheTransactional(db, reference.enheterPath)
+  console.log(`  Oppdatert ${enheterResult.scanned.toLocaleString('nb-NO')} enheter`)
 
-  let importedUnder = 0
+  let imported = enheterResult.scanned
   if (options.skipUnderenheter) {
     console.log('Hopper over underenheter.')
   } else if (reference.underenheterPath) {
     console.log(`Backfill underenheter fra ${reference.underenheterPath}…`)
-    await importBrregUnderenheterFromCacheTransactional(db, reference.underenheterPath, async (entity) => {
-      upsertUnderenhet(db, entity, Boolean(entity.slettedato), { deferParentLink: true })
-      importedUnder += 1
-    })
-    console.log(`  Importert/oppdatert ${importedUnder.toLocaleString('nb-NO')} underenheter`)
+    const underResult = await importBrregUnderenheterFromCacheTransactional(
+      db,
+      reference.underenheterPath,
+    )
+    imported += underResult.scanned
+    console.log(`  Importert/oppdatert ${underResult.scanned.toLocaleString('nb-NO')} underenheter`)
   }
-
-  imported += importedUnder
 
   const manifest = reference.manifest
   if (manifest.last_oppdateringsid) {
