@@ -26,7 +26,6 @@ import { buildOrgSearchIndex, searchOrgSearchIndex, type OrgSearchIndex } from '
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
 const STATIC_API = import.meta.env.VITE_STATIC_API === 'true'
-const HAS_PMTILES = import.meta.env.VITE_HAS_PMTILES === 'true'
 const STATIC_API_BASE = assetUrl('data/api')
 
 interface MunicipalityBreakdownRow {
@@ -85,8 +84,7 @@ async function staticFetch<T>(file: string): Promise<T> {
 }
 
 async function loadGeocodedPointsOptional(): Promise<GeocodedPointRow[] | null> {
-  if (HAS_PMTILES) return null
-
+  // Used for address stats and GeoJSON fallback when PMTiles/WebGL cannot paint.
   geocodedPointsPromise ??= fetchStaticJson<{ rows: GeocodedPointRow[] }>(
     `${STATIC_API_BASE}/geocoded-points.json`,
   )
@@ -151,10 +149,6 @@ async function fetchOrganizationPointsFromStatic(
   filters: MapFilters,
   options: FetchPointsOptions = {},
 ): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
-  if (HAS_PMTILES) {
-    return { points: [], truncated: false }
-  }
-
   const limit = options.limit ?? (options.zoom != null ? limitForZoom(options.zoom) : 50000)
   const points: OrganizationPoint[] = []
 

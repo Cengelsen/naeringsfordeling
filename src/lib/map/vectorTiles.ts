@@ -272,12 +272,33 @@ export async function probeVectorTiles(): Promise<{
   manifest: VectorTilesManifest | null
 }> {
   try {
-    const [head, manifest] = await Promise.all([
-      fetchWithRetry(VECTOR_TILES_PATH, { method: 'HEAD' }),
+    // Prefer a tiny Range GET over HEAD — large PMTiles on CDN/GitHub Pages
+    // often stall or omit useful HEAD responses, which used to disable vector
+    // mode and fall through to an empty static-points path.
+    const [probe, manifest] = await Promise.all([
+      fetchWithRetry(VECTOR_TILES_PATH, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-15' },
+      }),
       loadVectorTilesManifest(),
     ])
+    const magicOk =
+      (probe.status === 206 || probe.status === 200) &&
+      (await probe.arrayBuffer().then((buf) => {
+        const bytes = new Uint8Array(buf)
+        return (
+          bytes.length >= 7 &&
+          bytes[0] === 0x50 && // P
+          bytes[1] === 0x4d && // M
+          bytes[2] === 0x54 && // T
+          bytes[3] === 0x69 && // i
+          bytes[4] === 0x6c && // l
+          bytes[5] === 0x65 && // e
+          bytes[6] === 0x73 // s
+        )
+      }))
     return {
-      available: head.ok && manifest !== null,
+      available: magicOk && manifest !== null,
       manifest,
     }
   } catch {

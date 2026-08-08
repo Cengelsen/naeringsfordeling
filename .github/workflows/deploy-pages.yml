@@ -92,7 +92,8 @@ jobs:
           GITHUB_PAGES: 'true'
           VITE_BASE: /
           VITE_STATIC_API: ${{ hashFiles('data/organizations.db') != '' && 'true' || '' }}
-          VITE_HAS_PMTILES: ${{ hashFiles('public/data/points.pmtiles') != '' && 'true' || '' }}
+          # PMTiles are probed at runtime — do not bake a flag that skips
+          # geocoded-points.json (needed for address stats + GeoJSON fallback).
         run: yarn build
 
       - name: Upload Pages artifact
