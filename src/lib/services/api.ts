@@ -83,6 +83,16 @@ async function staticFetch<T>(file: string): Promise<T> {
   return response.json() as Promise<T>
 }
 
+async function loadGeocodedPointsOptional(): Promise<GeocodedPointRow[] | null> {
+  try {
+    return await fetchStaticJson<{ rows: GeocodedPointRow[] }>(
+      `${STATIC_API_BASE}/geocoded-points.json`,
+    ).then((data) => data.rows)
+  } catch {
+    return null
+  }
+}
+
 async function loadGeocodedPoints(): Promise<GeocodedPointRow[]> {
   geocodedPointsPromise ??= fetchStaticJson<{ rows: GeocodedPointRow[] }>(
     `${STATIC_API_BASE}/geocoded-points.json`,
@@ -494,15 +504,24 @@ async function fetchViewportSummaryStatic(
 
   let geocodedInBbox = 0
   const addressKeys = new Set<string>()
-  const points = await loadGeocodedPoints()
-  for (const row of points) {
-    if (!geocodedPointMatchesFilters(row, filters)) continue
-    if (options.bbox && !geocodedPointInBbox(row, options.bbox)) continue
-    geocodedInBbox += 1
-    const orgType = row[3]
-    byOrgType[orgType] = (byOrgType[orgType] ?? 0) + 1
-    // Compact points have no adresse_id — group by rounded lat/lng like the map.
-    addressKeys.add(`${Number(row[2]).toFixed(5)}:${Number(row[1]).toFixed(5)}`)
+  const points = await loadGeocodedPointsOptional()
+  if (points) {
+    for (const row of points) {
+      if (!geocodedPointMatchesFilters(row, filters)) continue
+      if (options.bbox && !geocodedPointInBbox(row, options.bbox)) continue
+      geocodedInBbox += 1
+      const orgType = row[3]
+      byOrgType[orgType] = (byOrgType[orgType] ?? 0) + 1
+      // Compact points have no adresse_id — group by rounded lat/lng like the map.
+      addressKeys.add(`${Number(row[2]).toFixed(5)}:${Number(row[1]).toFixed(5)}`)
+    }
+  } else {
+    for (const row of rows) {
+      if (kommuneSet.size > 0 && !kommuneSet.has(row.kommunenummer)) continue
+      if (!breakdownRowMatchesFilters(row, filters)) continue
+      geocodedInBbox += row.count
+      byOrgType[row.org_type] = (byOrgType[row.org_type] ?? 0) + row.count
+    }
   }
 
   const renderMode: ViewportSummary['renderMode'] =

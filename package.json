@@ -36,7 +36,7 @@
     "download-kommuner": "bash scripts/download-kommuner.sh",
     "download-grunnkretser": "bash scripts/download-grunnkretser.sh",
     "download-points": "bash scripts/download-points.sh",
-    "export-static-api": "tsx scripts/export-static-api.ts",
+    "export-static-api": "NODE_OPTIONS='--max-old-space-size=6144' tsx scripts/export-static-api.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",

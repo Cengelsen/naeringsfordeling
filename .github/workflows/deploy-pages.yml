@@ -49,6 +49,7 @@ jobs:
             gh release download points --pattern 'points.pmtiles' --dir public/data --clobber
             gh release download points --pattern 'manifest.json' --dir public/data/points --clobber
             echo "Loaded vector tiles from release"
+            echo "GEOCODED_POINTS_SKIP_EXPORT=1" >> "$GITHUB_ENV"
 
             if gh release download points --pattern 'districts.tar.gz' --dir public/data --clobber 2>/dev/null; then
               tar -C public/data -xzf public/data/districts.tar.gz
@@ -77,6 +78,7 @@ jobs:
         if: hashFiles('data/organizations.db') != ''
         env:
           DISTRICTS_SKIP_EXPORT: ${{ env.DISTRICTS_PREBUILT == '1' && '1' || '' }}
+          GEOCODED_POINTS_SKIP_EXPORT: ${{ env.GEOCODED_POINTS_SKIP_EXPORT == '1' && '1' || '' }}
         run: yarn export-static-api
 
       - name: Build site
