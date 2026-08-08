@@ -87,7 +87,9 @@ jobs:
         id: tippecanoe-cache
         uses: actions/cache@v4
         with:
-          path: /usr/local/bin/tippecanoe
+          path: |
+            /usr/local/bin/tippecanoe
+            /usr/local/bin/tile-join
           key: tippecanoe-${{ runner.os }}-v1
 
       - name: Install tippecanoe
@@ -98,8 +100,6 @@ jobs:
           git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
           make -C /tmp/tippecanoe -j"$(nproc)"
           sudo make -C /tmp/tippecanoe install
-          sudo cp "$(command -v tippecanoe)" /usr/local/bin/tippecanoe
-          sudo cp "$(command -v tile-join)" /usr/local/bin/tile-join
 
       - name: Install dependencies
         run: yarn install --frozen-lockfile
