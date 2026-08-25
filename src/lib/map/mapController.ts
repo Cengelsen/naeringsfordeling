@@ -6,6 +6,7 @@ import type {
   MunicipalityCount,
   OrganizationPoint,
   Organisasjonsform,
+  ViewportSummary,
 } from '../types'
 import {
   buildFylkeGeojson,
@@ -29,6 +30,7 @@ import {
 } from '../services/api'
 import { dotsCache, dotsCacheKey, expandBbox } from './dotsCache'
 import { canUseStaticTiles, filterPointsByMapFilters } from './points'
+import { snapBboxToTileGrid } from '../../../shared/tiles'
 import type { DotFilters } from './maplibreDotsLayer'
 import {
   aggregateLayersFromManifest,
@@ -806,6 +808,27 @@ export class MapController {
     })
   }
 
+  private applyBundledSummary(
+    summary: ViewportSummary | undefined,
+    settings: MapSettings,
+    geojson: FeatureCollection | null,
+  ): void {
+    if (!summary) {
+      void this.loadViewportSummary(settings, geojson)
+      return
+    }
+    this.updateDotsState({
+      statsLoading: false,
+      viewportSummary: summary,
+      statsApproximate: false,
+      geocoded: summary.geocodedInBbox,
+      organizations: summary.geocodedInBbox,
+      skipped: summary.ungeocodedInViewport,
+      kommuner: summary.kommunerInViewport,
+    })
+    this.updateRenderedFeatureCount(settings)
+  }
+
   // ── Org type visibility ───────────────────────────────────────────
 
   applyOrgTypeVisibility(
@@ -899,7 +922,7 @@ export class MapController {
     zoom: number,
     settings: MapSettings,
   ): Promise<void> {
-    const expanded = expandBbox(bbox, PREFETCH_BBOX_EXPANSION)
+    const expanded = snapBboxToTileGrid(expandBbox(bbox, PREFETCH_BBOX_EXPANSION), zoom)
     const key = dotsCacheKey({
       bbox: expanded,
       kommunenumre: targetKommuner,
@@ -927,6 +950,7 @@ export class MapController {
           points: result.points,
           truncated: result.truncated,
           savedAt: Date.now(),
+          summary: result.summary,
         })
       } catch {
         // Prefetch failures are non-critical
@@ -1006,7 +1030,7 @@ export class MapController {
 
     const targetKommuner = this.kommunerInBounds(geojson)
     const bounds = this.map.getBounds()
-    const bbox = this.mapBbox(bounds)
+    const bbox = snapBboxToTileGrid(this.mapBbox(bounds), zoom)
 
     if (targetKommuner.length === 0) {
       this.points = []
@@ -1038,7 +1062,7 @@ export class MapController {
     if (cached) {
       this.applyPoints(cached.points, cached.truncated, targetKommuner.length, settings)
       this.prefetchExpanded(bbox, targetKommuner, zoom, settings)
-      void this.loadViewportSummary(settings, geojson)
+      this.applyBundledSummary(cached.summary, settings, geojson)
       return
     }
 
@@ -1072,11 +1096,12 @@ export class MapController {
         points: result.points,
         truncated: result.truncated,
         savedAt: Date.now(),
+        summary: result.summary,
       })
 
       this.applyPoints(result.points, result.truncated, targetKommuner.length, settings)
       this.prefetchExpanded(bbox, targetKommuner, zoom, settings)
-      void this.loadViewportSummary(settings, geojson)
+      this.applyBundledSummary(result.summary, settings, geojson)
     } catch (err) {
       if (signal.aborted) return
       this.dotsController?.setStale(false)

@@ -22,7 +22,11 @@ import {
 import { assetUrl } from '../utils/assets'
 import { isDetailZoom } from '../lodConfig'
 import { fetchStaticJson } from '../utils/staticJson'
-import { buildOrgSearchIndex, searchOrgSearchIndex, type OrgSearchIndex } from '../search/orgSearchIndex'
+import {
+  buildOrgSearchIndex,
+  searchOrgSearchIndex,
+  type OrgSearchIndex,
+} from '../search/orgSearchIndex'
 
 const API_BASE = import.meta.env.VITE_API_URL ?? ''
 const STATIC_API = import.meta.env.VITE_STATIC_API === 'true'
@@ -308,8 +312,7 @@ function aggregateDistrictStats(
 
   for (const row of rows) {
     if (!breakdownRowMatchesFilters(row, filters)) continue
-    const rowDistrictId =
-      level === 'fylke' ? row.kommunenummer.slice(0, 2) : row.kommunenummer
+    const rowDistrictId = level === 'fylke' ? row.kommunenummer.slice(0, 2) : row.kommunenummer
     if (rowDistrictId !== districtId) continue
     byOrgType[row.org_type] = (byOrgType[row.org_type] ?? 0) + row.count
     total += row.count
@@ -426,7 +429,9 @@ export async function fetchOrganisasjonsformer(): Promise<Organisasjonsform[]> {
     )
     return data.organisasjonsformer
   }
-  const data = await apiFetch<{ organisasjonsformer: Organisasjonsform[] }>('/api/organisasjonsformer')
+  const data = await apiFetch<{ organisasjonsformer: Organisasjonsform[] }>(
+    '/api/organisasjonsformer',
+  )
   return data.organisasjonsformer
 }
 
@@ -445,23 +450,34 @@ export async function fetchNaeringskoder(): Promise<NaeringskodeOption[]> {
   return data.naeringskoder
 }
 
-export async function fetchKommuner(geojson: FeatureCollection | null): Promise<Kommune[]> {
-  const data = STATIC_API
-    ? await staticFetch<{ kommuner: Array<{ nummer: string; count: number }> }>('kommuner.json')
-    : await apiFetch<{ kommuner: Array<{ nummer: string; count: number }> }>('/api/kommuner')
+export function applyKommuneNames(
+  kommuner: Array<{ nummer: string }>,
+  geojson: FeatureCollection | null,
+): Kommune[] {
   const names = new Map<string, string>()
 
   for (const feature of geojson?.features ?? []) {
-    const props = feature.properties as { kommunenummer?: string; kommunenavn?: string; name?: string } | null
+    const props = feature.properties as {
+      kommunenummer?: string
+      kommunenavn?: string
+      name?: string
+    } | null
     if (props?.kommunenummer) {
       names.set(props.kommunenummer, props.kommunenavn ?? props.name ?? props.kommunenummer)
     }
   }
 
-  return data.kommuner.map((kommune) => ({
+  return kommuner.map((kommune) => ({
     nummer: kommune.nummer,
     navn: names.get(kommune.nummer) ?? kommune.nummer,
   }))
+}
+
+export async function fetchKommuner(geojson?: FeatureCollection | null): Promise<Kommune[]> {
+  const data = STATIC_API
+    ? await staticFetch<{ kommuner: Array<{ nummer: string; count: number }> }>('kommuner.json')
+    : await apiFetch<{ kommuner: Array<{ nummer: string; count: number }> }>('/api/kommuner')
+  return applyKommuneNames(data.kommuner, geojson ?? null)
 }
 
 export async function fetchMunicipalityCounts(filters: MapFilters): Promise<MunicipalityCount[]> {
@@ -529,8 +545,9 @@ async function fetchViewportSummaryStatic(
     }
   }
 
-  const renderMode: ViewportSummary['renderMode'] =
-    isDetailZoom(options.zoom) ? 'individual' : 'aggregate'
+  const renderMode: ViewportSummary['renderMode'] = isDetailZoom(options.zoom)
+    ? 'individual'
+    : 'aggregate'
 
   return {
     totalInViewport,
@@ -571,13 +588,12 @@ async function fetchOrganizationPointsFromApi(
   filters: MapFilters,
   options: FetchPointsOptions = {},
   signal?: AbortSignal,
-): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
+): Promise<{ points: OrganizationPoint[]; truncated: boolean; summary?: ViewportSummary }> {
   if (STATIC_API) {
     return fetchOrganizationPointsFromStatic(filters, options)
   }
 
   const params = dataFiltersToParams(filters)
-  // Prefer full JSON so pre-grouped address features keep orgCount / orgnrs / typeList.
 
   if (options.bbox) {
     params.set('bbox', options.bbox.join(','))
@@ -601,11 +617,13 @@ async function fetchOrganizationPointsFromApi(
   const data = await apiFetch<{
     points: OrganizationPoint[] | CompactPoint[]
     truncated: boolean
+    summary?: ViewportSummary
   }>(`/api/organizations/points?${params.toString()}`, undefined, signal)
 
   return {
     points: parsePointsResponse(data),
     truncated: data.truncated,
+    summary: data.summary,
   }
 }
 
@@ -613,7 +631,7 @@ export async function fetchOrganizationPoints(
   filters: MapFilters,
   options: FetchPointsOptions = {},
   signal?: AbortSignal,
-): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
+): Promise<{ points: OrganizationPoint[]; truncated: boolean; summary?: ViewportSummary }> {
   return fetchOrganizationPointsFromApi(filters, options, signal)
 }
 
@@ -733,7 +751,9 @@ export async function fetchOrganizationsBatch(
     }
   }
 
-  return unique.map((orgnr) => resolved.get(orgnr)).filter((org): org is Organization => org != null)
+  return unique
+    .map((orgnr) => resolved.get(orgnr))
+    .filter((org): org is Organization => org != null)
 }
 
 export async function fetchKonsernstruktur(
@@ -781,7 +801,10 @@ export async function fetchOrganizationLocation(orgnr: string): Promise<Organiza
   return data.location
 }
 
-export async function searchOrganizations(query: string, limit = 8): Promise<OrganizationSearchHit[]> {
+export async function searchOrganizations(
+  query: string,
+  limit = 8,
+): Promise<OrganizationSearchHit[]> {
   if (STATIC_API) {
     const index = await loadOrgSearchIndex()
     return searchStaticOrganizations(query, limit, index)

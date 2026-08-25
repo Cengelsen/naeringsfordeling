@@ -26,6 +26,13 @@ export function fromCompactPoint(point: CompactPoint): OrganizationPoint {
     base.employeeBand = (point[9] || 'unknown') as import('../utils/employeeBands').EmployeeBand
     base.entityKind = (point[10] || 'enhet') as 'enhet' | 'underenhet'
   }
+  if (point.length >= 15) {
+    base.kommunenummer = point[11] || undefined
+    const orgCount = Number(point[12])
+    base.orgCount = Number.isFinite(orgCount) && orgCount > 0 ? orgCount : 1
+    base.orgnrs = point[13] || point[0]
+    base.typeList = point[14] || undefined
+  }
   return base
 }
 

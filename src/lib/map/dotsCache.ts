@@ -1,9 +1,11 @@
-import type { OrganizationPoint } from '../types'
+import type { OrganizationPoint, ViewportSummary } from '../types'
+import { snapBboxToTileGrid } from '../../../shared/tiles'
 
 export interface DotsCacheEntry {
   points: OrganizationPoint[]
   truncated: boolean
   savedAt: number
+  summary?: ViewportSummary
 }
 
 const DB_NAME = 'naeringsfordeling-dots'
@@ -103,9 +105,13 @@ export function dotsCacheKey(parts: {
   zoom: number
   clustering: boolean
 }): string {
-  const bbox = parts.bbox?.map((value) => value.toFixed(4)).join(',') ?? ''
+  const bbox = parts.bbox
+    ? snapBboxToTileGrid(parts.bbox, parts.zoom)
+        .map((value) => value.toFixed(6))
+        .join(',')
+    : ''
   const kommuner = [...parts.kommunenumre].sort().join(',')
-  return `${bbox}|${kommuner}|z${parts.zoom}|c${parts.clustering ? 1 : 0}|${parts.filters}`
+  return `${bbox}|${kommuner}|z${Math.floor(parts.zoom)}|c${parts.clustering ? 1 : 0}|${parts.filters}`
 }
 
 export function expandBbox(

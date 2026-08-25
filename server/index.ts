@@ -4,9 +4,10 @@ import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { existsSync } from 'node:fs'
 import { openDatabase, DEFAULT_DB_PATH } from '../scripts/lib/db.js'
-import { warmAddressSpatialIndex } from './addressSpatialIndex.js'
+import { startAddressSpatialWorker, terminateAddressSpatialWorker } from './addressSpatialIndex.js'
 import { initContext } from './context.js'
-import reference from './routes/reference.js'
+import { initHttpCache } from './httpCache.js'
+import reference, { warmReferenceCache } from './routes/reference.js'
 import geography from './routes/geography.js'
 import organizations from './routes/organizations.js'
 
@@ -53,9 +54,11 @@ app.route('/', organizations)
 const port = Number(process.env.PORT ?? 3001)
 
 function shutdown() {
-  db.pragma('optimize')
-  db.close()
-  process.exit(0)
+  void terminateAddressSpatialWorker().finally(() => {
+    db.pragma('optimize')
+    db.close()
+    process.exit(0)
+  })
 }
 process.on('SIGTERM', shutdown)
 process.on('SIGINT', shutdown)
@@ -63,12 +66,7 @@ process.on('SIGINT', shutdown)
 console.log(`API server on http://localhost:${port}`)
 console.log(`Database: ${dbPath}`)
 
+initHttpCache(dbPath)
+warmReferenceCache()
 serve({ fetch: app.fetch, port })
-
-setImmediate(() => {
-  try {
-    warmAddressSpatialIndex(db)
-  } catch (error) {
-    console.error('Failed to warm address spatial index', error)
-  }
-})
+startAddressSpatialWorker(dbPath)

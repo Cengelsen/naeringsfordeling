@@ -5,6 +5,7 @@ import {
   parsePointsResponse,
   fromCompactPoint,
 } from '../src/lib/map/points'
+import { toCompactPoint } from '../shared/points'
 import type { OrganizationPoint } from '../src/lib/types'
 
 describe('normalizeOrgnr', () => {
@@ -23,9 +24,33 @@ describe('normalizeOrgnr', () => {
 
 describe('filterPointsByMapFilters', () => {
   const points: OrganizationPoint[] = [
-    { orgnr: '1', orgType: 'AS', lat: 60, lng: 5, naeringskode: '62.01', employeeBand: '5-19', entityKind: 'enhet' },
-    { orgnr: '2', orgType: 'ENK', lat: 61, lng: 6, naeringskode: '47.01', employeeBand: '0', entityKind: 'enhet' },
-    { orgnr: '3', orgType: 'AS', lat: 62, lng: 7, naeringskode: '68.01', employeeBand: '20+', entityKind: 'underenhet' },
+    {
+      orgnr: '1',
+      orgType: 'AS',
+      lat: 60,
+      lng: 5,
+      naeringskode: '62.01',
+      employeeBand: '5-19',
+      entityKind: 'enhet',
+    },
+    {
+      orgnr: '2',
+      orgType: 'ENK',
+      lat: 61,
+      lng: 6,
+      naeringskode: '47.01',
+      employeeBand: '0',
+      entityKind: 'enhet',
+    },
+    {
+      orgnr: '3',
+      orgType: 'AS',
+      lat: 62,
+      lng: 7,
+      naeringskode: '68.01',
+      employeeBand: '20+',
+      entityKind: 'underenhet',
+    },
   ]
 
   it('with no active filters returns all points', () => {
@@ -61,10 +86,31 @@ describe('parsePointsResponse', () => {
     expect(result[0].orgType).toBe('AS')
   })
 
+  it('round-trips grouped compact fields', () => {
+    const compact = fromCompactPoint(
+      toCompactPoint('123456789', 5.32, 60.39, 'MIXED', {
+        navn: 'Test AS',
+        orgTypeLabel: 'Blandet',
+        addressText: 'Testveien 1',
+        postnummer: '5000',
+        naeringskode: '62.01',
+        employeeBand: '5-19',
+        entityKind: 'enhet',
+        kommunenummer: '4601',
+        orgCount: 2,
+        orgnrs: '123456789,987654321',
+        typeList: ',AS,ENK,',
+      }),
+    )
+    expect(compact.orgCount).toBe(2)
+    expect(compact.orgnrs).toBe('123456789,987654321')
+    expect(compact.typeList).toBe(',AS,ENK,')
+    expect(compact.kommunenummer).toBe('4601')
+    expect(compact.orgType).toBe('MIXED')
+  })
+
   it('handles object format', () => {
-    const objectPoints: OrganizationPoint[] = [
-      { orgnr: '111', orgType: 'ENK', lat: 59, lng: 10 },
-    ]
+    const objectPoints: OrganizationPoint[] = [{ orgnr: '111', orgType: 'ENK', lat: 59, lng: 10 }]
     const result = parsePointsResponse({ points: objectPoints })
     expect(result).toHaveLength(1)
     expect(result[0].orgnr).toBe('111')

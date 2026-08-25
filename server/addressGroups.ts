@@ -1,4 +1,9 @@
-export { LOCATION_PRECISION, locationKey, addressGroupKey } from '../shared/address-groups.js'
+export {
+  LOCATION_PRECISION,
+  locationKey,
+  addressGroupKey,
+  addressGroupKeySql,
+} from '../shared/address-groups.js'
 import { LOCATION_PRECISION, addressGroupKey } from '../shared/address-groups.js'
 
 export interface AddressGroupedPoint {
@@ -100,4 +105,47 @@ export function groupOrganizationPointsByAddress(
   }
 
   return points
+}
+
+export interface AddressGroupSqlRow {
+  orgnr: string
+  org_type: string
+  org_type_label: string
+  navn: string
+  address_text: string | null
+  postnummer: string | null
+  kommunenummer: string
+  lat: number
+  lng: number
+  adresse_id: string | null
+  naeringskode: string | null
+  employee_band: string
+  entity_kind: string
+  org_count: number
+  orgnrs: string
+  types: string
+}
+
+export function addressGroupFromSqlRow(row: AddressGroupSqlRow): AddressGroupedPoint {
+  const types = [...new Set((row.types ?? '').split(',').filter(Boolean))].sort()
+  const orgType = types.length === 1 ? types[0]! : types.length === 0 ? row.org_type : 'MIXED'
+  const orgnrs = row.orgnrs || row.orgnr
+  return {
+    orgnr: orgnrs.split(',')[0] || row.orgnr,
+    orgType,
+    orgTypeLabel: orgType === 'MIXED' ? 'Blandet' : row.org_type_label,
+    navn: row.navn,
+    addressText: row.address_text ?? '',
+    postnummer: row.postnummer ?? '',
+    kommunenummer: row.kommunenummer,
+    lat: Number(row.lat.toFixed(LOCATION_PRECISION)),
+    lng: Number(row.lng.toFixed(LOCATION_PRECISION)),
+    naeringskode: row.naeringskode,
+    employeeBand: row.employee_band,
+    entityKind: row.entity_kind,
+    adresseId: row.adresse_id?.trim() || null,
+    orgCount: row.org_count,
+    orgnrs,
+    typeList: `,${types.join(',')},`,
+  }
 }

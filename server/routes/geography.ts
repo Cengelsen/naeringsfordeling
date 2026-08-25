@@ -2,7 +2,10 @@ import { Hono } from 'hono'
 import { effectiveKommunenummerExpr } from '../../scripts/lib/db.js'
 import { getContext } from '../context.js'
 import { appendAreaFilters, buildFilterQuery, parseFilters } from '../filters.js'
+import { maybeNotModified, resourceEtag } from '../httpCache.js'
 import { queryViewportSummary } from '../viewport-summary.js'
+
+const VIEWPORT_MAX_AGE = 20
 
 const geography = new Hono()
 
@@ -65,14 +68,20 @@ geography.get('/api/district-stats', (c) => {
   return c.json({ total, byOrgType })
 })
 
-geography.get('/api/viewport-summary', (c) => {
+geography.get('/api/viewport-summary', async (c) => {
   const { db } = getContext()
   const filters = parseFilters(c.req)
   if (!filters.bbox) {
     return c.json({ error: 'bbox query parameter is required' }, 400)
   }
 
-  const summary = queryViewportSummary(db, filters, filters.zoom)
+  const notModified = maybeNotModified(c, {
+    etag: resourceEtag('viewport-summary', c.req.url),
+    maxAge: VIEWPORT_MAX_AGE,
+  })
+  if (notModified) return notModified
+
+  const summary = await queryViewportSummary(db, filters, filters.zoom)
   return c.json({ summary })
 })
 

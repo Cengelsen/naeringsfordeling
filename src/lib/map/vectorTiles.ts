@@ -2,6 +2,9 @@ import maplibregl from 'maplibre-gl'
 import { PMTiles, Protocol } from 'pmtiles'
 import { DETAIL_MIN_ZOOM } from '../lodConfig'
 import { assetUrl } from '../utils/assets'
+import { tileRangeForBbox } from '../../../shared/tiles'
+
+export { tileRangeForBbox }
 
 export const VECTOR_TILES_PATH = assetUrl('data/points.pmtiles')
 export const VECTOR_TILES_MANIFEST = assetUrl('data/points/manifest.json')
@@ -58,27 +61,6 @@ function sharedPmtiles(): PMTiles {
     sharedProtocol!.add(tiles)
   }
   return tiles
-}
-
-/** Web-mercator tile x/y range covering a WGS84 bbox at zoom z. */
-export function tileRangeForBbox(
-  west: number,
-  south: number,
-  east: number,
-  north: number,
-  z: number,
-): { minX: number; maxX: number; minY: number; maxY: number } {
-  const n = 2 ** z
-  const lonToX = (lon: number) => Math.floor(((lon + 180) / 360) * n)
-  const latToY = (lat: number) => {
-    const rad = (lat * Math.PI) / 180
-    return Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * n)
-  }
-  const minX = Math.max(0, lonToX(west))
-  const maxX = Math.min(n - 1, lonToX(east))
-  const minY = Math.max(0, latToY(north))
-  const maxY = Math.min(n - 1, latToY(south))
-  return { minX, maxX, minY, maxY }
 }
 
 function padBounds(
@@ -165,7 +147,8 @@ export async function prefetchOrganizationTiles(
   const primaryZoom = Math.max(bakedMin, Math.min(18, Math.max(leafletZoom - 1, paintZoom)))
   const padded = padBounds(bounds, 0.2)
   // Higher budget near detail (smaller tiles); still centre-first if dense.
-  const maxTiles = primaryZoom >= paintZoom ? MAX_PREFETCH_TILES_DETAIL : primaryZoom >= bakedMin ? 80 : 48
+  const maxTiles =
+    primaryZoom >= paintZoom ? MAX_PREFETCH_TILES_DETAIL : primaryZoom >= bakedMin ? 80 : 48
 
   const jobs = [
     prefetchZoomLevel(padded.west, padded.south, padded.east, padded.north, primaryZoom, maxTiles),
@@ -191,9 +174,7 @@ export function isPolygonLodLayer(name: string): boolean {
 
 export function isAggregateLodLayer(name: string): boolean {
   return (
-    name.startsWith('districts_') ||
-    name.startsWith('grunnkretser_') ||
-    name.startsWith('cells_')
+    name.startsWith('districts_') || name.startsWith('grunnkretser_') || name.startsWith('cells_')
   )
 }
 

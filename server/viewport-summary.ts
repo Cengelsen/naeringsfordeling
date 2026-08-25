@@ -2,14 +2,15 @@ import type Database from 'better-sqlite3'
 import { isDetailZoom } from '../src/lib/lodConfig.js'
 import { effectiveKommunenummerExpr } from '../scripts/lib/db.js'
 import { countViewportSpatial } from './addressSpatialIndex.js'
-import {
-  appendAreaFilters,
-  buildFilterQuery,
-  type ApiFilters,
-} from './filters.js'
+import { appendAreaFilters, buildFilterQuery, type ApiFilters } from './filters.js'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { geoBoundsIntersects, extendBounds, ringBounds, type GeoBounds } from '../shared/geo-bounds.js'
+import {
+  geoBoundsIntersects,
+  extendBounds,
+  ringBounds,
+  type GeoBounds,
+} from '../shared/geo-bounds.js'
 
 export interface ViewportSummary {
   totalInViewport: number
@@ -98,11 +99,11 @@ export function kommunerIntersectingBbox(bbox: [number, number, number, number])
   return matches.sort()
 }
 
-export function queryViewportSummary(
+export async function queryViewportSummary(
   db: Database.Database,
   filters: ApiFilters,
   zoom?: number,
-): ViewportSummary {
+): Promise<ViewportSummary> {
   if (!filters.bbox) {
     throw new Error('bbox is required')
   }
@@ -111,8 +112,7 @@ export function queryViewportSummary(
   const kommuner = kommunerIntersectingBbox(filters.bbox)
   const kommuneExpr = effectiveKommunenummerExpr()
 
-  // Exact address + org counts in O(log N) via in-memory wavelet index.
-  const spatial = countViewportSpatial(db, filters, filters.bbox)
+  const spatial = await countViewportSpatial(db, filters, filters.bbox)
 
   // Ungeocoded orgs in kommuner that intersect the viewport (index-friendly).
   let ungeocodedInViewport = 0

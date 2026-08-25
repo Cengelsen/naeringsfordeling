@@ -3,7 +3,7 @@
  */
 import { existsSync } from 'node:fs'
 import { DEFAULT_DB_PATH, openDatabase } from './lib/db.js'
-import { countViewportSpatial, warmAddressSpatialIndex } from '../server/addressSpatialIndex.js'
+import { buildIndexes, loadAllGeocodedRows } from '../server/addressSpatialCore.js'
 
 const dbPath = process.env.DATABASE_PATH ?? DEFAULT_DB_PATH
 if (!existsSync(dbPath)) {
@@ -12,19 +12,18 @@ if (!existsSync(dbPath)) {
 }
 
 const db = openDatabase(dbPath)
-warmAddressSpatialIndex(db)
-
-const filters = {
-  orgTypes: [] as string[],
+const rows = loadAllGeocodedRows(db)
+const indexes = buildIndexes(rows, {
+  orgTypes: [],
   excludeKonkurs: true,
   excludeUnderAvvikling: true,
   vatRegisteredOnly: false,
-  naeringskodeSections: [] as string[],
-  employeeBands: [] as import('./lib/employeeBands.js').EmployeeBand[],
-  entityKinds: ['enhet'] as Array<'enhet' | 'underenhet'>,
+  naeringskodeSections: [],
+  employeeBands: [],
+  entityKinds: ['enhet'],
   konsernMode: false,
   konsernMembersOnly: false,
-}
+})
 
 const bboxes: Array<[number, number, number, number]> = [
   [5.2, 60.3, 5.5, 60.5], // Bergen-ish
@@ -73,8 +72,12 @@ function sqlOrgCount(bbox: [number, number, number, number]): number {
 
 let failures = 0
 for (const bbox of bboxes) {
+  const [minLng, minLat, maxLng, maxLat] = bbox
   const t0 = performance.now()
-  const spatial = countViewportSpatial(db, filters, bbox)
+  const spatial = {
+    addressesInBbox: indexes.addresses.countBbox(minLng, minLat, maxLng, maxLat),
+    geocodedInBbox: indexes.organizations.countBbox(minLng, minLat, maxLng, maxLat),
+  }
   const spatialMs = performance.now() - t0
 
   const t1 = performance.now()

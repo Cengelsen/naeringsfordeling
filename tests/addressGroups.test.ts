@@ -1,12 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { locationKey, addressGroupKey } from '../shared/address-groups'
-import { groupOrganizationPointsByAddress } from '../server/addressGroups'
+import { locationKey, addressGroupKey, addressGroupKeySql } from '../shared/address-groups'
+import { groupOrganizationPointsByAddress, addressGroupFromSqlRow } from '../server/addressGroups'
 import type { OrganizationPointLike } from '../server/addressGroups'
 
 describe('locationKey', () => {
   it('returns consistent keys for same coordinates', () => {
-    const key1 = locationKey(60.12345, 5.67890)
-    const key2 = locationKey(60.12345, 5.67890)
+    const key1 = locationKey(60.12345, 5.6789)
+    const key2 = locationKey(60.12345, 5.6789)
     expect(key1).toBe(key2)
   })
 
@@ -24,14 +24,14 @@ describe('addressGroupKey', () => {
   })
 
   it('falls back to lat/lng when no adresse_id', () => {
-    const key = addressGroupKey(60.12345, 5.67890, null)
+    const key = addressGroupKey(60.12345, 5.6789, null)
     expect(key.startsWith('ll:')).toBe(true)
     expect(key).toContain('60.12345')
     expect(key).toContain('5.67890')
   })
 
   it('falls back to lat/lng when adresse_id is undefined', () => {
-    const key = addressGroupKey(60.12345, 5.67890, undefined)
+    const key = addressGroupKey(60.12345, 5.6789, undefined)
     expect(key.startsWith('ll:')).toBe(true)
   })
 })
@@ -91,5 +91,42 @@ describe('groupOrganizationPointsByAddress', () => {
     const groups = groupOrganizationPointsByAddress(rows)
     expect(groups).toHaveLength(1)
     expect(groups[0].orgType).toBe('MIXED')
+  })
+})
+
+describe('addressGroupKeySql', () => {
+  it('matches JS keys for adresse_id and lat/lng fallback', () => {
+    const sql = addressGroupKeySql('o')
+    expect(sql).toContain("THEN 'id:' || trim(o.adresse_id)")
+    expect(sql).toContain("printf('%.5f', o.lat)")
+    expect(sql).toContain("printf('%.5f', o.lng)")
+  })
+})
+
+describe('addressGroupFromSqlRow', () => {
+  it('matches JS grouping for mixed types at one address', () => {
+    const grouped = addressGroupFromSqlRow({
+      orgnr: '100',
+      org_type: 'AS',
+      org_type_label: 'Aksjeselskap',
+      navn: 'Test AS',
+      address_text: 'Testveien 1',
+      postnummer: '5000',
+      kommunenummer: '4601',
+      lat: 60.39,
+      lng: 5.32,
+      adresse_id: 'addr-1',
+      naeringskode: '62.01',
+      employee_band: '5-19',
+      entity_kind: 'enhet',
+      org_count: 2,
+      orgnrs: '100,200',
+      types: 'ENK,AS',
+    })
+    expect(grouped.orgType).toBe('MIXED')
+    expect(grouped.orgCount).toBe(2)
+    expect(grouped.orgnrs).toBe('100,200')
+    expect(grouped.typeList).toBe(',AS,ENK,')
+    expect(grouped.orgTypeLabel).toBe('Blandet')
   })
 })

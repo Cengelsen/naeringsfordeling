@@ -20,6 +20,10 @@ export function toCompactPoint(
     naeringskode?: string
     employeeBand?: string
     entityKind?: string
+    kommunenummer?: string
+    orgCount?: number
+    orgnrs?: string
+    typeList?: string
   },
 ): CompactPoint {
   const base: CompactPoint = [orgnr, roundCoord(lng), roundCoord(lat), orgType]
@@ -33,6 +37,19 @@ export function toCompactPoint(
       details.employeeBand ?? '',
       details.entityKind ?? 'enhet',
     )
+    if (
+      details.kommunenummer != null ||
+      details.orgCount != null ||
+      details.orgnrs != null ||
+      details.typeList != null
+    ) {
+      base.push(
+        details.kommunenummer ?? '',
+        String(details.orgCount ?? 1),
+        details.orgnrs ?? orgnr,
+        details.typeList ?? `,${orgType},`,
+      )
+    }
   }
   return base
 }

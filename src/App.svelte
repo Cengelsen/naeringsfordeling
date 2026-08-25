@@ -4,13 +4,20 @@
   import MapView from './lib/components/MapView.svelte'
   import { mapSettings } from './lib/stores/settings.svelte'
   import {
+    applyKommuneNames,
     checkApiHealth,
     fetchKommuner,
     fetchMunicipalityCounts,
     fetchOrganisasjonsformer,
     prefetchLocalSearchIndex,
   } from './lib/services/api'
-  import type { Kommune, DotsLoadState, LoadingState, MunicipalityCount, Organisasjonsform } from './lib/types'
+  import type {
+    Kommune,
+    DotsLoadState,
+    LoadingState,
+    MunicipalityCount,
+    Organisasjonsform,
+  } from './lib/types'
   import { fylkeFromKommune } from './lib/utils/geo'
   import { fetchKommunerGeojson } from './lib/utils/geojson'
 
@@ -36,9 +43,7 @@
 
   const visibleKommuner = $derived.by(() => {
     if (!mapSettings.selectedFylke) return kommuner
-    return kommuner.filter(
-      (k) => fylkeFromKommune(k.nummer) === mapSettings.selectedFylke,
-    )
+    return kommuner.filter((k) => fylkeFromKommune(k.nummer) === mapSettings.selectedFylke)
   })
 
   const visibleCounts = $derived.by(() => {
@@ -101,22 +106,21 @@
   async function init() {
     loading = { loading: true, progress: 0, total: 3, error: null }
     try {
-      await checkApiHealth()
-
-      const geoResponse = await fetchKommunerGeojson()
-
-      geojson = geoResponse
-
-      const [forms, kommuneList] = await Promise.all([
+      const [, geoResponse, forms, kommuneList, nextCounts] = await Promise.all([
+        checkApiHealth(),
+        fetchKommunerGeojson(),
         fetchOrganisasjonsformer(),
-        fetchKommuner(geoResponse),
+        fetchKommuner(),
+        fetchMunicipalityCounts(mapSettings),
         prefetchLocalSearchIndex(),
       ])
 
+      geojson = geoResponse
       orgForms = forms
-      kommuner = kommuneList
+      kommuner = applyKommuneNames(kommuneList, geoResponse)
+      counts = nextCounts
       filterKey = currentFilterKey()
-      await loadCounts()
+      loading = { loading: false, progress: 1, total: 1, error: null }
     } catch (err) {
       loading = {
         loading: false,
@@ -267,7 +271,10 @@
     color: #e2e8f0;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
     cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    transition:
+      background 0.15s,
+      border-color 0.15s,
+      color 0.15s;
   }
 
   .panel-toggle:hover {

@@ -7,8 +7,15 @@ import {
 } from '../../scripts/lib/point-sampling.js'
 import { toCompactPoint, roundCoord, type CompactPoint } from '../../scripts/lib/points.js'
 import { resolveOrganizationLocation } from '../location.js'
-import { groupOrganizationPointsByAddress } from '../addressGroups.js'
+import {
+  addressGroupFromSqlRow,
+  type AddressGroupedPoint,
+  type AddressGroupSqlRow,
+} from '../addressGroups.js'
+import { addressGroupKeySql } from '../../shared/address-groups.js'
 import { getContext } from '../context.js'
+import { maybeNotModified, resourceEtag } from '../httpCache.js'
+import { queryViewportSummary } from '../viewport-summary.js'
 import {
   appendAreaFilters,
   appendBboxFilter,
@@ -52,32 +59,29 @@ async function fetchKonsernstruktur(orgnr: string) {
   return data
 }
 
-const POINT_SELECT = `o.orgnr, o.org_type, o.org_type_label, o.navn, o.address_text, o.postnummer,
-                o.kommunenummer, o.lat, o.lng, o.adresse_id,
-                o.naeringskode_section AS naeringskode,
-                o.employee_band,
-                o.entity_kind`
+const POINT_GROUP_SELECT = `MIN(o.orgnr) AS orgnr,
+                MIN(o.org_type) AS org_type,
+                MIN(o.org_type_label) AS org_type_label,
+                MIN(o.navn) AS navn,
+                MIN(o.address_text) AS address_text,
+                MIN(o.postnummer) AS postnummer,
+                MIN(o.kommunenummer) AS kommunenummer,
+                MIN(o.lat) AS lat,
+                MIN(o.lng) AS lng,
+                MIN(o.adresse_id) AS adresse_id,
+                MIN(o.naeringskode_section) AS naeringskode,
+                MIN(o.employee_band) AS employee_band,
+                MIN(o.entity_kind) AS entity_kind,
+                COUNT(*) AS org_count,
+                GROUP_CONCAT(o.orgnr) AS orgnrs,
+                GROUP_CONCAT(DISTINCT o.org_type) AS types`
 
 const ORG_DETAIL_SELECT = `orgnr, navn, org_type, org_type_label, address_text, postnummer,
               kommunenummer, lat, lng, naeringskode, naeringskode_label,
               antall_ansatte, har_registrert_antall_ansatte, entity_kind,
               overordnet_enhet, er_i_konsern, geocode_quality, matrikkel_key`
 
-type OrganizationPointRow = {
-  orgnr: string
-  org_type: string
-  org_type_label: string
-  navn: string
-  address_text: string
-  postnummer: string
-  kommunenummer: string
-  lat: number
-  lng: number
-  adresse_id: string | null
-  naeringskode: string | null
-  employee_band: string
-  entity_kind: string
-}
+const POINTS_MAX_AGE = 20
 
 type OrganizationDetailRow = {
   orgnr: string
@@ -137,32 +141,35 @@ function organizationQuery(filters: ReturnType<typeof parseFilters>, geocodedOnl
 function queryOrganizationPoints(
   filters: ReturnType<typeof parseFilters>,
   targetLimit: number,
-): { rows: OrganizationPointRow[]; sourceCount: number } {
+): { rows: AddressGroupedPoint[]; sourceCount: number } {
   const { cachedPrepare } = getContext()
   const fetchLimit = fetchLimitForTarget(targetLimit, filters.zoom)
   const query = organizationQuery(filters)
+  const groupKey = addressGroupKeySql('o')
 
-  let raw: OrganizationPointRow[]
+  let raw: AddressGroupSqlRow[]
 
   if (query.useRtree) {
     const [minLng, maxLng, minLat, maxLat] = rtreeBboxParams(query.bbox)
     raw =
       fetchLimit == null
         ? (cachedPrepare(
-            `SELECT ${POINT_SELECT}
-             FROM organizations o
-             INNER JOIN orgs_rtree r ON r.id = o.rowid
-             WHERE r.maxLng >= ? AND r.minLng <= ?
-               AND r.maxLat >= ? AND r.minLat <= ?
-               AND ${query.conditions.join(' AND ')}`,
-          ).all(minLng, maxLng, minLat, maxLat, ...query.params) as OrganizationPointRow[])
-        : (cachedPrepare(
-            `SELECT ${POINT_SELECT}
+            `SELECT ${POINT_GROUP_SELECT}
              FROM organizations o
              INNER JOIN orgs_rtree r ON r.id = o.rowid
              WHERE r.maxLng >= ? AND r.minLng <= ?
                AND r.maxLat >= ? AND r.minLat <= ?
                AND ${query.conditions.join(' AND ')}
+             GROUP BY ${groupKey}`,
+          ).all(minLng, maxLng, minLat, maxLat, ...query.params) as AddressGroupSqlRow[])
+        : (cachedPrepare(
+            `SELECT ${POINT_GROUP_SELECT}
+             FROM organizations o
+             INNER JOIN orgs_rtree r ON r.id = o.rowid
+             WHERE r.maxLng >= ? AND r.minLng <= ?
+               AND r.maxLat >= ? AND r.minLat <= ?
+               AND ${query.conditions.join(' AND ')}
+             GROUP BY ${groupKey}
              LIMIT ?`,
           ).all(
             minLng,
@@ -171,29 +178,32 @@ function queryOrganizationPoints(
             maxLat,
             ...query.params,
             fetchLimit,
-          ) as OrganizationPointRow[])
+          ) as AddressGroupSqlRow[])
   } else {
     appendBboxFilter(filters.bbox, query.conditions, query.params, 'o')
     raw =
       fetchLimit == null
         ? (cachedPrepare(
-            `SELECT ${POINT_SELECT}
-             FROM organizations o
-             WHERE ${query.conditions.join(' AND ')}`,
-          ).all(...query.params) as OrganizationPointRow[])
-        : (cachedPrepare(
-            `SELECT ${POINT_SELECT}
+            `SELECT ${POINT_GROUP_SELECT}
              FROM organizations o
              WHERE ${query.conditions.join(' AND ')}
+             GROUP BY ${groupKey}`,
+          ).all(...query.params) as AddressGroupSqlRow[])
+        : (cachedPrepare(
+            `SELECT ${POINT_GROUP_SELECT}
+             FROM organizations o
+             WHERE ${query.conditions.join(' AND ')}
+             GROUP BY ${groupKey}
              LIMIT ?`,
-          ).all(...query.params, fetchLimit) as OrganizationPointRow[])
+          ).all(...query.params, fetchLimit) as AddressGroupSqlRow[])
   }
 
+  const grouped = raw.map(addressGroupFromSqlRow)
   const rows =
     fetchLimit == null
-      ? raw
-      : stratifiedSamplePoints(raw, targetLimit, filters.bbox, {
-          orgType: (row) => row.org_type,
+      ? grouped
+      : stratifiedSamplePoints(grouped, targetLimit, filters.bbox, {
+          orgType: (row) => row.orgType,
           lat: (row) => row.lat,
           lng: (row) => row.lng,
         })
@@ -201,63 +211,80 @@ function queryOrganizationPoints(
   return { rows, sourceCount: raw.length }
 }
 
-organizations.get('/api/organizations/points', (c) => {
+function compactGroupedPoint(point: AddressGroupedPoint): CompactPoint {
+  return toCompactPoint(point.orgnr, point.lng, point.lat, point.orgType, {
+    navn: point.navn,
+    orgTypeLabel: point.orgTypeLabel,
+    addressText: point.addressText,
+    postnummer: point.postnummer,
+    naeringskode: point.naeringskode ?? undefined,
+    employeeBand: point.employeeBand,
+    entityKind: point.entityKind,
+    kommunenummer: point.kommunenummer,
+    orgCount: point.orgCount,
+    orgnrs: point.orgnrs,
+    typeList: point.typeList,
+  })
+}
+
+organizations.get('/api/organizations/points', async (c) => {
+  const { db } = getContext()
   const filters = parseFilters(c.req)
   const explicitLimit = Number(c.req.query('limit') ?? '')
   const limit = limitForZoom(
     filters.zoom,
     Number.isFinite(explicitLimit) ? explicitLimit : undefined,
   )
-  const compact = c.req.query('format') === 'compact'
+  const verbose = c.req.query('format') === 'full'
+
+  const notModified = maybeNotModified(c, {
+    etag: resourceEtag('organizations-points', c.req.url),
+    maxAge: POINTS_MAX_AGE,
+  })
+  if (notModified) return notModified
+
   const { rows, sourceCount } = queryOrganizationPoints(filters, limit)
   const fetchCap = fetchLimitForTarget(limit, filters.zoom)
   const truncated = fetchCap != null && (sourceCount >= fetchCap || sourceCount > rows.length)
-  const grouped = groupOrganizationPointsByAddress(rows)
 
-  if (compact) {
-    const points: CompactPoint[] = grouped.map((point) =>
-      toCompactPoint(point.orgnr, point.lng, point.lat, point.orgType, {
-        navn: point.navn,
+  const summary = filters.bbox ? await queryViewportSummary(db, filters, filters.zoom) : undefined
+
+  if (verbose) {
+    return c.json({
+      points: rows.map((point) => ({
+        orgnr: point.orgnr,
+        orgType: point.orgType,
         orgTypeLabel: point.orgTypeLabel,
+        navn: point.navn,
         addressText: point.addressText,
         postnummer: point.postnummer,
-        naeringskode: point.naeringskode ?? undefined,
+        kommunenummer: point.kommunenummer,
+        lat: roundCoord(point.lat),
+        lng: roundCoord(point.lng),
+        naeringskode: point.naeringskode,
         employeeBand: point.employeeBand,
         entityKind: point.entityKind,
-      }),
-    )
-    return c.json({
-      points,
-      count: points.length,
+        adresseId: point.adresseId,
+        orgCount: point.orgCount,
+        orgnrs: point.orgnrs,
+        typeList: point.typeList,
+      })),
+      count: rows.length,
       truncated,
       sampled: truncated,
       grouped: true,
+      summary,
     })
   }
 
+  const points: CompactPoint[] = rows.map(compactGroupedPoint)
   return c.json({
-    points: grouped.map((point) => ({
-      orgnr: point.orgnr,
-      orgType: point.orgType,
-      orgTypeLabel: point.orgTypeLabel,
-      navn: point.navn,
-      addressText: point.addressText,
-      postnummer: point.postnummer,
-      kommunenummer: point.kommunenummer,
-      lat: roundCoord(point.lat),
-      lng: roundCoord(point.lng),
-      naeringskode: point.naeringskode,
-      employeeBand: point.employeeBand,
-      entityKind: point.entityKind,
-      adresseId: point.adresseId,
-      orgCount: point.orgCount,
-      orgnrs: point.orgnrs,
-      typeList: point.typeList,
-    })),
-    count: grouped.length,
+    points,
+    count: points.length,
     truncated,
     sampled: truncated,
     grouped: true,
+    summary,
   })
 })
 
