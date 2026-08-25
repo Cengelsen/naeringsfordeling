@@ -62,10 +62,7 @@ function geometryBounds(geometry: Geometry): L.LatLngBounds | null {
   return bounds.isValid() ? bounds : null
 }
 
-function featureIntersectsViewport(
-  feature: Feature,
-  viewport: L.LatLngBounds | null,
-): boolean {
+function featureIntersectsViewport(feature: Feature, viewport: L.LatLngBounds | null): boolean {
   if (!viewport || !feature.geometry) return true
   const bounds = geometryBounds(feature.geometry)
   if (!bounds) return true
@@ -83,6 +80,7 @@ export function createDistrictColorLayer(
   let activeFylkerKey = ''
   let currentZoom = map.getZoom()
   let loadGeneration = 0
+  let lastClipBounds: L.LatLngBounds | null = null
   let filters: DistrictColorFilters = {
     orgTypes: [],
     selectedFylke: '',
@@ -148,10 +146,13 @@ export function createDistrictColorLayer(
 
   function clipToViewport(geojson: FeatureCollection): FeatureCollection {
     const viewport = options.getViewportBounds?.() ?? null
-    if (!viewport || geojson.features.length < 400) return geojson
+    if (!viewport || geojson.features.length < 400) {
+      lastClipBounds = null
+      return geojson
+    }
 
-    // Slightly expand so pans don't immediately blank edges.
-    const padded = viewport.pad(0.15)
+    const padded = viewport.pad(0.3)
+    lastClipBounds = padded
     return {
       type: 'FeatureCollection',
       features: geojson.features.filter((feature) => featureIntersectsViewport(feature, padded)),
@@ -166,6 +167,7 @@ export function createDistrictColorLayer(
       root.clearLayers()
       activeLayerId = null
       activeFylkerKey = ''
+      lastClipBounds = null
       return
     }
 
@@ -173,8 +175,13 @@ export function createDistrictColorLayer(
       spec.byFylke && options.getViewportFylker ? options.getViewportFylker() : []
     const nextFylkerKey = spec.byFylke ? fylkerKey(viewportFylker) : ''
 
+    const viewportBounds = options.getViewportBounds?.() ?? null
+    const viewportExceedsClip =
+      spec.byFylke && lastClipBounds && viewportBounds && !lastClipBounds.contains(viewportBounds)
+
     if (
       !forceReload &&
+      !viewportExceedsClip &&
       spec.id === activeLayerId &&
       nextFylkerKey === activeFylkerKey &&
       root.getLayers().length > 0
