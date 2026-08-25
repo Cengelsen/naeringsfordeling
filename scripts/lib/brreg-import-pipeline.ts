@@ -97,7 +97,7 @@ export async function importBrregFromGzip(
 
   let scanned = 0
   let skipped = 0
-  let prepareBatch: PendingEntity[] = []
+  const prepareBatch: PendingEntity[] = []
   const inFlight: Promise<OrganizationUpsertRecord[]>[] = []
   const importStartedAt = new Date().toISOString()
 

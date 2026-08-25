@@ -1,6 +1,12 @@
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
-import type { BrregAddress, BrregEntity, BrregUnderenhet, EntityKind, GeocodeQuality } from './types.js'
+import type {
+  BrregAddress,
+  BrregEntity,
+  BrregUnderenhet,
+  EntityKind,
+  GeocodeQuality,
+} from './types.js'
 import { addressCacheKey, pickAddressLine, type GeocodeResult } from './geocode.js'
 import { employeeBand } from './employeeBands.js'
 
@@ -8,7 +14,11 @@ export function entityAddress(entity: BrregEntity | BrregUnderenhet): BrregAddre
   if ('beliggenhetsadresse' in entity) {
     return entity.beliggenhetsadresse ?? entity.postadresse ?? null
   }
-  return entity.forretningsadresse ?? entity.postadresse ?? null
+  return (
+    ('forretningsadresse' in entity ? entity.forretningsadresse : null) ??
+    entity.postadresse ??
+    null
+  )
 }
 
 export function entityKommunenummer(entity: BrregEntity | BrregUnderenhet): string | null {
@@ -39,10 +49,10 @@ export function computeBrregContentHash(entity: BrregEntity | BrregUnderenhet): 
     naeringskode1: entity.naeringskode1 ?? null,
     antallAnsatte: entity.antallAnsatte ?? null,
     harRegistrertAntallAnsatte: entity.harRegistrertAntallAnsatte ?? false,
-    erIKonsern: 'erIKonsern' in entity ? entity.erIKonsern ?? false : false,
+    erIKonsern: 'erIKonsern' in entity ? (entity.erIKonsern ?? false) : false,
     overordnetEnhet: isUnderenhet
       ? (entity as BrregUnderenhet).overordnetEnhet
-      : (entity as BrregEntity).overordnetEnhet ?? null,
+      : ((entity as BrregEntity).overordnetEnhet ?? null),
     konkurs: entity.konkurs ?? false,
     underAvvikling: entity.underAvvikling ?? false,
     registrertIMvaregisteret: entity.registrertIMvaregisteret ?? false,
@@ -53,9 +63,10 @@ export function computeBrregContentHash(entity: BrregEntity | BrregUnderenhet): 
 }
 
 export function loadBrregHashIndex(db: Database.Database): Map<string, string | null> {
-  const rows = db
-    .prepare('SELECT orgnr, brreg_content_hash FROM organizations')
-    .all() as Array<{ orgnr: string; brreg_content_hash: string | null }>
+  const rows = db.prepare('SELECT orgnr, brreg_content_hash FROM organizations').all() as Array<{
+    orgnr: string
+    brreg_content_hash: string | null
+  }>
   return new Map(rows.map((row) => [row.orgnr, row.brreg_content_hash]))
 }
 
@@ -87,7 +98,7 @@ function baseRecord(
     overordnet_enhet:
       entityKind === 'underenhet'
         ? (entity as BrregUnderenhet).overordnetEnhet
-        : (entity as BrregEntity).overordnetEnhet ?? null,
+        : ((entity as BrregEntity).overordnetEnhet ?? null),
     naeringskode: entity.naeringskode1?.kode ?? null,
     naeringskode_label: entity.naeringskode1?.beskrivelse ?? null,
     antall_ansatte: entity.antallAnsatte ?? null,
@@ -97,7 +108,10 @@ function baseRecord(
     matrikkel_key: null as string | null,
     kommunenummer_geo: null as string | null,
     geocode_quality: null as GeocodeQuality | null,
-    employee_band: employeeBand(entity.antallAnsatte ?? null, entity.harRegistrertAntallAnsatte ?? false),
+    employee_band: employeeBand(
+      entity.antallAnsatte ?? null,
+      entity.harRegistrertAntallAnsatte ?? false,
+    ),
     naeringskode_section: entity.naeringskode1?.kode?.slice(0, 2) ?? null,
   }
 }
@@ -260,7 +274,11 @@ export function upsertEntity(
   deleted = false,
   options: UpsertOrganizationOptions = {},
 ) {
-  upsertManyOrganizations(db, [prepareEntityRecord(entity, deleted, new Date().toISOString())], options)
+  upsertManyOrganizations(
+    db,
+    [prepareEntityRecord(entity, deleted, new Date().toISOString())],
+    options,
+  )
 }
 
 export function upsertUnderenhet(
@@ -341,7 +359,11 @@ export function getCachedAddress(
   }
 }
 
-export function saveAddressCache(db: Database.Database, cacheKey: string, result: GeocodeResult | null) {
+export function saveAddressCache(
+  db: Database.Database,
+  cacheKey: string,
+  result: GeocodeResult | null,
+) {
   db.prepare(
     `INSERT INTO address_cache (
        cache_key, lat, lng, geocoded_at, failed,
@@ -411,6 +433,5 @@ export function sampleAddressForKey(db: Database.Database, addressKey: string) {
        LIMIT 1`,
     )
     .get(addressKey) as
-    | { address_text: string; postnummer: string; kommunenummer: string }
-    | undefined
+    { address_text: string; postnummer: string; kommunenummer: string } | undefined
 }

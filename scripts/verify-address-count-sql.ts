@@ -22,6 +22,7 @@ const filters = {
   naeringskodeSections: [] as string[],
   employeeBands: [] as import('./lib/employeeBands.js').EmployeeBand[],
   entityKinds: ['enhet'] as Array<'enhet' | 'underenhet'>,
+  konsernMode: false,
   konsernMembersOnly: false,
 }
 

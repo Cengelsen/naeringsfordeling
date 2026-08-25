@@ -1,4 +1,11 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -7,18 +14,17 @@ import type Database from 'better-sqlite3'
 import type { BrregEntity, BrregUnderenhet } from './types.js'
 import { nullOrphanOverordnetEnhet } from './organizations.js'
 import { beginBulkLoad, endBulkLoad } from './db.js'
-import { importBrregFromGzip, type BrregImportOptions, type BrregImportResult } from './brreg-import-pipeline.js'
-import { fetchWithRetry } from './rate-limit.js'
 import {
-  fetchAllKommuner,
-  fetchLatestUpdateId,
-  fetchLatestUpdateIdUnderenheter,
-} from './brreg.js'
+  importBrregFromGzip,
+  type BrregImportOptions,
+  type BrregImportResult,
+} from './brreg-import-pipeline.js'
+import { fetchWithRetry } from './rate-limit.js'
+import { fetchAllKommuner, fetchLatestUpdateId, fetchLatestUpdateIdUnderenheter } from './brreg.js'
 
 const API_BASE = 'https://data.brreg.no/enhetsregisteret/api'
 
-export const DEFAULT_REFERENCE_CACHE_DIR =
-  process.env.REFERENCE_CACHE_DIR ?? 'data/cache/reference'
+export const DEFAULT_REFERENCE_CACHE_DIR = process.env.REFERENCE_CACHE_DIR ?? 'data/cache/reference'
 
 export const BRREG_ENHETER_FILE = 'brreg/enheter.v2.json.gz'
 export const BRREG_UNDERENHETER_FILE = 'brreg/underenheter.v2.json.gz'
@@ -87,7 +93,11 @@ export function describeReferenceCache(cacheDir = DEFAULT_REFERENCE_CACHE_DIR): 
   return parts.join('; ')
 }
 
-function shouldDownload(existingPath: string, reuseDownloads: boolean, refreshDownloads: boolean): boolean {
+function shouldDownload(
+  existingPath: string,
+  reuseDownloads: boolean,
+  refreshDownloads: boolean,
+): boolean {
   if (refreshDownloads) return true
   if (reuseDownloads && existsSync(existingPath)) return false
   return !existsSync(existingPath)
@@ -103,7 +113,9 @@ export function nationalKartverketZipPath(cacheDir = DEFAULT_REFERENCE_CACHE_DIR
   return join(cacheDir, 'kartverket', 'Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV.zip')
 }
 
-export function refreshReferenceFileHashes(cacheDir = DEFAULT_REFERENCE_CACHE_DIR): ReferenceManifest {
+export function refreshReferenceFileHashes(
+  cacheDir = DEFAULT_REFERENCE_CACHE_DIR,
+): ReferenceManifest {
   const patch: Partial<ReferenceManifest> = {}
   const enheterPath = referencePath(cacheDir, BRREG_ENHETER_FILE)
   const underPath = referencePath(cacheDir, BRREG_UNDERENHETER_FILE)
@@ -118,17 +130,16 @@ export function refreshReferenceFileHashes(cacheDir = DEFAULT_REFERENCE_CACHE_DI
 
 async function downloadBinaryToFile(url: string, accept: string, destPath: string, label: string) {
   mkdirSync(dirname(destPath), { recursive: true })
-  const response = await fetchWithRetry(
-    url,
-    { headers: { Accept: accept } },
-    label,
-  )
+  const response = await fetchWithRetry(url, { headers: { Accept: accept } }, label)
 
   if (!response.ok || !response.body) {
     throw new Error(`${label} feilet (${response.status})`)
   }
 
-  await pipeline(Readable.fromWeb(response.body as import('node:stream/web').ReadableStream), createWriteStream(destPath))
+  await pipeline(
+    Readable.fromWeb(response.body as import('node:stream/web').ReadableStream),
+    createWriteStream(destPath),
+  )
 }
 
 export interface StreamBrregGzipOptions {
@@ -403,7 +414,12 @@ export async function importBrregUnderenheterFromCacheTransactional(
 ): Promise<BrregImportResult> {
   return runBulkImport(
     db,
-    () => importBrregFromGzip(db, gzipPath, { entityKind: 'underenhet', filter, ...options }),
+    () =>
+      importBrregFromGzip(db, gzipPath, {
+        entityKind: 'underenhet',
+        filter: filter as BrregImportOptions['filter'],
+        ...options,
+      }),
     { quiet: options.quiet },
   )
 }

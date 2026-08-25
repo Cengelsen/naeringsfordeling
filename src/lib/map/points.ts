@@ -3,8 +3,10 @@ import { bandMatchesFilter } from '../utils/employeeBands'
 import { sectionMatchesFilter } from '../utils/naeringskode'
 import { assetUrl } from '../utils/assets'
 
-/** [orgnr, lng, lat, orgType] or extended with [navn, orgTypeLabel, addressText, postnummer] */
-export type CompactPoint = [string, number, number, string, ...string[]]
+export type { CompactPoint } from '../../../shared/points'
+export { filterPointsInBbox, filterPointsByOrgTypes } from '../../../shared/points'
+
+import type { CompactPoint } from '../../../shared/points'
 
 export function fromCompactPoint(point: CompactPoint): OrganizationPoint {
   const base: OrganizationPoint = {
@@ -55,35 +57,9 @@ export function fromCompactPoints(points: CompactPoint[]): OrganizationPoint[] {
   return points.map(fromCompactPoint)
 }
 
-export function filterPointsInBbox(
-  points: OrganizationPoint[],
-  bbox: [number, number, number, number],
-): OrganizationPoint[] {
-  const [minLng, minLat, maxLng, maxLat] = bbox
-  return points.filter(
-    (point) =>
-      point.lng >= minLng &&
-      point.lng <= maxLng &&
-      point.lat >= minLat &&
-      point.lat <= maxLat,
-  )
-}
-
-export function filterPointsByOrgTypes(
-  points: OrganizationPoint[],
-  orgTypes: string[],
-): OrganizationPoint[] {
-  if (orgTypes.length === 0) return points
-  const allowed = new Set(orgTypes)
-  return points.filter((point) => allowed.has(point.orgType))
-}
-
 export function filterPointsByMapFilters(
   points: OrganizationPoint[],
-  filters: Pick<
-    MapFilters,
-    'orgTypes' | 'naeringskodeSections' | 'employeeBands' | 'entityKinds'
-  >,
+  filters: Pick<MapFilters, 'orgTypes' | 'naeringskodeSections' | 'employeeBands' | 'entityKinds'>,
 ): OrganizationPoint[] {
   return points.filter((point) => {
     if (filters.orgTypes.length > 0) {
@@ -94,9 +70,7 @@ export function filterPointsByMapFilters(
       if (!matchesType) return false
     }
     if (!sectionMatchesFilter(point.naeringskode, filters.naeringskodeSections)) return false
-    if (
-      !bandMatchesFilter(point.employeeBand ?? 'unknown', filters.employeeBands)
-    ) {
+    if (!bandMatchesFilter(point.employeeBand ?? 'unknown', filters.employeeBands)) {
       return false
     }
     if (

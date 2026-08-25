@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { employeeBandSql } from '../../shared/employeeBands.js'
 
 export const DEFAULT_DB_PATH = process.env.DATABASE_PATH ?? 'data/organizations.db'
 
@@ -61,13 +62,7 @@ export function openDatabase(
 export function runPendingBackfills(db: Database.Database) {
   db.exec(`
     UPDATE organizations SET
-      employee_band = CASE
-        WHEN har_registrert_antall_ansatte = 0 OR antall_ansatte IS NULL THEN 'unknown'
-        WHEN antall_ansatte = 0 THEN '0'
-        WHEN antall_ansatte <= 4 THEN '1-4'
-        WHEN antall_ansatte <= 19 THEN '5-19'
-        ELSE '20+'
-      END
+      employee_band = ${employeeBandSql()}
     WHERE employee_band IS NULL;
 
     UPDATE organizations SET
@@ -158,9 +153,7 @@ function migrate(db: Database.Database, runBackfill: boolean) {
 }
 
 function tableExists(db: Database.Database, name: string): boolean {
-  const row = db
-    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
-    .get(name)
+  const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name)
   return row != null
 }
 
@@ -277,13 +270,20 @@ function migrateToV1(db: Database.Database) {
     );
   `)
 
-  rebuildTableIfNeeded(db, 'sync_state', `
+  rebuildTableIfNeeded(
+    db,
+    'sync_state',
+    `
     CREATE TABLE sync_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     ) WITHOUT ROWID
-  `)
-  rebuildTableIfNeeded(db, 'address_cache', `
+  `,
+  )
+  rebuildTableIfNeeded(
+    db,
+    'address_cache',
+    `
     CREATE TABLE address_cache (
       cache_key TEXT PRIMARY KEY,
       lat REAL,
@@ -295,7 +295,8 @@ function migrateToV1(db: Database.Database) {
       kommunenummer_geo TEXT,
       geocode_quality TEXT
     ) WITHOUT ROWID
-  `)
+  `,
+  )
 
   ensureColumns(db)
   ensureAddressCacheColumns(db)
@@ -344,7 +345,11 @@ function rebuildFts(db: Database.Database) {
     db.exec('DROP TABLE IF EXISTS organizations_fts')
   } catch {
     for (const suffix of ['', '_data', '_idx', '_docsize', '_config', '_content']) {
-      try { db.exec(`DROP TABLE IF EXISTS organizations_fts${suffix}`) } catch { /* ignore */ }
+      try {
+        db.exec(`DROP TABLE IF EXISTS organizations_fts${suffix}`)
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -545,8 +550,9 @@ function ensureOrgsRtree(db: Database.Database) {
       .get() as { count: number }
   ).count
 
-  const rtreeCount = (db.prepare('SELECT COUNT(*) AS count FROM orgs_rtree').get() as { count: number })
-    .count
+  const rtreeCount = (
+    db.prepare('SELECT COUNT(*) AS count FROM orgs_rtree').get() as { count: number }
+  ).count
 
   if (orgCount > 0 && rtreeCount !== orgCount) {
     rebuildOrgsRtree(db)
@@ -555,8 +561,7 @@ function ensureOrgsRtree(db: Database.Database) {
 
 export function getSyncState(db: Database.Database, key: string): string | null {
   const row = db.prepare('SELECT value FROM sync_state WHERE key = ?').get(key) as
-    | { value: string }
-    | undefined
+    { value: string } | undefined
   return row?.value ?? null
 }
 
@@ -659,9 +664,7 @@ export function logBackfillStats(db: Database.Database, label: string) {
 export function needsBackfill(db: Database.Database): boolean {
   const backfill = getBackfillStats(db)
   return (
-    backfill.needs_underenheter ||
-    backfill.needs_field_backfill ||
-    backfill.needs_metadata_backfill
+    backfill.needs_underenheter || backfill.needs_field_backfill || backfill.needs_metadata_backfill
   )
 }
 

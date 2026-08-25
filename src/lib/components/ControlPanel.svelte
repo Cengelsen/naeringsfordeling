@@ -2,26 +2,19 @@
   import type { Kommune, DotsLoadState, LoadingState, Organisasjonsform } from '../types'
   import {
     mapSettings,
-    setColorScheme,
-    setDistrictLevel,
-    setVisualization,
     toggleEmployeeBand,
     toggleEntityKind,
     toggleNaeringskodeSection,
     toggleOrgType,
   } from '../stores/settings.svelte'
-  import { fetchNaeringskoder, searchOrganizations } from '../services/api'
-  import { fylkeFromKommune, fylkeName } from '../utils/geo'
+  import { fetchNaeringskoder } from '../services/api'
   import { EMPLOYEE_BANDS, EMPLOYEE_BAND_LABELS } from '../utils/employeeBands'
   import { naeringskodeSectionLabel } from '../utils/naeringskode'
 
-  import type {
-    ColorScheme,
-    DistrictLevel,
-    OrganizationSearchHit,
-    VisualizationMode,
-  } from '../types'
   import type { NaeringskodeOption } from '../services/api'
+
+  import OrgLookupCombobox from './OrgLookupCombobox.svelte'
+  import VisualizationControls from './VisualizationControls.svelte'
 
   interface Props {
     orgForms: Organisasjonsform[]
@@ -36,12 +29,6 @@
 
   let orgSearch = $state('')
   let showAllOrgForms = $state(false)
-  let orgLookupQuery = $state('')
-  let orgLookupLoading = $state(false)
-  let orgLookupError = $state<string | null>(null)
-  let orgLookupResults = $state<OrganizationSearchHit[]>([])
-  let orgLookupOpen = $state(false)
-  let orgLookupActiveIndex = $state(-1)
   let naeringskoder = $state<NaeringskodeOption[]>([])
   let showAllNaering = $state(false)
 
@@ -53,15 +40,9 @@
       naeringskoder = []
     })
 
-  const ORG_LOOKUP_DEBOUNCE_MS = 450
-  let orgLookupTimer: ReturnType<typeof setTimeout> | undefined
-  let orgLookupSeq = 0
-
-  const fylker = $derived.by(() => {
-    const codes = new Set(kommuner.map((k) => fylkeFromKommune(k.nummer)))
-    return [...codes]
-      .sort((a, b) => fylkeName(a).localeCompare(fylkeName(b), 'nb'))
-      .map((kode) => ({ kode, navn: fylkeName(kode) }))
+  const fylkerCount = $derived.by(() => {
+    const codes = new Set(kommuner.map((k) => k.nummer.slice(0, 2)))
+    return codes.size
   })
 
   const filteredOrgForms = $derived.by(() => {
@@ -69,8 +50,7 @@
     const list = query
       ? orgForms.filter(
           (f) =>
-            f.kode.toLowerCase().includes(query) ||
-            f.beskrivelse.toLowerCase().includes(query),
+            f.kode.toLowerCase().includes(query) || f.beskrivelse.toLowerCase().includes(query),
         )
       : orgForms
     return showAllOrgForms ? list : list.slice(0, 12)
@@ -82,115 +62,7 @@
 
   const selectedOrgCount = $derived(mapSettings.orgTypes.length)
   const isDotsView = $derived(mapSettings.visualization === 'dots')
-  const isFylkeLevel = $derived(
-    !isDotsView && mapSettings.districtLevel === 'fylke',
-  )
-
-  const filteredKommuner = $derived.by(() => {
-    if (!mapSettings.selectedFylke) return kommuner
-    return kommuner.filter(
-      (k) => fylkeFromKommune(k.nummer) === mapSettings.selectedFylke,
-    )
-  })
-
-  function clearOrgLookupResults() {
-    orgLookupResults = []
-    orgLookupOpen = false
-    orgLookupError = null
-    orgLookupLoading = false
-    orgLookupActiveIndex = -1
-  }
-
-  function scheduleOrgLookupSearch() {
-    if (orgLookupTimer) clearTimeout(orgLookupTimer)
-
-    const query = orgLookupQuery.trim()
-    if (query.length < 2) {
-      clearOrgLookupResults()
-      return
-    }
-
-    orgLookupTimer = setTimeout(() => {
-      orgLookupTimer = undefined
-      void runOrgLookupSearch(query)
-    }, ORG_LOOKUP_DEBOUNCE_MS)
-  }
-
-  async function runOrgLookupSearch(query: string) {
-    const seq = ++orgLookupSeq
-    orgLookupLoading = true
-    orgLookupError = null
-
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => resolve())
-    })
-
-    if (seq !== orgLookupSeq || orgLookupQuery.trim() !== query) return
-
-    try {
-      const results = await searchOrganizations(query)
-      if (seq !== orgLookupSeq || orgLookupQuery.trim() !== query) return
-
-      orgLookupResults = results
-      orgLookupOpen = results.length > 0
-      orgLookupActiveIndex = -1
-      orgLookupError = results.length === 0 ? 'Ingen treff' : null
-    } catch (err) {
-      if (seq !== orgLookupSeq) return
-      orgLookupError = err instanceof Error ? err.message : 'Søk feilet'
-      orgLookupResults = []
-      orgLookupOpen = false
-      orgLookupActiveIndex = -1
-    } finally {
-      if (seq === orgLookupSeq) orgLookupLoading = false
-    }
-  }
-
-  function onOrgLookupInput() {
-    scheduleOrgLookupSearch()
-  }
-
-  function selectOrgLookupResult(hit: OrganizationSearchHit) {
-    orgLookupQuery = hit.navn
-    orgLookupOpen = false
-    orgLookupResults = []
-    orgLookupError = null
-    orgLookupActiveIndex = -1
-    onLocateOrganization(hit.orgnr)
-  }
-
-  function onOrgLookupFocus() {
-    if (orgLookupResults.length > 0) orgLookupOpen = true
-  }
-
-  function onOrgLookupBlur() {
-    setTimeout(() => {
-      orgLookupOpen = false
-      orgLookupActiveIndex = -1
-    }, 150)
-  }
-
-  function onOrgLookupKeydown(event: KeyboardEvent) {
-    if (!orgLookupOpen || orgLookupResults.length === 0) {
-      if (event.key === 'Enter') event.preventDefault()
-      return
-    }
-
-    if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      orgLookupActiveIndex = Math.min(orgLookupActiveIndex + 1, orgLookupResults.length - 1)
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      orgLookupActiveIndex = Math.max(orgLookupActiveIndex - 1, 0)
-    } else if (event.key === 'Enter') {
-      event.preventDefault()
-      const index = orgLookupActiveIndex >= 0 ? orgLookupActiveIndex : 0
-      selectOrgLookupResult(orgLookupResults[index])
-    } else if (event.key === 'Escape') {
-      orgLookupOpen = false
-      orgLookupActiveIndex = -1
-    }
-  }
+  const isFylkeLevel = $derived(!isDotsView && mapSettings.districtLevel === 'fylke')
 </script>
 
 <aside class="panel" aria-label="Kontrollpanel">
@@ -199,54 +71,7 @@
     <p class="subtitle">Organisasjoner i Norge · SQLite + OpenStreetMap</p>
   </header>
 
-  <section class="section">
-    <h2>Søk organisasjon</h2>
-    <div class="lookup-combobox">
-      <input
-        type="search"
-        placeholder="Org.nr eller navn…"
-        bind:value={orgLookupQuery}
-        oninput={onOrgLookupInput}
-        autocomplete="off"
-        role="combobox"
-        aria-expanded={orgLookupOpen}
-        aria-controls="org-lookup-list"
-        aria-autocomplete="list"
-        aria-activedescendant={orgLookupActiveIndex >= 0 ? `org-option-${orgLookupActiveIndex}` : undefined}
-        aria-label="Søk etter organisasjonsnummer eller navn"
-        onfocus={onOrgLookupFocus}
-        onblur={onOrgLookupBlur}
-        onkeydown={onOrgLookupKeydown}
-      />
-      {#if orgLookupLoading}
-        <span class="lookup-status" aria-hidden="true">Søker…</span>
-      {/if}
-      {#if orgLookupOpen && orgLookupResults.length > 0}
-        <ul id="org-lookup-list" class="lookup-dropdown" role="listbox">
-          {#each orgLookupResults as hit, index (hit.orgnr)}
-            <li role="presentation">
-              <button
-                type="button"
-                id={`org-option-${index}`}
-                class="lookup-result"
-                class:active={index === orgLookupActiveIndex}
-                role="option"
-                aria-selected={index === orgLookupActiveIndex}
-                onmousedown={(event) => event.preventDefault()}
-                onclick={() => selectOrgLookupResult(hit)}
-              >
-                <span class="lookup-name">{hit.navn}</span>
-                <span class="lookup-meta">{hit.orgnr} · {hit.orgType}</span>
-              </button>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
-    {#if orgLookupError && !orgLookupOpen}
-      <p class="hint lookup-error">{orgLookupError}</p>
-    {/if}
-  </section>
+  <OrgLookupCombobox {onLocateOrganization} />
 
   <section class="section stats">
     {#if isDotsView && dotsState.statsLoading}
@@ -298,7 +123,7 @@
     {/if}
     {#if !isDotsView}
       <div class="stat">
-        <span class="stat-value">{isFylkeLevel ? fylker.length : kommuner.length}</span>
+        <span class="stat-value">{isFylkeLevel ? fylkerCount : kommuner.length}</span>
         <span class="stat-label">{isFylkeLevel ? 'Fylker' : 'Kommuner'}</span>
       </div>
     {/if}
@@ -318,125 +143,7 @@
     <div class="error">{loading.error}</div>
   {/if}
 
-  <section class="section">
-    <h2>Visualisering</h2>
-    <div class="segmented">
-      {#each [['choropleth', 'Distrikter'], ['dots', 'Adresser']] as const as [mode, label] (mode)}
-        <button
-          type="button"
-          class:active={mapSettings.visualization === mode}
-          onclick={() => setVisualization(mode as VisualizationMode)}
-        >
-          {label}
-        </button>
-      {/each}
-    </div>
-
-    {#if isDotsView}
-      <p class="hint">
-        Statistikken gjelder hele kartutsnittet. Ved lav zoom vises fylke/kommune/grunnkretser med org.type-fordeling (som Distrikter); enkeltadresser fra zoom 15.
-      </p>
-    {:else}
-      <div class="segmented nested">
-        {#each [['fylke', 'Fylker'], ['kommune', 'Kommuner']] as const as [level, label] (level)}
-          <button
-            type="button"
-            class:active={mapSettings.districtLevel === level}
-            onclick={() => setDistrictLevel(level as DistrictLevel)}
-          >
-            {label}
-          </button>
-        {/each}
-      </div>
-
-      <label class="field">
-        <span>Fargepalett</span>
-        <select
-          value={mapSettings.colorScheme}
-          onchange={(e) => setColorScheme(e.currentTarget.value as ColorScheme)}
-        >
-          <option value="blues">Blå</option>
-          <option value="oranges">Oransje</option>
-          <option value="greens">Grønn</option>
-          <option value="purples">Lilla</option>
-        </select>
-      </label>
-
-      <label class="checkbox">
-        <input type="checkbox" bind:checked={mapSettings.showLegend} />
-        Vis forklaring
-      </label>
-    {/if}
-  </section>
-
-  {#if isDotsView}
-    <section class="section">
-      <h2>Adresser</h2>
-      {#if dotsState.webglUnavailable}
-        <div class="webgl-notice">
-          <p>
-            <strong>WebGL er deaktivert</strong> i nettleseren. Kartprikker vises i forenklet
-            modus (uten vektorfliser).
-          </p>
-          <p>For full adressevisning i LibreWolf/Firefox:</p>
-          <ol>
-            <li>Åpne <code>about:config</code></li>
-            <li>Søk etter <code>webgl.disabled</code></li>
-            <li>Sett verdien til <code>false</code></li>
-            <li>Last siden på nytt</li>
-          </ol>
-        </div>
-      {/if}
-      {#if dotsState.loading}
-        <p class="hint loading-hint">
-          {dotsState.phase === 'fetching' ? 'Henter organisasjoner…' : 'Oppdaterer kart…'}
-          {dotsState.message ?? ''}
-        </p>
-      {:else if dotsState.statsLoading}
-        <p class="hint loading-hint">Beregner adresser i utsnittet…</p>
-      {:else if dotsState.viewportSummary}
-        <p class="hint">
-          {dotsState.viewportSummary.addressesInBbox.toLocaleString('nb-NO')} adresser i kartutsnittet
-          {#if dotsState.viewportSummary.geocodedInBbox !== dotsState.viewportSummary.addressesInBbox}
-            · {dotsState.viewportSummary.geocodedInBbox.toLocaleString('nb-NO')} organisasjoner
-          {/if}
-          {#if dotsState.viewportSummary.ungeocodedInViewport > 0}
-            · {dotsState.viewportSummary.ungeocodedInViewport.toLocaleString('nb-NO')} uten kartkoordinat
-          {/if}
-          {#if dotsState.viewportSummary.renderMode === 'individual' && dotsState.renderedFeatureCount != null && dotsState.renderedFeatureCount > 0}
-            · {dotsState.renderedFeatureCount.toLocaleString('nb-NO')} prikker vist
-          {/if}
-          {#if dotsState.statsApproximate}
-            · omtrentlige tall (statisk modus)
-          {/if}
-        </p>
-      {:else if dotsState.message}
-        <p class="hint">{dotsState.message}</p>
-      {/if}
-    </section>
-  {:else}
-    {#if !isFylkeLevel}
-      <section class="section">
-        <h2>Kommune</h2>
-        <select bind:value={mapSettings.selectedKommune}>
-          <option value="">Alle / kartutsnitt</option>
-          {#each filteredKommuner as kommune (kommune.nummer)}
-            <option value={kommune.nummer}>{kommune.navn}</option>
-          {/each}
-        </select>
-      </section>
-    {/if}
-
-    <section class="section">
-      <h2>Fylke</h2>
-      <select bind:value={mapSettings.selectedFylke}>
-        <option value="">Hele Norge</option>
-        {#each fylker as fylke (fylke.kode)}
-          <option value={fylke.kode}>{fylke.navn}</option>
-        {/each}
-      </select>
-    </section>
-  {/if}
+  <VisualizationControls {kommuner} {dotsState} />
 
   <section class="section">
     <h2>Organisasjonstype</h2>
@@ -445,11 +152,7 @@
         ? 'Alle typer vises'
         : `${selectedOrgCount} type${selectedOrgCount === 1 ? '' : 'r'} valgt`}
     </p>
-    <input
-      type="search"
-      placeholder="Søk organisasjonsform…"
-      bind:value={orgSearch}
-    />
+    <input type="search" placeholder="Søk organisasjonsform…" bind:value={orgSearch} />
     <div class="org-list">
       {#each filteredOrgForms as form (form.kode)}
         <label class="checkbox org-item">
@@ -611,12 +314,12 @@
     color: #94a3b8;
   }
 
-  .section {
+  :global(.section) {
     padding: 1rem 1.25rem;
     border-bottom: 1px solid #1e293b;
   }
 
-  h2 {
+  :global(h2) {
     margin: 0 0 0.75rem;
     font-size: 0.78rem;
     font-weight: 600;
@@ -681,27 +384,27 @@
     color: #fecaca;
   }
 
-  .segmented {
+  :global(.segmented) {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 0.5rem;
     margin-bottom: 0.75rem;
   }
 
-  .segmented.nested {
+  :global(.segmented.nested) {
     margin-bottom: 0.85rem;
   }
 
-  .segmented.nested button {
+  :global(.segmented.nested button) {
     font-size: 0.8rem;
     padding: 0.45rem 0.65rem;
   }
 
-  .loading-hint {
+  :global(.loading-hint) {
     color: #7dd3fc;
   }
 
-  .segmented button {
+  :global(.segmented button) {
     border: 1px solid #334155;
     background: #1e293b;
     color: #e2e8f0;
@@ -709,20 +412,22 @@
     padding: 0.55rem 0.75rem;
     font-size: 0.85rem;
     cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
+    transition:
+      background 0.15s,
+      border-color 0.15s;
   }
 
-  .segmented button:hover {
+  :global(.segmented button:hover) {
     background: #334155;
   }
 
-  .segmented button.active {
+  :global(.segmented button.active) {
     background: #0369a1;
     border-color: #0284c7;
     color: #f0f9ff;
   }
 
-  .field {
+  :global(.field) {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
@@ -730,8 +435,8 @@
     font-size: 0.85rem;
   }
 
-  select,
-  input[type='search'] {
+  :global(select),
+  :global(input[type='search']) {
     width: 100%;
     box-sizing: border-box;
     border: 1px solid #334155;
@@ -742,7 +447,7 @@
     font-size: 0.85rem;
   }
 
-  .checkbox {
+  :global(.checkbox) {
     display: flex;
     align-items: flex-start;
     gap: 0.5rem;
@@ -751,17 +456,17 @@
     cursor: pointer;
   }
 
-  .checkbox input {
+  :global(.checkbox input) {
     margin-top: 0.15rem;
   }
 
-  .hint {
+  :global(.hint) {
     margin: -0.35rem 0 0.65rem;
     font-size: 0.8rem;
     color: #94a3b8;
   }
 
-  .webgl-notice {
+  :global(.webgl-notice) {
     margin: 0 0 0.85rem;
     padding: 0.75rem;
     border: 1px solid #334155;
@@ -772,28 +477,28 @@
     line-height: 1.4;
   }
 
-  .webgl-notice p {
+  :global(.webgl-notice p) {
     margin: 0 0 0.5rem;
   }
 
-  .webgl-notice p:last-child {
+  :global(.webgl-notice p:last-child) {
     margin-bottom: 0;
   }
 
-  .webgl-notice strong {
+  :global(.webgl-notice strong) {
     color: #fde68a;
   }
 
-  .webgl-notice ol {
+  :global(.webgl-notice ol) {
     margin: 0.35rem 0 0;
     padding-left: 1.2rem;
   }
 
-  .webgl-notice li {
+  :global(.webgl-notice li) {
     margin-bottom: 0.25rem;
   }
 
-  .webgl-notice code {
+  :global(.webgl-notice code) {
     font-family: ui-monospace, monospace;
     font-size: 0.85em;
     color: #7dd3fc;
@@ -834,73 +539,5 @@
     font-size: 0.8rem;
     cursor: pointer;
     display: block;
-  }
-
-  .lookup-combobox {
-    position: relative;
-  }
-
-  .lookup-combobox input[type='search'] {
-    width: 100%;
-  }
-
-  .lookup-status {
-    position: absolute;
-    top: 0.65rem;
-    right: 0.65rem;
-    font-size: 0.72rem;
-    color: #64748b;
-    pointer-events: none;
-  }
-
-  .lookup-error {
-    color: #fecaca;
-  }
-
-  .lookup-dropdown {
-    position: absolute;
-    top: calc(100% + 0.25rem);
-    left: 0;
-    right: 0;
-    z-index: 30;
-    list-style: none;
-    margin: 0;
-    padding: 0.25rem 0;
-    max-height: 240px;
-    overflow: auto;
-    border: 1px solid #334155;
-    border-radius: 0.45rem;
-    background: #0f172a;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
-  }
-
-  .lookup-result {
-    width: 100%;
-    margin: 0;
-    padding: 0.55rem 0.75rem;
-    border: none;
-    background: none;
-    color: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .lookup-result:hover,
-  .lookup-result.active {
-    background: #1e293b;
-    color: #7dd3fc;
-  }
-
-  .lookup-name {
-    display: block;
-    font-size: 0.85rem;
-    line-height: 1.3;
-  }
-
-  .lookup-meta {
-    display: block;
-    margin-top: 0.15rem;
-    font-size: 0.75rem;
-    color: #94a3b8;
   }
 </style>

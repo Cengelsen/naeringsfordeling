@@ -4,11 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openDatabase, DEFAULT_DB_PATH } from './lib/db.js'
-import {
-  collectOrgTypes,
-  countGeocodedPoints,
-  exportPointsNdjson,
-} from './lib/lod-aggregate.js'
+import { collectOrgTypes, countGeocodedPoints, exportPointsNdjson } from './lib/lod-aggregate.js'
 import { exportDistrictPolyNdjson } from './lib/lod-districts.js'
 import { exportGrunnkretsPolyNdjson } from './lib/lod-grunnkretser.js'
 import { exportDistrictColorAssets } from './lib/district-color-export.js'
@@ -61,14 +57,17 @@ function ensurePmtilesCli(): string {
 
   console.log('Downloading PMTiles CLI…')
   const arch = process.arch === 'x64' ? 'x86_64' : process.arch
-  const platform = process.platform === 'linux' ? 'Linux' : process.platform === 'darwin' ? 'Darwin' : ''
+  const platform =
+    process.platform === 'linux' ? 'Linux' : process.platform === 'darwin' ? 'Darwin' : ''
   if (!platform) {
     throw new Error('PMTiles CLI not found. Install from https://github.com/protomaps/go-pmtiles')
   }
 
   const version = 'v1.31.1'
   const url = `https://github.com/protomaps/go-pmtiles/releases/download/${version}/go-pmtiles_1.31.1_${platform}_${arch}.tar.gz`
-  const download = spawnSync('curl', ['-fsSL', url, '-o', '/tmp/pmtiles.tar.gz'], { encoding: 'utf8' })
+  const download = spawnSync('curl', ['-fsSL', url, '-o', '/tmp/pmtiles.tar.gz'], {
+    encoding: 'utf8',
+  })
   if (download.status !== 0) {
     throw new Error(download.stderr || 'Failed to download PMTiles CLI')
   }
@@ -97,7 +96,7 @@ async function writeNdjson(
   const stream = createWriteStream(path)
   write(stream)
   await new Promise<void>((resolve, reject) => {
-    stream.end((error) => (error ? reject(error) : resolve()))
+    stream.end((error: Error | null) => (error ? reject(error) : resolve()))
   })
 }
 
@@ -241,10 +240,26 @@ async function main() {
   rmSync(`${mbtilesPath}-journal`, { force: true })
 
   const layers = [
-    { name: LOD_LAYER_NAMES.fylkePoly, minZoom: LOD_ZOOM_RANGES.fylke.minZoom, maxZoom: LOD_ZOOM_RANGES.fylke.maxZoom },
-    { name: LOD_LAYER_NAMES.kommunePoly, minZoom: LOD_ZOOM_RANGES.kommune.minZoom, maxZoom: LOD_ZOOM_RANGES.kommune.maxZoom },
-    { name: LOD_LAYER_NAMES.grunnkretserPoly, minZoom: LOD_ZOOM_RANGES.grunnkretser.minZoom, maxZoom: LOD_ZOOM_RANGES.grunnkretser.maxZoom },
-    { name: LOD_LAYER_NAMES.points, minZoom: LOD_ZOOM_RANGES.points.minZoom, maxZoom: LOD_ZOOM_RANGES.points.maxZoom },
+    {
+      name: LOD_LAYER_NAMES.fylkePoly,
+      minZoom: LOD_ZOOM_RANGES.fylke.minZoom,
+      maxZoom: LOD_ZOOM_RANGES.fylke.maxZoom,
+    },
+    {
+      name: LOD_LAYER_NAMES.kommunePoly,
+      minZoom: LOD_ZOOM_RANGES.kommune.minZoom,
+      maxZoom: LOD_ZOOM_RANGES.kommune.maxZoom,
+    },
+    {
+      name: LOD_LAYER_NAMES.grunnkretserPoly,
+      minZoom: LOD_ZOOM_RANGES.grunnkretser.minZoom,
+      maxZoom: LOD_ZOOM_RANGES.grunnkretser.maxZoom,
+    },
+    {
+      name: LOD_LAYER_NAMES.points,
+      minZoom: LOD_ZOOM_RANGES.points.minZoom,
+      maxZoom: LOD_ZOOM_RANGES.points.maxZoom,
+    },
   ]
 
   writeFileSync(

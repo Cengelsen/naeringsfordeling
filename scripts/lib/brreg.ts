@@ -1,3 +1,4 @@
+/* eslint-disable no-useless-assignment */
 import type { BrregEntity, BrregUnderenhet, BrregUpdate } from './types.js'
 import { LIMITS, fetchWithRetry, sleep } from './rate-limit.js'
 
@@ -18,7 +19,11 @@ function entitySearchQuery(
   page = 0,
   kind: 'enheter' | 'underenheter' = 'enheter',
 ): string {
-  const query = new URLSearchParams({ ...params, size: String(ENTITY_PAGE_SIZE), page: String(page) })
+  const query = new URLSearchParams({
+    ...params,
+    size: String(ENTITY_PAGE_SIZE),
+    page: String(page),
+  })
   return `/${kind}?${query.toString()}`
 }
 
@@ -166,9 +171,13 @@ async function fetchEntitySearchSlice<T extends BrregEntity | BrregUnderenhet>(
 }
 
 async function brregFetch<T>(path: string): Promise<T> {
-  const response = await fetchWithRetry(`${API_BASE}${path}`, {
-    headers: { Accept: 'application/json' },
-  }, `BRREG ${path}`)
+  const response = await fetchWithRetry(
+    `${API_BASE}${path}`,
+    {
+      headers: { Accept: 'application/json' },
+    },
+    `BRREG ${path}`,
+  )
 
   if (!response.ok) {
     throw new Error(`BRREG API feilet (${response.status}) for ${path}`)
@@ -250,7 +259,9 @@ export async function fetchLatestUpdateId(): Promise<number> {
     const targetPage = Math.min(head.page.totalPages - 1, pageLimit)
     const tail = await brregFetch<{
       _embedded?: { oppdaterteEnheter: BrregUpdate[] }
-    }>(`/oppdateringer/enheter?dato=${encodeURIComponent(dato)}&size=${UPDATE_PAGE_SIZE}&page=${targetPage}`)
+    }>(
+      `/oppdateringer/enheter?dato=${encodeURIComponent(dato)}&size=${UPDATE_PAGE_SIZE}&page=${targetPage}`,
+    )
 
     const batch = tail._embedded?.oppdaterteEnheter ?? []
     const latest = batch.at(-1)
@@ -314,7 +325,9 @@ export async function fetchUpdatesSince(
   return { updates, maxId }
 }
 
-export async function downloadBulkEntities(onEntity: (entity: BrregEntity) => Promise<void> | void) {
+export async function downloadBulkEntities(
+  onEntity: (entity: BrregEntity) => Promise<void> | void,
+) {
   const response = await fetchWithRetry(
     `${API_BASE}/enheter/lastned`,
     { headers: { Accept: 'application/vnd.brreg.enhetsregisteret.enhet.v2+gzip;charset=UTF-8' } },
@@ -333,12 +346,7 @@ export async function downloadBulkEntities(onEntity: (entity: BrregEntity) => Pr
 
   const nodeStream = Readable.fromWeb(response.body as import('node:stream/web').ReadableStream)
 
-  const pipeline = chain([
-    nodeStream,
-    createGunzip(),
-    parser(),
-    streamArray(),
-  ])
+  const pipeline = chain([nodeStream, createGunzip(), parser(), streamArray()])
 
   let count = 0
   for await (const chunk of pipeline) {

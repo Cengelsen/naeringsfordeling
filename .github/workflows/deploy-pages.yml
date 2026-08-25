@@ -19,8 +19,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  quality:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint
+        run: yarn lint
+
+      - name: Type check
+        run: yarn check
+
+      - name: Test
+        run: yarn test
+
+  build:
+    needs: quality
     runs-on: ubuntu-latest
 
     steps:

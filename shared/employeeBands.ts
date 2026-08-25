@@ -1,6 +1,6 @@
-export type EmployeeBand = '0' | '1-4' | '5-19' | '20+' | 'unknown'
+export const EMPLOYEE_BANDS = ['0', '1-4', '5-19', '20+', 'unknown'] as const
 
-export const EMPLOYEE_BANDS: EmployeeBand[] = ['0', '1-4', '5-19', '20+', 'unknown']
+export type EmployeeBand = (typeof EMPLOYEE_BANDS)[number]
 
 export const EMPLOYEE_BAND_LABELS: Record<EmployeeBand, string> = {
   '0': '0 ansatte',
@@ -24,4 +24,15 @@ export function employeeBand(
 export function bandMatchesFilter(band: EmployeeBand, selected: EmployeeBand[]): boolean {
   if (selected.length === 0) return true
   return selected.includes(band)
+}
+
+export function employeeBandSql(tableAlias = ''): string {
+  const prefix = tableAlias ? `${tableAlias}.` : ''
+  return `CASE
+    WHEN ${prefix}har_registrert_antall_ansatte = 0 OR ${prefix}antall_ansatte IS NULL THEN 'unknown'
+    WHEN ${prefix}antall_ansatte = 0 THEN '0'
+    WHEN ${prefix}antall_ansatte <= 4 THEN '1-4'
+    WHEN ${prefix}antall_ansatte <= 19 THEN '5-19'
+    ELSE '20+'
+  END`
 }

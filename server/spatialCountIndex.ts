@@ -15,7 +15,7 @@ export interface Point2D {
 class WaveletMatrix {
   private readonly n: number
   private readonly height: number
-  private readonly layers: Uint8Array[]
+  private readonly layers: Uint32Array[]
   private readonly zeros: number[]
 
   constructor(values: Uint32Array, sigma: number) {
@@ -81,15 +81,7 @@ class WaveletMatrix {
 
     return (
       this.rangeCountRec(level + 1, rank0Left, rank0Right, nodeLo, mid, lo, hi) +
-      this.rangeCountRec(
-        level + 1,
-        zeros + rank1Left,
-        zeros + rank1Right,
-        mid,
-        nodeHi,
-        lo,
-        hi,
-      )
+      this.rangeCountRec(level + 1, zeros + rank1Left, zeros + rank1Right, mid, nodeHi, lo, hi)
     )
   }
 

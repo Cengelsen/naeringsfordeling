@@ -50,7 +50,9 @@ export function parseHouseNumberRange(raw: string): number[] | null {
 
 export function streetNameVariants(name: string): string[] {
   const trimmed = name.trim()
-  return [...new Set([trimmed, normalizeStreetName(trimmed), compactStreetName(trimmed)].filter(Boolean))]
+  return [
+    ...new Set([trimmed, normalizeStreetName(trimmed), compactStreetName(trimmed)].filter(Boolean)),
+  ]
 }
 
 export function splitHouseNumber(raw: string): { nummer: string; bokstav: string } {
@@ -64,7 +66,7 @@ export function parseStreetAddress(
   line: string,
 ): { adressenavn: string; nummer: string; bokstav: string; range?: number[] } | null {
   const cleaned = line.replace(/^c\/o\s.+/i, '').trim()
-  const match = cleaned.match(/^(.+?)\s+(\d+\s*[/\-]\s*\d+|\d+\s*[A-Za-zæøåÆØÅ]?)$/i)
+  const match = cleaned.match(/^(.+?)\s+(\d+\s*[/-]\s*\d+|\d+\s*[A-Za-zæøåÆØÅ]?)$/i)
   if (!match) return null
 
   const tail = match[2].replace(/\s+/g, '')

@@ -67,7 +67,7 @@ async function writeJsonRows(
 
   let stream: Writable
   let gzipStream: Gzip | null = null
-  let fileStream: WriteStream | null = null
+  let fileStream: WriteStream | null = null // eslint-disable-line no-useless-assignment
 
   if (gzipOnly) {
     gzipStream = createGzip({ level: 6 })
@@ -105,11 +105,7 @@ async function writeJsonRows(
   }
 
   if (!gzipOnly && gzip) {
-    await pipeline(
-      createReadStream(jsonPath),
-      createGzip({ level: 6 }),
-      createWriteStream(gzPath),
-    )
+    await pipeline(createReadStream(jsonPath), createGzip({ level: 6 }), createWriteStream(gzPath))
   }
 
   return count
@@ -311,7 +307,11 @@ function runPhaseInChild(phaseName: string): Promise<void> {
         resolve()
         return
       }
-      reject(new Error(`export-static-api ${phaseName} failed (code=${code ?? 'null'}, signal=${signal ?? 'null'})`))
+      reject(
+        new Error(
+          `export-static-api ${phaseName} failed (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
+        ),
+      )
     })
   })
 }
@@ -396,8 +396,7 @@ async function main() {
   }
 
   const districtsManifest = join(process.cwd(), 'public/data/districts/manifest.json')
-  const skipDistricts =
-    process.env.DISTRICTS_SKIP_EXPORT === '1' && existsSync(districtsManifest)
+  const skipDistricts = process.env.DISTRICTS_SKIP_EXPORT === '1' && existsSync(districtsManifest)
 
   let districtColorsPath = districtsManifest
   if (skipDistricts) {

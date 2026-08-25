@@ -18,10 +18,7 @@ import {
   geocodeAllFromKartverketBulk,
 } from './local-geocode.js'
 import { kartverketBulkAvailable } from './kartverket-bulk.js'
-import {
-  DEFAULT_REFERENCE_CACHE_DIR,
-  loadKommunerCache,
-} from './reference-cache.js'
+import { DEFAULT_REFERENCE_CACHE_DIR, loadKommunerCache } from './reference-cache.js'
 import { importBrregForKommuner, importBrregNationwideFromCache } from './brreg-local-import.js'
 import { syncBrregFromBulkCache } from './brreg-bulk-sync.js'
 import {
@@ -239,7 +236,9 @@ export async function geocodePending(db: Database.Database, options: SyncOptions
     if (processed % logEvery === 0 || processed === keys.length) reportProgress()
   })
 
-  console.log(`Geokoding ferdig: ${geocoded.toLocaleString('nb-NO')} treff, ${failed.toLocaleString('nb-NO')} feilet`)
+  console.log(
+    `Geokoding ferdig: ${geocoded.toLocaleString('nb-NO')} treff, ${failed.toLocaleString('nb-NO')} feilet`,
+  )
   return { geocoded, failed, processed: keys.length }
 }
 
@@ -399,7 +398,7 @@ export async function runBackfillImport(
   const scoped = options.dev || options.devFylke != null
   const referenceCacheDir = options.referenceCacheDir ?? DEFAULT_REFERENCE_CACHE_DIR
   const localOnly = !(options.allowApi ?? false)
-  let imported = 0
+  let imported = 0 // eslint-disable-line no-useless-assignment
 
   if (scoped) {
     console.log(
@@ -424,7 +423,9 @@ export async function runBackfillImport(
       console.log(`  ${copied.kartverket.toLocaleString('nb-NO')} Kartverket-adresser`)
       imported = copied.organizations
     } else {
-      console.log('Backfill: importerer BRREG fra lokal referansecache (hele landet, ingen sletting)…')
+      console.log(
+        'Backfill: importerer BRREG fra lokal referansecache (hele landet, ingen sletting)…',
+      )
       imported = await importBrregNationwideFromCache(db, {
         skipUnderenheter: options.skipUnderenheterBackfill,
         referenceCacheDir,
@@ -448,7 +449,10 @@ export async function runFullImport(db: Database.Database) {
 
 export async function runIncrementalSync(
   db: Database.Database,
-  options: Pick<SyncOptions, 'allowApi' | 'referenceCacheDir' | 'skipUnderenheterBackfill' | 'refreshDownloads'> = {},
+  options: Pick<
+    SyncOptions,
+    'allowApi' | 'referenceCacheDir' | 'skipUnderenheterBackfill' | 'refreshDownloads'
+  > = {},
 ) {
   if (!(options.allowApi ?? false)) {
     console.log('Inkrementell BRREG-sync fra lokal bulk (diff, ingen API)…')
@@ -473,7 +477,9 @@ export async function runIncrementalSync(
 
   const { updates, maxId } = await fetchUpdatesSince(lastId + 1, (batch) => {
     if (batch.length > 0) {
-      console.log(`  Mottok ${batch.length} enhetsoppdateringer (siste id ${batch[batch.length - 1].oppdateringsid})`)
+      console.log(
+        `  Mottok ${batch.length} enhetsoppdateringer (siste id ${batch[batch.length - 1].oppdateringsid})`,
+      )
     }
   })
 
@@ -571,7 +577,9 @@ export async function runDevImport(
 ) {
   const referenceCacheDir = options.referenceCacheDir ?? DEFAULT_REFERENCE_CACHE_DIR
   const kommuner = await resolveDevKommuner(options.devFylke, options)
-  console.log(`Dev-import for ${devImportLabel(options.devFylke, kommuner.length)} fra lokal BRREG-cache`)
+  console.log(
+    `Dev-import for ${devImportLabel(options.devFylke, kommuner.length)} fra lokal BRREG-cache`,
+  )
 
   const imported = await importBrregForKommuner(db, kommuner, {
     skipUnderenheter: options.skipUnderenheterBackfill,
@@ -582,10 +590,9 @@ export async function runDevImport(
   return imported
 }
 
-export function devGeocodeOptions(geocodeAll: boolean): Pick<
-  SyncOptions,
-  'geocodeAll' | 'maxGeocodeAddresses' | 'maxGeocodeRounds' | 'geocodeLimit'
-> {
+export function devGeocodeOptions(
+  geocodeAll: boolean,
+): Pick<SyncOptions, 'geocodeAll' | 'maxGeocodeAddresses' | 'maxGeocodeRounds' | 'geocodeLimit'> {
   if (geocodeAll) {
     return {
       geocodeAll: true,
@@ -688,7 +695,7 @@ async function runGeocodeLoop(db: Database.Database, options: SyncOptions) {
       geocodeLimit: batchLimit,
       geocodeBaseline: geocodeStart,
     })
-    addressesThisRun += processed
+    addressesThisRun += processed ?? 0
 
     const remaining = getStats(db).pending_geocode
     if (remaining >= pending) {
@@ -824,30 +831,40 @@ export async function runBuildDatabase(db: Database.Database, options: BuildDbOp
   console.log(`  BRREG sidepause: ${LIMITS.brregPageDelayMs}ms`)
   console.log(`  BRREG enhetpause: ${LIMITS.brregEntityDelayMs}ms`)
   await ensureLocalKartverketReady(db)
-  console.log(`  Geokilde: ${geocodeSourceDescription(db, { allowApi: options.allowApi ?? false })}`)
+  console.log(
+    `  Geokilde: ${geocodeSourceDescription(db, { allowApi: options.allowApi ?? false })}`,
+  )
   if (options.allowApi) {
-    console.log(`  Geokoding (API): ${LIMITS.geocodeConcurrency} parallelle, ${LIMITS.geocodeDelayMs}ms mellomrom`)
+    console.log(
+      `  Geokoding (API): ${LIMITS.geocodeConcurrency} parallelle, ${LIMITS.geocodeDelayMs}ms mellomrom`,
+    )
   }
   const maxGeocodeAddresses = resolveMaxGeocodeAddresses(options)
   console.log(`  Geokoding batch: ${options.geocodeLimit ?? LIMITS.geocodeBatchSize} adresser`)
   if (options.geocodeAll) {
     console.log('  Geokoding kvote: alle adresser')
   } else if (maxGeocodeAddresses != null) {
-    console.log(`  Geokoding kvote: ${maxGeocodeAddresses.toLocaleString('nb-NO')} adresser per kjøring`)
+    console.log(
+      `  Geokoding kvote: ${maxGeocodeAddresses.toLocaleString('nb-NO')} adresser per kjøring`,
+    )
   }
 
   if (options.dev) {
-    console.log(`\nSteg 1/2: Dev-import fra lokal BRREG-cache (${devImportLabel(options.devFylke)})…`)
+    console.log(
+      `\nSteg 1/2: Dev-import fra lokal BRREG-cache (${devImportLabel(options.devFylke)})…`,
+    )
     await runDevImport(db, options)
   } else if (options.backfill) {
     const scope =
-      options.devFylke != null || options.dev
-        ? devImportLabel(options.devFylke)
-        : 'hele landet'
-    console.log(`\nSteg 1/2: Backfill fra lokal BRREG-data (${scope}, beholder eksisterende database)…`)
+      options.devFylke != null || options.dev ? devImportLabel(options.devFylke) : 'hele landet'
+    console.log(
+      `\nSteg 1/2: Backfill fra lokal BRREG-data (${scope}, beholder eksisterende database)…`,
+    )
     await runBackfillImport(db, options)
   } else if (needsFullImport) {
-    console.log('\nSteg 1/2: Full import fra lokale filer (norway.db → referansecache, aldri API uten --allow-api)…')
+    console.log(
+      '\nSteg 1/2: Full import fra lokale filer (norway.db → referansecache, aldri API uten --allow-api)…',
+    )
     await importFullFromLocalSources(db, options)
   } else {
     console.log('\nSteg 1/2: Oppdatering…')

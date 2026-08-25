@@ -1,6 +1,8 @@
 import type { EmployeeBand } from './employeeBands.js'
 
-export type EntityKind = 'enhet' | 'underenhet'
+export const ENTITY_KINDS = ['enhet', 'underenhet'] as const
+
+export type EntityKind = (typeof ENTITY_KINDS)[number]
 
 export interface MapFilters {
   orgTypes: string[]

@@ -1,18 +1,8 @@
-import type { EmployeeBand } from '../shared/employeeBands.js'
-import type { EntityKind, MapFilters } from '../shared/types.js'
+import { EMPLOYEE_BANDS, type EmployeeBand, employeeBandSql } from '../shared/employeeBands.js'
+import { ENTITY_KINDS, type EntityKind, type MapFilters } from '../shared/types.js'
 
 export type { MapFilters }
-
-export function employeeBandSql(tableAlias = ''): string {
-  const prefix = tableAlias ? `${tableAlias}.` : ''
-  return `CASE
-    WHEN ${prefix}har_registrert_antall_ansatte = 0 OR ${prefix}antall_ansatte IS NULL THEN 'unknown'
-    WHEN ${prefix}antall_ansatte = 0 THEN '0'
-    WHEN ${prefix}antall_ansatte <= 4 THEN '1-4'
-    WHEN ${prefix}antall_ansatte <= 19 THEN '5-19'
-    ELSE '20+'
-  END`
-}
+export { employeeBandSql }
 
 export function naeringskodeSectionSql(tableAlias = ''): string {
   const prefix = tableAlias ? `${tableAlias}.` : ''
@@ -45,16 +35,12 @@ export function buildFilterQuery(filters: MapFilters, geocodedOnly = false, tabl
   }
 
   if (filters.employeeBands.length > 0) {
-    conditions.push(
-      `${prefix}employee_band IN (${filters.employeeBands.map(() => '?').join(',')})`,
-    )
+    conditions.push(`${prefix}employee_band IN (${filters.employeeBands.map(() => '?').join(',')})`)
     params.push(...filters.employeeBands)
   }
 
   if (filters.entityKinds.length > 0) {
-    conditions.push(
-      `${prefix}entity_kind IN (${filters.entityKinds.map(() => '?').join(',')})`,
-    )
+    conditions.push(`${prefix}entity_kind IN (${filters.entityKinds.map(() => '?').join(',')})`)
     params.push(...filters.entityKinds)
   }
 
@@ -73,12 +59,10 @@ export interface ApiFilters extends MapFilters {
   zoom?: number
 }
 
-const VALID_EMPLOYEE_BANDS = new Set<EmployeeBand>(['0', '1-4', '5-19', '20+', 'unknown'])
-const VALID_ENTITY_KINDS = new Set<EntityKind>(['enhet', 'underenhet'])
+const VALID_EMPLOYEE_BANDS = new Set<string>(EMPLOYEE_BANDS)
+const VALID_ENTITY_KINDS = new Set<string>(ENTITY_KINDS)
 
-export function parseFilters(req: {
-  query: (key: string) => string | undefined
-}): ApiFilters {
+export function parseFilters(req: { query: (key: string) => string | undefined }): ApiFilters {
   const bboxRaw = req.query('bbox')
   let bbox: ApiFilters['bbox']
   if (bboxRaw) {
@@ -120,6 +104,7 @@ export function parseFilters(req: {
     naeringskodeSections,
     employeeBands,
     entityKinds,
+    konsernMode: req.query('konsernMode') === 'true',
     konsernMembersOnly: req.query('konsernMembersOnly') === 'true',
     kommunenummer: req.query('kommunenummer'),
     fylke: req.query('fylke'),
@@ -138,7 +123,10 @@ export function appendAreaFilters(
 ) {
   const prefix = tableAlias ? `${tableAlias}.` : ''
   if (filters.kommunenummer) {
-    const values = filters.kommunenummer.split(',').map((value) => value.trim()).filter(Boolean)
+    const values = filters.kommunenummer
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)
     if (values.length === 1) {
       conditions.push(`${prefix}kommunenummer = ?`)
       params.push(values[0])

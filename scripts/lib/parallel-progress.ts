@@ -79,7 +79,11 @@ function buildFraction(phase: RegionBuildPhase | undefined, inner?: number): num
   return span.start + (span.end - span.start) * t
 }
 
-function formatGoal(actual: number | undefined, target: number | undefined, formatter: (n: number) => string): string {
+function formatGoal(
+  actual: number | undefined,
+  target: number | undefined,
+  formatter: (n: number) => string,
+): string {
   if (target != null && target > 0) {
     const actualText = actual != null ? formatter(actual) : '–'
     return `${actualText} / ${formatter(target)}`
@@ -134,7 +138,10 @@ export class FylkeBuildDashboard {
     this.render()
   }
 
-  update(id: string, patch: Partial<TaskUpdate> & { buildPhase?: RegionBuildPhase; buildFraction?: number }) {
+  update(
+    id: string,
+    patch: Partial<TaskUpdate> & { buildPhase?: RegionBuildPhase; buildFraction?: number },
+  ) {
     const existing = this.tasks.get(id)
     if (!existing) return
 
@@ -200,7 +207,7 @@ export class FylkeBuildDashboard {
     for (const id of this.order) {
       const task = this.tasks.get(id)!
       const plan = this.plans.get(id)
-      const weight = plan?.estimatedDbBytes > 0 ? plan.estimatedDbBytes : 1
+      const weight = (plan?.estimatedDbBytes ?? 0) > 0 ? plan!.estimatedDbBytes : 1
       weightSum += weight
       orgsGoal += task.targetOrgs ?? plan?.estimatedOrgs ?? 0
       dbBytesGoal += task.targetDbBytes ?? plan?.estimatedDbBytes ?? 0

@@ -49,7 +49,10 @@ function rowMatchesFilters(row: OrgRow, filters: ApiFilters): boolean {
   if (filters.excludeUnderAvvikling && row.under_avvikling !== 0) return false
   if (filters.vatRegisteredOnly && row.vat_registered !== 1) return false
   if (filters.orgTypes.length > 0 && !filters.orgTypes.includes(row.org_type)) return false
-  if (filters.entityKinds.length > 0 && !filters.entityKinds.includes(row.entity_kind as 'enhet' | 'underenhet')) {
+  if (
+    filters.entityKinds.length > 0 &&
+    !filters.entityKinds.includes(row.entity_kind as 'enhet' | 'underenhet')
+  ) {
     return false
   }
   if (filters.konsernMembersOnly && row.er_i_konsern !== 1) return false
@@ -163,6 +166,7 @@ export function warmAddressSpatialIndex(db: Database.Database) {
     naeringskodeSections: [],
     employeeBands: [],
     entityKinds: ['enhet'],
+    konsernMode: false,
     konsernMembersOnly: false,
   })
   const ms = Math.round(performance.now() - started)

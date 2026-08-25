@@ -106,7 +106,7 @@ export function matrikkelKeyFromCsv(
 }
 
 export async function resolveNationalCsvDownloadUrl(): Promise<string> {
-  return resolveRegionCsvDownloadUrl({ national: true }) ?? DEFAULT_NATIONAL_CSV_URL
+  return (await resolveRegionCsvDownloadUrl({ national: true })) ?? DEFAULT_NATIONAL_CSV_URL
 }
 
 let atomFeedXmlCache: string | null = null
@@ -118,10 +118,7 @@ async function fetchAtomFeedXml(): Promise<string> {
   return atomFeedXmlCache
 }
 
-export type KartverketRegionScope =
-  | { national: true }
-  | { fylke: string }
-  | { kommune: string }
+export type KartverketRegionScope = { national: true } | { fylke: string } | { kommune: string }
 
 function regionZipPattern(scope: KartverketRegionScope): RegExp {
   if ('national' in scope) {
@@ -287,11 +284,7 @@ export interface KartverketImportOptions {
   /** Apply bulk-load SQLite pragmas during import. */
   bulkLoad?: boolean
   quiet?: boolean
-  onProgress?: (event: {
-    phase: 'download' | 'import'
-    progress?: number
-    detail?: string
-  }) => void
+  onProgress?: (event: { phase: 'download' | 'import'; progress?: number; detail?: string }) => void
 }
 
 export async function downloadRegionKartverketCsv(
@@ -582,8 +575,9 @@ export async function importNationalKartverketFromZip(
 
 export function kartverketAddressCount(db: Database.Database): number {
   ensureKartverketSchema(db)
-  return (db.prepare('SELECT COUNT(*) AS count FROM kartverket_addresses').get() as { count: number })
-    .count
+  return (
+    db.prepare('SELECT COUNT(*) AS count FROM kartverket_addresses').get() as { count: number }
+  ).count
 }
 
 export function kartverketBulkAvailable(db: Database.Database): boolean {

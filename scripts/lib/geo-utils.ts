@@ -60,7 +60,11 @@ function pointInRing(lng: number, lat: number, ring: number[][]): boolean {
   return inside
 }
 
-function pointInPolygonCoords(lng: number, lat: number, coordinates: Polygon['coordinates']): boolean {
+function pointInPolygonCoords(
+  lng: number,
+  lat: number,
+  coordinates: Polygon['coordinates'],
+): boolean {
   if (!pointInRing(lng, lat, coordinates[0]!)) return false
   for (let hole = 1; hole < coordinates.length; hole++) {
     if (pointInRing(lng, lat, coordinates[hole]!)) return false
@@ -77,10 +81,7 @@ export function pointInGeometry(lng: number, lat: number, geometry: AreaGeometry
 
 export function pointInBounds(lng: number, lat: number, bounds: Bounds): boolean {
   return (
-    lat >= bounds.minLat &&
-    lat <= bounds.maxLat &&
-    lng >= bounds.minLng &&
-    lng <= bounds.maxLng
+    lat >= bounds.minLat && lat <= bounds.maxLat && lng >= bounds.minLng && lng <= bounds.maxLng
   )
 }
 
@@ -100,8 +101,8 @@ function roundNestedCoordinates(coords: unknown, digits: number): unknown {
 export function roundGeometryCoordinates(geometry: AreaGeometry, digits = 5): AreaGeometry {
   return {
     type: geometry.type,
-    coordinates: roundNestedCoordinates(geometry.coordinates, digits) as AreaGeometry['coordinates'],
-  }
+    coordinates: roundNestedCoordinates(geometry.coordinates, digits),
+  } as AreaGeometry
 }
 
 const GRID_DEG = 0.05
@@ -120,9 +121,7 @@ function gridKeysForBounds(bounds: Bounds): string[] {
   return keys
 }
 
-export function buildSpatialGridIndex<T extends { bounds: Bounds }>(
-  items: T[],
-): Map<string, T[]> {
+export function buildSpatialGridIndex<T extends { bounds: Bounds }>(items: T[]): Map<string, T[]> {
   const index = new Map<string, T[]>()
   for (const item of items) {
     for (const key of gridKeysForBounds(item.bounds)) {
