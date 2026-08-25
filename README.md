@@ -16,6 +16,23 @@ All data synkroniseres nattlig fra BRREG til en **SQLite-database** via GitHub A
 - **Nightly sync** via GitHub Actions til SQLite + forhåndsbygde PMTiles
 - Prikker lastes primært fra vektorfliser; API/SQLite brukes som fallback
 
+## Nettleserstøtte
+
+| Nettleser | Minimumversjon | Merknader |
+|-----------|---------------|-----------|
+| Chrome | 100+ | Full støtte |
+| Firefox | 117+ | Full støtte |
+| Safari | 16.4+ | Service Worker (modul) fungerer ikke — appen fungerer likevel, men uten SW-caching |
+| Edge | 100+ | Full støtte (Chromium-basert) |
+| Brave | 100+ | Full støtte (Chromium-basert) |
+
+**Fallback-atferd:**
+
+- **WebGL utilgjengelig:** Appen faller automatisk tilbake til Leaflet canvas-prikker (begrenset til 4 000 punkter).
+- **DecompressionStream mangler:** Gzip-komprimert statisk JSON hoppes over; ukomprimert JSON lastes i stedet.
+- **Service Worker feiler:** Appen fungerer normalt uten tile-caching (SW er valgfri).
+- **IndexedDB utilgjengelig:** Kun minnebasert cache brukes — ingen persistent lagring mellom besøk.
+
 ## Kom i gang
 
 ```bash

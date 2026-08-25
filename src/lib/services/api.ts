@@ -727,7 +727,7 @@ export async function fetchOrganizationsBatch(
   }
 
   for (let i = 0; i < missing.length; i += BATCH_ORG_MAX) {
-    signal?.throwIfAborted()
+    if (signal?.aborted) throw signal.reason
     const chunk = missing.slice(i, i + BATCH_ORG_MAX)
     if (STATIC_API) {
       for (const orgnr of chunk) {

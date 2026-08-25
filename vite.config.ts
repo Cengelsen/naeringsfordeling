@@ -37,6 +37,7 @@ export default defineConfig({
   },
   plugins: [svelte(), pmtilesHeaders()],
   build: {
+    target: ['es2022', 'chrome100', 'firefox117', 'safari16.4'],
     rollupOptions: {
       input: {
         main: path.resolve(import.meta.dirname, 'index.html'),

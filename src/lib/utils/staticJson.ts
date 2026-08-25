@@ -2,9 +2,9 @@ function isHtmlResponse(response: Response): boolean {
   return (response.headers.get('content-type') ?? '').includes('text/html')
 }
 
-async function parseGzipJson<T>(response: Response): Promise<T> {
+async function parseGzipJson<T>(response: Response): Promise<T | null> {
   if (typeof DecompressionStream === 'undefined') {
-    throw new Error('Nettleseren støtter ikke gzip-dekomprimering')
+    return null
   }
 
   const stream = response.body!.pipeThrough(new DecompressionStream('gzip'))
@@ -17,9 +17,10 @@ export async function fetchStaticJson<T>(baseUrl: string): Promise<T> {
   const gzResponse = await fetch(`${baseUrl}.gz`)
   if (gzResponse.ok && !isHtmlResponse(gzResponse)) {
     try {
-      return await parseGzipJson<T>(gzResponse)
+      const result = await parseGzipJson<T>(gzResponse)
+      if (result !== null) return result
     } catch {
-      // Vite dev can return index.html for missing .gz files; fall back to plain JSON.
+      // fall through to plain JSON
     }
   }
 

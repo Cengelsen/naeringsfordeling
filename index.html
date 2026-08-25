@@ -20,6 +20,13 @@
   </head>
   <body>
     <div id="app"></div>
+    <script>
+      if (!window.AbortController || !window.fetch || typeof Symbol === 'undefined') {
+        document.getElementById('app').innerHTML =
+          '<p style="color:#94a3b8;text-align:center;padding:2rem;font-family:sans-serif">' +
+          'Denne nettsiden krever en nyere nettleser. Oppdater Chrome, Firefox, Safari eller Edge.</p>'
+      }
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

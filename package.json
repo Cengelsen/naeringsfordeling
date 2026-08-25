@@ -90,5 +90,11 @@
     "maplibre-gl": "^5.24.0",
     "pmtiles": "^4.4.1",
     "polyclip-ts": "^0.16.8"
-  }
+  },
+  "browserslist": [
+    "Chrome >= 100",
+    "Firefox >= 117",
+    "Safari >= 16.4",
+    "Edge >= 100"
+  ]
 }
