@@ -36,7 +36,7 @@ export const LOD_ZOOM_RANGES = {
   fylke: { minZoom: FYLKE_MIN_ZOOM, maxZoom: FYLKE_MAX_ZOOM },
   kommune: { minZoom: KOMMUNE_MIN_ZOOM, maxZoom: KOMMUNE_MAX_ZOOM },
   grunnkretser: { minZoom: GRUNNKRETS_MIN_ZOOM, maxZoom: GRUNNKRETS_MAX_ZOOM },
-  points: { minZoom: Math.max(0, DETAIL_MIN_ZOOM - 2), maxZoom: 18 },
+  points: { minZoom: Math.max(0, DETAIL_MIN_ZOOM - 2), maxZoom: DETAIL_MIN_ZOOM },
 } as const
 
 export type LodLayerExport =
@@ -98,8 +98,6 @@ export function isPolygonLodLayer(name: string): boolean {
 
 export function isAggregateLodLayer(name: string): boolean {
   return (
-    name.startsWith('districts_') ||
-    name.startsWith('grunnkretser_') ||
-    name.startsWith('cells_')
+    name.startsWith('districts_') || name.startsWith('grunnkretser_') || name.startsWith('cells_')
   )
 }

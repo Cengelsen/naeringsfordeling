@@ -41,6 +41,12 @@ export interface ReferenceManifest {
   kartverket_zip_sha256?: string
   last_oppdateringsid?: string
   last_oppdateringsid_underenheter?: string
+  /** Epoch ms when BRREG enheter was last downloaded */
+  brreg_enheter_downloaded_at?: number
+  /** Epoch ms when BRREG underenheter was last downloaded */
+  brreg_underenheter_downloaded_at?: number
+  /** Epoch ms when Kartverket zip was last downloaded */
+  kartverket_downloaded_at?: number
 }
 
 export interface EnsureReferenceOptions {
@@ -93,13 +99,22 @@ export function describeReferenceCache(cacheDir = DEFAULT_REFERENCE_CACHE_DIR): 
   return parts.join('; ')
 }
 
+/** Max age before BRREG bulk files are considered stale (20 hours). */
+export const BRREG_MAX_AGE_MS = 20 * 60 * 60 * 1000
+/** Max age before Kartverket files are considered stale (7 days). */
+export const KARTVERKET_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+
 function shouldDownload(
   existingPath: string,
   reuseDownloads: boolean,
   refreshDownloads: boolean,
+  downloadedAt?: number,
+  maxAgeMs?: number,
 ): boolean {
   if (refreshDownloads) return true
-  if (reuseDownloads && existsSync(existingPath)) return false
+  if (!existsSync(existingPath)) return true
+  if (maxAgeMs != null && downloadedAt != null && Date.now() - downloadedAt > maxAgeMs) return true
+  if (reuseDownloads) return false
   return !existsSync(existingPath)
 }
 
@@ -191,7 +206,16 @@ export async function ensureBrregEnheterCache(
     )
   }
 
-  if (!shouldDownload(destPath, reuseDownloads, refreshDownloads)) {
+  const manifest = readReferenceManifest(cacheDir)
+  if (
+    !shouldDownload(
+      destPath,
+      reuseDownloads,
+      refreshDownloads,
+      manifest.brreg_enheter_downloaded_at,
+      BRREG_MAX_AGE_MS,
+    )
+  ) {
     console.log(`Gjenbruker lokal BRREG enheter-fil: ${destPath}`)
     return destPath
   }
@@ -207,6 +231,7 @@ export async function ensureBrregEnheterCache(
 
   const manifestPatch: Partial<ReferenceManifest> = {
     brreg_enheter_cached_at: new Date().toISOString(),
+    brreg_enheter_downloaded_at: Date.now(),
   }
 
   if (!existsSync(referencePath(cacheDir, REFERENCE_MANIFEST_FILE)) || refreshDownloads) {
@@ -233,7 +258,16 @@ export async function ensureBrregUnderenheterCache(
     )
   }
 
-  if (!shouldDownload(destPath, reuseDownloads, refreshDownloads)) {
+  const manifest = readReferenceManifest(cacheDir)
+  if (
+    !shouldDownload(
+      destPath,
+      reuseDownloads,
+      refreshDownloads,
+      manifest.brreg_underenheter_downloaded_at,
+      BRREG_MAX_AGE_MS,
+    )
+  ) {
     console.log(`Gjenbruker lokal BRREG underenheter-fil: ${destPath}`)
     return destPath
   }
@@ -249,6 +283,7 @@ export async function ensureBrregUnderenheterCache(
 
   const manifestPatch: Partial<ReferenceManifest> = {
     brreg_underenheter_cached_at: new Date().toISOString(),
+    brreg_underenheter_downloaded_at: Date.now(),
   }
 
   if (!existsSync(referencePath(cacheDir, REFERENCE_MANIFEST_FILE)) || refreshDownloads) {

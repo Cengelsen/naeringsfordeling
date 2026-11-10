@@ -13,15 +13,11 @@ import type {
 } from '../types'
 import { bandMatchesFilter } from '../utils/employeeBands'
 import { sectionMatchesFilter } from '../utils/naeringskode'
-import {
-  filterPointsInBbox,
-  normalizeOrgnr,
-  parsePointsResponse,
-  type CompactPoint,
-} from '../map/points'
+import { normalizeOrgnr, parsePointsResponse, type CompactPoint } from '../map/points'
 import { assetUrl } from '../utils/assets'
 import { isDetailZoom } from '../lodConfig'
 import { fetchStaticJson } from '../utils/staticJson'
+import { fetchOrganizationFromShard, searchSharded } from '../search/shardedSearch'
 import {
   buildOrgSearchIndex,
   searchOrgSearchIndex,
@@ -55,29 +51,9 @@ type SearchIndexRow = [
   string?,
   string?,
 ]
-type GeocodedPointRow = [
-  string,
-  number,
-  number,
-  string,
-  string,
-  number,
-  number,
-  number,
-  string,
-  string,
-  string,
-  string,
-  string?,
-  string?,
-  string?,
-]
-
 let municipalityBreakdownPromise: Promise<MunicipalityBreakdownRow[]> | null = null
 let searchIndexPromise: Promise<OrganizationSearchHit[]> | null = null
 let orgSearchIndexPromise: Promise<OrgSearchIndex> | null = null
-let geocodedPointsPromise: Promise<GeocodedPointRow[] | null> | null = null
-let geocodedPointsByKommunePromise: Promise<Map<string, GeocodedPointRow[]> | null> | null = null
 
 async function staticFetch<T>(file: string): Promise<T> {
   const response = await fetch(`${STATIC_API_BASE}/${file}`)
@@ -87,118 +63,43 @@ async function staticFetch<T>(file: string): Promise<T> {
   return response.json() as Promise<T>
 }
 
-async function loadGeocodedPointsOptional(): Promise<GeocodedPointRow[] | null> {
-  // Used for address stats and GeoJSON fallback when PMTiles/WebGL cannot paint.
-  geocodedPointsPromise ??= fetchStaticJson<{ rows: GeocodedPointRow[] }>(
-    `${STATIC_API_BASE}/geocoded-points.json`,
-  )
-    .then((data) => data.rows)
-    .catch(() => null)
-  return geocodedPointsPromise
-}
+type MunicipalityBreakdownTuple = [
+  string,
+  string,
+  number,
+  number,
+  number,
+  string | null,
+  string,
+  string,
+  number,
+]
 
-async function loadGeocodedPoints(): Promise<GeocodedPointRow[]> {
-  const rows = await loadGeocodedPointsOptional()
-  if (!rows) {
-    throw new ApiError('Geokodede punkter mangler')
+function mapBreakdownTuple(t: MunicipalityBreakdownTuple): MunicipalityBreakdownRow {
+  return {
+    kommunenummer: t[0],
+    org_type: t[1],
+    konkurs: t[2],
+    under_avvikling: t[3],
+    vat_registered: t[4],
+    naeringskode_section: t[5],
+    employee_band: t[6],
+    entity_kind: t[7],
+    count: t[8],
   }
-  return rows
-}
-
-async function loadGeocodedPointsByKommune(): Promise<Map<string, GeocodedPointRow[]> | null> {
-  geocodedPointsByKommunePromise ??= loadGeocodedPointsOptional().then((rows) => {
-    if (!rows) return null
-
-    const byKommune = new Map<string, GeocodedPointRow[]>()
-    for (const row of rows) {
-      const kommunenummer = row[4]
-      const bucket = byKommune.get(kommunenummer)
-      if (bucket) {
-        bucket.push(row)
-      } else {
-        byKommune.set(kommunenummer, [row])
-      }
-    }
-    return byKommune
-  })
-  return geocodedPointsByKommunePromise
-}
-
-function geocodedPointMatchesFilters(row: GeocodedPointRow, filters: MapFilters): boolean {
-  const [, , , orgType, , konkurs, underAvvikling, vatRegistered] = row
-  const naeringskodeSection = row[12] ?? null
-  const employeeBand = (row[13] ?? 'unknown') as import('../utils/employeeBands').EmployeeBand
-  const entityKind = (row[14] ?? 'enhet') as 'enhet' | 'underenhet'
-
-  if (filters.orgTypes.length > 0 && !filters.orgTypes.includes(orgType)) return false
-  if (filters.excludeKonkurs && konkurs !== 0) return false
-  if (filters.excludeUnderAvvikling && underAvvikling !== 0) return false
-  if (filters.vatRegisteredOnly && vatRegistered !== 1) return false
-  if (!sectionMatchesFilter(naeringskodeSection, filters.naeringskodeSections)) return false
-  if (!bandMatchesFilter(employeeBand, filters.employeeBands)) return false
-  if (filters.entityKinds.length > 0 && !filters.entityKinds.includes(entityKind)) return false
-  return true
-}
-
-function geocodedPointInBbox(
-  row: GeocodedPointRow,
-  bbox: [number, number, number, number],
-): boolean {
-  const [, lng, lat] = row
-  const [minLng, minLat, maxLng, maxLat] = bbox
-  return lng >= minLng && lng <= maxLng && lat >= minLat && lat <= maxLat
-}
-
-async function fetchOrganizationPointsFromStatic(
-  filters: MapFilters,
-  options: FetchPointsOptions = {},
-): Promise<{ points: OrganizationPoint[]; truncated: boolean }> {
-  const limit = options.limit ?? (options.zoom != null ? limitForZoom(options.zoom) : 50000)
-  const points: OrganizationPoint[] = []
-
-  const byKommune = options.kommunenumre?.length ? await loadGeocodedPointsByKommune() : null
-  const allRows = byKommune ? null : await loadGeocodedPointsOptional()
-  if (!byKommune && !allRows) {
-    return { points: [], truncated: false }
-  }
-
-  const candidates: GeocodedPointRow[] = byKommune
-    ? options.kommunenumre!.flatMap((kommunenummer) => byKommune.get(kommunenummer) ?? [])
-    : allRows!
-
-  for (const row of candidates) {
-    if (!geocodedPointMatchesFilters(row, filters)) continue
-
-    const [, lng, lat, orgType, kommunenummer] = row
-    if (options.bbox && !geocodedPointInBbox(row, options.bbox)) continue
-
-    points.push({
-      orgnr: row[0],
-      lng,
-      lat,
-      orgType,
-      kommunenummer,
-      navn: row[8],
-      orgTypeLabel: row[9],
-      addressText: row[10],
-      postnummer: row[11],
-      naeringskode: row[12] ?? null,
-      employeeBand: (row[13] ?? 'unknown') as import('../utils/employeeBands').EmployeeBand,
-      entityKind: (row[14] ?? 'enhet') as 'enhet' | 'underenhet',
-    })
-
-    if (points.length >= limit) {
-      return { points, truncated: true }
-    }
-  }
-
-  return { points, truncated: false }
 }
 
 async function loadMunicipalityBreakdown(): Promise<MunicipalityBreakdownRow[]> {
-  municipalityBreakdownPromise ??= staticFetch<{ rows: MunicipalityBreakdownRow[] }>(
-    'municipality-breakdown.json',
-  ).then((data) => data.rows)
+  municipalityBreakdownPromise ??= fetchStaticJson<{
+    rows: MunicipalityBreakdownTuple[] | MunicipalityBreakdownRow[]
+  }>(`${STATIC_API_BASE}/municipality-breakdown.json`).then((data) => {
+    if (data.rows.length === 0) return []
+    const first = data.rows[0]!
+    if (Array.isArray(first)) {
+      return (data.rows as MunicipalityBreakdownTuple[]).map(mapBreakdownTuple)
+    }
+    return data.rows as MunicipalityBreakdownRow[]
+  })
   return municipalityBreakdownPromise
 }
 
@@ -246,14 +147,28 @@ async function loadSearchIndexByOrgnr(): Promise<Map<string, OrganizationSearchH
   return (await loadOrgSearchIndex()).byOrgnr
 }
 
-/** Warm the local search index (static deployment). */
-export function prefetchLocalSearchIndex(): Promise<void> {
-  if (!STATIC_API) return Promise.resolve()
-  return loadOrgSearchIndex().then(() => undefined)
-}
-
 export async function lookupOrganizationLocal(orgnr: string): Promise<Organization | null> {
   if (!STATIC_API) return null
+  const detail = await fetchOrganizationFromShard(normalizeOrgnr(orgnr))
+  if (detail) {
+    return {
+      orgnr: detail.orgnr,
+      navn: detail.navn,
+      orgType: detail.org_type,
+      orgTypeLabel: detail.org_type_label,
+      addressText: detail.address_text,
+      postnummer: detail.postnummer,
+      kommunenummer: detail.kommunenummer,
+      lat: null,
+      lng: null,
+      antallAnsatte: detail.antall_ansatte,
+      naeringskode: detail.naeringskode || null,
+      naeringskodeLabel: detail.naeringskode_label || null,
+      entityKind: detail.entity_kind as 'enhet' | 'underenhet',
+      erIKonsern: (detail.flags & 8) !== 0,
+    }
+  }
+  // Fall back to search index
   const index = await loadSearchIndexByOrgnr()
   const hit = index.get(normalizeOrgnr(orgnr))
   return hit ? organizationFromSearchHit(hit) : null
@@ -480,6 +395,36 @@ export async function fetchKommuner(geojson?: FeatureCollection | null): Promise
   return applyKommuneNames(data.kommuner, geojson ?? null)
 }
 
+export async function computeAggregateFilteredCounts(
+  filters: MapFilters,
+): Promise<{ byDistrict: Map<string, number>; totalByDistrict: Map<string, number> }> {
+  const rows = await loadMunicipalityBreakdown()
+  const byDistrict = new Map<string, number>()
+  const totalByDistrict = new Map<string, number>()
+
+  const fylkeTotal = new Map<string, number>()
+  const fylkeFiltered = new Map<string, number>()
+
+  for (const row of rows) {
+    const k = row.kommunenummer
+    totalByDistrict.set(k, (totalByDistrict.get(k) ?? 0) + row.count)
+    const fylke = k.slice(0, 2)
+    fylkeTotal.set(fylke, (fylkeTotal.get(fylke) ?? 0) + row.count)
+    if (breakdownRowMatchesFilters(row, filters)) {
+      byDistrict.set(k, (byDistrict.get(k) ?? 0) + row.count)
+      fylkeFiltered.set(fylke, (fylkeFiltered.get(fylke) ?? 0) + row.count)
+    }
+  }
+  for (const [f, total] of fylkeTotal) {
+    totalByDistrict.set(f, total)
+  }
+  for (const [f, count] of fylkeFiltered) {
+    byDistrict.set(f, count)
+  }
+
+  return { byDistrict, totalByDistrict }
+}
+
 export async function fetchMunicipalityCounts(filters: MapFilters): Promise<MunicipalityCount[]> {
   if (STATIC_API) {
     const rows = await loadMunicipalityBreakdown()
@@ -521,28 +466,7 @@ async function fetchViewportSummaryStatic(
     if (kommuneSet.size > 0 && !kommuneSet.has(row.kommunenummer)) continue
     if (!breakdownRowMatchesFilters(row, filters)) continue
     totalInViewport += row.count
-  }
-
-  let geocodedInBbox = 0
-  const addressKeys = new Set<string>()
-  const points = await loadGeocodedPointsOptional()
-  if (points) {
-    for (const row of points) {
-      if (!geocodedPointMatchesFilters(row, filters)) continue
-      if (options.bbox && !geocodedPointInBbox(row, options.bbox)) continue
-      geocodedInBbox += 1
-      const orgType = row[3]
-      byOrgType[orgType] = (byOrgType[orgType] ?? 0) + 1
-      // Compact points have no adresse_id — group by rounded lat/lng like the map.
-      addressKeys.add(`${Number(row[2]).toFixed(5)}:${Number(row[1]).toFixed(5)}`)
-    }
-  } else {
-    for (const row of rows) {
-      if (kommuneSet.size > 0 && !kommuneSet.has(row.kommunenummer)) continue
-      if (!breakdownRowMatchesFilters(row, filters)) continue
-      geocodedInBbox += row.count
-      byOrgType[row.org_type] = (byOrgType[row.org_type] ?? 0) + row.count
-    }
+    byOrgType[row.org_type] = (byOrgType[row.org_type] ?? 0) + row.count
   }
 
   const renderMode: ViewportSummary['renderMode'] = isDetailZoom(options.zoom)
@@ -551,9 +475,9 @@ async function fetchViewportSummaryStatic(
 
   return {
     totalInViewport,
-    geocodedInBbox,
-    addressesInBbox: addressKeys.size,
-    ungeocodedInViewport: Math.max(0, totalInViewport - geocodedInBbox),
+    geocodedInBbox: totalInViewport,
+    addressesInBbox: 0,
+    ungeocodedInViewport: 0,
     byOrgType,
     renderMode,
     kommunerInViewport: kommuneSet.size,
@@ -590,7 +514,7 @@ async function fetchOrganizationPointsFromApi(
   signal?: AbortSignal,
 ): Promise<{ points: OrganizationPoint[]; truncated: boolean; summary?: ViewportSummary }> {
   if (STATIC_API) {
-    return fetchOrganizationPointsFromStatic(filters, options)
+    return { points: [], truncated: false }
   }
 
   const params = dataFiltersToParams(filters)
@@ -806,8 +730,13 @@ export async function searchOrganizations(
   limit = 8,
 ): Promise<OrganizationSearchHit[]> {
   if (STATIC_API) {
-    const index = await loadOrgSearchIndex()
-    return searchStaticOrganizations(query, limit, index)
+    try {
+      return await searchSharded(query, limit)
+    } catch {
+      // Fall back to monolithic index
+      const index = await loadOrgSearchIndex()
+      return searchStaticOrganizations(query, limit, index)
+    }
   }
 
   const params = new URLSearchParams({ q: query, limit: String(limit) })

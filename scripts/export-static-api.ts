@@ -13,7 +13,6 @@ import { dirname, join } from 'node:path'
 import { finished, pipeline } from 'node:stream/promises'
 import type { Writable } from 'node:stream'
 import { openDatabase, DEFAULT_DB_PATH, effectiveKommunenummerExpr } from './lib/db.js'
-import { employeeBand, naeringskodeSection } from './lib/employeeBands.js'
 import { exportDistrictColorAssets } from './lib/district-color-export.js'
 
 const scriptPath = fileURLToPath(import.meta.url)
@@ -135,24 +134,6 @@ type SearchIndexRow = [
   string,
 ]
 
-type GeocodedPointRow = [
-  string,
-  number,
-  number,
-  string,
-  string,
-  number,
-  number,
-  number,
-  string,
-  string,
-  string,
-  string,
-  string,
-  string,
-  string,
-]
-
 type MunicipalityBreakdownRow = {
   kommunenummer: string
   org_type: string
@@ -165,7 +146,38 @@ type MunicipalityBreakdownRow = {
   count: number
 }
 
-function* iterateMunicipalityBreakdown(
+/** Compact tuple: [kommunenummer, org_type, konkurs, under_avvikling, vat_registered, naeringskode_section, employee_band, entity_kind, count] */
+type MunicipalityBreakdownTuple = [
+  string,
+  string,
+  number,
+  number,
+  number,
+  string | null,
+  string,
+  string,
+  number,
+]
+
+function* iterateMunicipalityBreakdownTuples(
+  db: ReturnType<typeof openDatabase>,
+): Generator<MunicipalityBreakdownTuple> {
+  for (const row of iterateMunicipalityBreakdownRows(db)) {
+    yield [
+      row.kommunenummer,
+      row.org_type,
+      row.konkurs,
+      row.under_avvikling,
+      row.vat_registered,
+      row.naeringskode_section,
+      row.employee_band,
+      row.entity_kind,
+      row.count,
+    ]
+  }
+}
+
+function* iterateMunicipalityBreakdownRows(
   db: ReturnType<typeof openDatabase>,
 ): Generator<MunicipalityBreakdownRow> {
   const kommuneExpr = effectiveKommunenummerExpr()
@@ -219,54 +231,169 @@ function* iterateSearchIndex(db: ReturnType<typeof openDatabase>): Generator<Sea
   }
 }
 
-function* iterateGeocodedPoints(db: ReturnType<typeof openDatabase>): Generator<GeocodedPointRow> {
-  const geocodedRows = db
-    .prepare(
-      `SELECT orgnr, lng, lat, org_type, org_type_label, navn, address_text, postnummer,
-              kommunenummer, konkurs, under_avvikling, vat_registered,
-              naeringskode, antall_ansatte, har_registrert_antall_ansatte, entity_kind, er_i_konsern
-       FROM organizations
-       WHERE deleted = 0 AND lat IS NOT NULL AND lng IS NOT NULL`,
-    )
-    .iterate() as Iterable<{
-    orgnr: string
-    lng: number
-    lat: number
-    org_type: string
-    org_type_label: string
-    navn: string
-    address_text: string
-    postnummer: string
-    kommunenummer: string
-    konkurs: number
-    under_avvikling: number
-    vat_registered: number
-    naeringskode: string | null
-    antall_ansatte: number | null
-    har_registrert_antall_ansatte: number
-    entity_kind: string
-    er_i_konsern: number
-  }>
+const DETAIL_SHARD_COUNT = 2048
 
-  for (const row of geocodedRows) {
-    yield [
+interface OrgDetailRow {
+  orgnr: string
+  navn: string
+  org_type: string
+  org_type_label: string
+  address_text: string | null
+  postnummer: string | null
+  kommunenummer: string | null
+  lat: number | null
+  lng: number | null
+  naeringskode: string | null
+  naeringskode_label: string | null
+  antall_ansatte: number | null
+  har_registrert_antall_ansatte: number
+  entity_kind: string
+  konkurs: number
+  under_avvikling: number
+  vat_registered: number
+  er_i_konsern: number
+}
+
+type CompactOrgDetail = [
+  string, // orgnr
+  string, // navn
+  string, // org_type
+  string, // org_type_label
+  string, // address_text
+  string, // postnummer
+  string, // kommunenummer
+  number | null, // antall_ansatte
+  string, // naeringskode
+  string, // naeringskode_label
+  string, // entity_kind
+  number, // flags (konkurs|under_avvikling|vat_registered|er_i_konsern)
+]
+
+function packDetailFlags(row: OrgDetailRow): number {
+  let f = 0
+  if (row.konkurs) f |= 1
+  if (row.under_avvikling) f |= 2
+  if (row.vat_registered) f |= 4
+  if (row.er_i_konsern) f |= 8
+  return f
+}
+
+async function exportDetailShardsPhase(): Promise<number> {
+  const db = openDatabase(DEFAULT_DB_PATH)
+  const detailDir = join(outputDir, 'detail')
+  mkdirSync(detailDir, { recursive: true })
+
+  const rows = db
+    .prepare(
+      `SELECT orgnr, navn, org_type, org_type_label, address_text, postnummer,
+              kommunenummer, lat, lng, naeringskode, naeringskode_label,
+              antall_ansatte, har_registrert_antall_ansatte, entity_kind,
+              konkurs, under_avvikling, vat_registered, er_i_konsern
+       FROM organizations
+       WHERE deleted = 0`,
+    )
+    .iterate() as Iterable<OrgDetailRow>
+
+  const shards = new Map<number, CompactOrgDetail[]>()
+  let count = 0
+
+  for (const row of rows) {
+    const orgnrNum = parseInt(row.orgnr, 10)
+    if (isNaN(orgnrNum)) continue
+    const shardId = orgnrNum % DETAIL_SHARD_COUNT
+    let shard = shards.get(shardId)
+    if (!shard) {
+      shard = []
+      shards.set(shardId, shard)
+    }
+    shard.push([
       row.orgnr,
-      row.lng,
-      row.lat,
-      row.org_type,
-      row.kommunenummer,
-      row.konkurs,
-      row.under_avvikling,
-      row.vat_registered,
       row.navn,
+      row.org_type,
       row.org_type_label,
       row.address_text ?? '',
       row.postnummer ?? '',
-      naeringskodeSection(row.naeringskode) ?? '',
-      employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1),
+      row.kommunenummer ?? '',
+      row.antall_ansatte,
+      row.naeringskode ?? '',
+      row.naeringskode_label ?? '',
       row.entity_kind,
-    ]
+      packDetailFlags(row),
+    ])
+    count++
   }
+
+  for (const [shardId, entries] of shards) {
+    const json = JSON.stringify(entries)
+    const gzPath = join(detailDir, `${shardId}.json.gz`)
+    writeFileSync(gzPath, gzipSync(json))
+  }
+
+  db.close()
+  console.log(`detail shards: ${shards.size} shards, ${count.toLocaleString('nb-NO')} orgs`)
+  return count
+}
+
+type CompactSearchEntry = [
+  string, // orgnr
+  string, // navn (lowercase for matching)
+  string, // org_type
+  string, // kommunenummer
+]
+
+function searchPrefix(navn: string): string {
+  const normalized = navn.toLowerCase().replace(/[^a-zæøå0-9]/g, '')
+  return normalized.slice(0, 2) || '__'
+}
+
+async function exportSearchShardsPhase(): Promise<number> {
+  const db = openDatabase(DEFAULT_DB_PATH)
+  const searchDir = join(outputDir, 'search')
+  mkdirSync(searchDir, { recursive: true })
+
+  const rows = db
+    .prepare(
+      `SELECT orgnr, navn, org_type, kommunenummer
+       FROM organizations
+       WHERE deleted = 0`,
+    )
+    .iterate() as Iterable<{
+    orgnr: string
+    navn: string
+    org_type: string
+    kommunenummer: string | null
+  }>
+
+  const shards = new Map<string, CompactSearchEntry[]>()
+  let count = 0
+
+  for (const row of rows) {
+    const prefix = searchPrefix(row.navn)
+    let shard = shards.get(prefix)
+    if (!shard) {
+      shard = []
+      shards.set(prefix, shard)
+    }
+    shard.push([row.orgnr, row.navn, row.org_type, row.kommunenummer ?? ''])
+    count++
+  }
+
+  const prefixes: string[] = []
+  for (const [prefix, entries] of shards) {
+    const json = JSON.stringify(entries)
+    const gzPath = join(searchDir, `${prefix}.json.gz`)
+    writeFileSync(gzPath, gzipSync(json))
+    prefixes.push(prefix)
+  }
+
+  writeFileSync(
+    join(searchDir, 'index.json'),
+    JSON.stringify({ prefixes: prefixes.sort(), shardCount: shards.size }),
+  )
+
+  db.close()
+  console.log(`search shards: ${shards.size} shards, ${count.toLocaleString('nb-NO')} orgs`)
+  return count
 }
 
 async function exportSearchIndexPhase(): Promise<number> {
@@ -274,17 +401,6 @@ async function exportSearchIndexPhase(): Promise<number> {
   mkdirSync(outputDir, { recursive: true })
   console.log('Exporting search-index.json…')
   const count = await writeJsonRows('search-index.json', iterateSearchIndex(db), { gzipOnly: true })
-  db.close()
-  return count
-}
-
-async function exportGeocodedPointsPhase(): Promise<number> {
-  const db = openDatabase(DEFAULT_DB_PATH)
-  mkdirSync(outputDir, { recursive: true })
-  console.log('Exporting geocoded-points.json…')
-  const count = await writeJsonRows('geocoded-points.json', iterateGeocodedPoints(db), {
-    gzipOnly: true,
-  })
   db.close()
   return count
 }
@@ -323,9 +439,13 @@ async function main() {
     return
   }
 
-  if (phase === 'geocoded-points') {
-    const count = await exportGeocodedPointsPhase()
-    console.log(`geocoded-points: ${count.toLocaleString('nb-NO')} points`)
+  if (phase === 'detail-shards') {
+    await exportDetailShardsPhase()
+    return
+  }
+
+  if (phase === 'search-shards') {
+    await exportSearchShardsPhase()
     return
   }
 
@@ -363,7 +483,8 @@ async function main() {
   console.log('Exporting municipality-breakdown.json…')
   const breakdownCount = await writeJsonRows(
     'municipality-breakdown.json',
-    iterateMunicipalityBreakdown(db),
+    iterateMunicipalityBreakdownTuples(db),
+    { gzipOnly: true },
   )
 
   writeJson('naeringskoder.json', {
@@ -384,16 +505,8 @@ async function main() {
 
   db.close()
 
-  await runPhaseInChild('search-index')
-
-  const skipGeocodedPoints =
-    process.env.GEOCODED_POINTS_SKIP_EXPORT === '1' ||
-    existsSync(join(outputDir, 'geocoded-points.json.gz'))
-  if (skipGeocodedPoints) {
-    console.log('Skipping geocoded-points export (GEOCODED_POINTS_SKIP_EXPORT=1)')
-  } else {
-    await runPhaseInChild('geocoded-points')
-  }
+  await runPhaseInChild('detail-shards')
+  await runPhaseInChild('search-shards')
 
   const districtsManifest = join(process.cwd(), 'public/data/districts/manifest.json')
   const skipDistricts = process.env.DISTRICTS_SKIP_EXPORT === '1' && existsSync(districtsManifest)

@@ -63,34 +63,7 @@ export const ORG_TYPE_SPECTRUM: readonly string[] = [
   'STAT',
 ]
 
-const SPECTRUM_HUE_START = 18
-const SPECTRUM_HUE_SPAN = 268
-const SPECTRUM_SATURATION = 68
-const SPECTRUM_LIGHTNESS = 46
-
 const UNKNOWN_TAIL_SLOTS = 8
-
-function hslToHex(h: number, s: number, l: number): string {
-  const saturation = s / 100
-  const lightness = l / 100
-  const chroma = saturation * Math.min(lightness, 1 - lightness)
-
-  const hueToRgb = (offset: number) => {
-    const k = (offset + h / 30) % 12
-    const channel = lightness - chroma * Math.max(Math.min(k - 3, 9 - k, 1), -1)
-    return Math.round(255 * channel)
-      .toString(16)
-      .padStart(2, '0')
-  }
-
-  return `#${hueToRgb(0)}${hueToRgb(8)}${hueToRgb(4)}`
-}
-
-function spectrumHue(position: number, span: number): number {
-  if (span <= 0) return SPECTRUM_HUE_START + SPECTRUM_HUE_SPAN / 2
-  const t = Math.min(1, Math.max(0, position / span))
-  return SPECTRUM_HUE_START + t * SPECTRUM_HUE_SPAN
-}
 
 /** Stable spectrum position for an org-type code (0 = most individual-like). */
 export function spectrumPosition(kode: string): number {
@@ -104,11 +77,10 @@ export function spectrumPosition(kode: string): number {
   return ORG_TYPE_SPECTRUM.length + (hash % UNKNOWN_TAIL_SLOTS)
 }
 
+import { familyColorForOrgType } from './orgTypeFamilies'
+
 export function colorForOrgType(kode: string, _allTypes: string[] = []): string {
-  const position = spectrumPosition(kode)
-  const span = ORG_TYPE_SPECTRUM.length + UNKNOWN_TAIL_SLOTS - 1
-  const hue = spectrumHue(position, span)
-  return hslToHex(hue, SPECTRUM_SATURATION, SPECTRUM_LIGHTNESS)
+  return familyColorForOrgType(kode)
 }
 
 /** MapLibre `circle-color` expression keyed on the `orgType` property */
@@ -116,7 +88,7 @@ export function orgTypeColorExpression(allTypes: string[]): ExpressionSpecificat
   const uniqueTypes = [...new Set(allTypes)].sort(
     (left, right) => spectrumPosition(left) - spectrumPosition(right),
   )
-  const expression: unknown[] = ['match', ['get', 'orgType']]
+  const expression: unknown[] = ['match', ['coalesce', ['get', 't'], ['get', 'orgType']]]
 
   for (const kode of uniqueTypes) {
     expression.push(kode, colorForOrgType(kode, uniqueTypes))

@@ -25,10 +25,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # 11d5960a326750d5838078e36cf38b85af677262
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4 # 49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
           cache: yarn
@@ -51,10 +51,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # 11d5960a326750d5838078e36cf38b85af677262
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4 # 49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
           cache: yarn
@@ -75,12 +75,14 @@ jobs:
             gh release download points --pattern 'points.pmtiles' --dir public/data --clobber
             gh release download points --pattern 'manifest.json' --dir public/data/points --clobber
             echo "Loaded vector tiles from release"
-            echo "GEOCODED_POINTS_SKIP_EXPORT=1" >> "$GITHUB_ENV"
 
-            if gh release download points --pattern 'geocoded-points.json.gz' --dir public/data/api --clobber 2>/dev/null; then
-              echo "Loaded geocoded points from release"
+            if gh release download points --pattern 'static-api.tar.gz' --dir public/data --clobber 2>/dev/null; then
+              tar -C public/data/api -xzf public/data/static-api.tar.gz
+              rm -f public/data/static-api.tar.gz
+              echo "Loaded static API assets from release"
+              echo "STATIC_API_PREBUILT=1" >> "$GITHUB_ENV"
             else
-              echo "No geocoded-points.json.gz in points release yet"
+              echo "No static-api.tar.gz in points release yet"
             fi
 
             if gh release download points --pattern 'districts.tar.gz' --dir public/data --clobber 2>/dev/null; then
@@ -92,38 +94,43 @@ jobs:
               echo "No districts.tar.gz in points release – will rebuild"
             fi
           else
-            echo "No points release yet – dots mode will use exported geocoded-points.json"
+            echo "No points release yet – dots mode will use vector tiles"
           fi
 
           if [ "${DISTRICTS_PREBUILT:-}" != "1" ]; then
             yarn download-grunnkretser
           fi
 
-          if gh release view database >/dev/null 2>&1; then
-            gh release download database --pattern 'organizations.db' --dir data --clobber
-            echo "Loaded organizations.db from release"
-          else
-            echo "No database release yet – static API export will be skipped"
+          # Only download the database if static API was not pre-built
+          if [ "${STATIC_API_PREBUILT:-}" != "1" ]; then
+            if gh release view database >/dev/null 2>&1; then
+              gh release download database --pattern 'organizations-publish.db' --dir data --clobber 2>/dev/null \
+                || gh release download database --pattern 'organizations.db' --dir data --clobber 2>/dev/null \
+                || true
+              if [ -f data/organizations-publish.db ]; then
+                mv data/organizations-publish.db data/organizations.db
+              fi
+              if [ -f data/organizations.db ]; then
+                echo "Loaded organizations.db from release (for static API export)"
+              fi
+            fi
           fi
 
-      - name: Export static API
-        if: hashFiles('data/organizations.db') != ''
+      - name: Export static API (fallback if not pre-built)
+        if: env.STATIC_API_PREBUILT != '1' && hashFiles('data/organizations.db') != ''
         env:
           DISTRICTS_SKIP_EXPORT: ${{ env.DISTRICTS_PREBUILT == '1' && '1' || '' }}
-          GEOCODED_POINTS_SKIP_EXPORT: ${{ env.GEOCODED_POINTS_SKIP_EXPORT == '1' && '1' || '' }}
         run: yarn export-static-api
 
       - name: Build site
         env:
           GITHUB_PAGES: 'true'
           VITE_BASE: /
-          VITE_STATIC_API: ${{ hashFiles('data/organizations.db') != '' && 'true' || '' }}
-          # PMTiles are probed at runtime — do not bake a flag that skips
-          # geocoded-points.json (needed for address stats + GeoJSON fallback).
+          VITE_STATIC_API: ${{ (env.STATIC_API_PREBUILT == '1' || hashFiles('data/organizations.db') != '') && 'true' || '' }}
         run: yarn build
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v3 # 56afc609e74202658d3ffba0e8f6dda462b719fa
         with:
           path: dist
 
@@ -137,4 +144,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v4 # d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e

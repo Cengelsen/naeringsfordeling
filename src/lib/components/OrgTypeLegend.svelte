@@ -1,17 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { orgTypeLabels } from '../utils/orgTypeColors'
+  import { ORG_TYPE_FAMILIES } from '../utils/orgTypeFamilies'
 
   interface Props {
     items: Array<{ kode: string; label: string; color: string }>
   }
 
-  let { items }: Props = $props()
+  let { items: _items }: Props = $props()
 
   let open = $state(false)
   let root: HTMLDivElement | undefined
 
-  const sorted = $derived(orgTypeLabels([...items]))
+  const families = ORG_TYPE_FAMILIES
 
   function closeLegend() {
     open = false
@@ -67,17 +67,22 @@
           aria-label="Skjul fargeforklaring"
           onclick={closeLegend}
         >
-          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2">
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
             <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
           </svg>
         </button>
       </div>
       <ul>
-        {#each sorted as item (item.kode)}
+        {#each families as family (family.id)}
           <li>
-            <span class="swatch" style:background={item.color}></span>
-            <span class="code">{item.kode}</span>
-            <span class="label">{item.label}</span>
+            <span class="swatch" style:background={family.color}></span>
+            <span class="label">{family.label}</span>
           </li>
         {/each}
       </ul>
@@ -92,11 +97,25 @@
     onclick={toggleLegend}
   >
     {#if open}
-      <svg viewBox="0 0 24 24" aria-hidden="true" class="legend-icon" fill="none" stroke="currentColor" stroke-width="2">
+      <svg
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        class="legend-icon"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
         <path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
       </svg>
     {:else}
-      <svg viewBox="0 0 24 24" aria-hidden="true" class="legend-icon" fill="none" stroke="currentColor" stroke-width="1.75">
+      <svg
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        class="legend-icon"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.75"
+      >
         <circle cx="7" cy="8" r="2.25" fill="#38bdf8" stroke="none" />
         <circle cx="14" cy="7" r="2.25" fill="#f59e0b" stroke="none" />
         <circle cx="10.5" cy="14.5" r="2.25" fill="#34d399" stroke="none" />
@@ -210,11 +229,11 @@
 
   li {
     display: grid;
-    grid-template-columns: 12px 2.5rem 1fr;
-    gap: 0.45rem;
+    grid-template-columns: 12px 1fr;
+    gap: 0.5rem;
     align-items: center;
     font-size: 0.78rem;
-    padding: 0.2rem 0;
+    padding: 0.25rem 0;
   }
 
   .swatch {
@@ -222,11 +241,6 @@
     height: 10px;
     border-radius: 50%;
     border: 1px solid rgba(255, 255, 255, 0.2);
-  }
-
-  .code {
-    font-family: ui-monospace, monospace;
-    color: #7dd3fc;
   }
 
   .label {

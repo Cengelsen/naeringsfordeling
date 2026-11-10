@@ -16,7 +16,6 @@ const IDB_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 class DotsCache {
   private memory = new Map<string, DotsCacheEntry>()
-  private order: string[] = []
   private dbPromise: Promise<IDBDatabase | null> | null = null
 
   private openDb(): Promise<IDBDatabase | null> {
@@ -43,15 +42,12 @@ class DotsCache {
 
   setMemory(key: string, entry: DotsCacheEntry) {
     if (this.memory.has(key)) {
-      this.order = this.order.filter((item) => item !== key)
+      this.memory.delete(key)
     }
-
     this.memory.set(key, entry)
-    this.order.push(key)
-
-    while (this.order.length > MAX_MEMORY_ENTRIES) {
-      const oldest = this.order.shift()
-      if (oldest) this.memory.delete(oldest)
+    while (this.memory.size > MAX_MEMORY_ENTRIES) {
+      const oldest = this.memory.keys().next().value
+      if (oldest != null) this.memory.delete(oldest)
     }
   }
 
@@ -92,7 +88,6 @@ class DotsCache {
 
   clear() {
     this.memory.clear()
-    this.order = []
   }
 }
 

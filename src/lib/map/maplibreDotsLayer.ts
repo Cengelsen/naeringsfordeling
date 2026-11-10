@@ -12,11 +12,7 @@ import {
   VECTOR_TILES_LAYER,
   type VectorTilesLayerSpec,
 } from './vectorTiles'
-import {
-  groupPointsByLocation,
-  isPreGroupedAddressPoint,
-  orgnrsFromGroup,
-} from './addressGroups'
+import { groupPointsByLocation, isPreGroupedAddressPoint, orgnrsFromGroup } from './addressGroups'
 import { removeOrphanMaplibreGlLayers } from './maplibreLeaflet'
 
 const SOURCE_ID = 'org-dots'
@@ -57,8 +53,7 @@ function addressPointToFeature(
 ): FeatureCollection<Point>['features'][number] {
   const orgCount = point.orgCount ?? 1
   const orgnrs = point.orgnrs ?? point.orgnr
-  const typeList =
-    point.typeList ?? (point.orgType === 'MIXED' ? ',,' : `,${point.orgType},`)
+  const typeList = point.typeList ?? (point.orgType === 'MIXED' ? ',,' : `,${point.orgType},`)
   const naeringskode = point.naeringskode ?? ''
   const properties: Record<string, string | number> = {
     orgnr: point.orgnr,
@@ -133,6 +128,8 @@ export interface DotFilters {
   naeringskodeSections: string[]
   employeeBands: EmployeeBand[]
   entityKinds: ('enhet' | 'underenhet')[]
+  excludeKonkurs: boolean
+  excludeUnderAvvikling: boolean
 }
 
 export interface MaplibreDotsLayerOptions {
@@ -160,10 +157,23 @@ export interface MaplibreDotsLayerOptions {
   onVectorTilesError?: (message: string) => void
 }
 
+export interface ViewportTileStats {
+  featureCount: number
+  byOrgType: Record<string, number>
+}
+
+export interface AggregateFilteredCounts {
+  /** Map from districtId → filtered org count in that district. */
+  byDistrict: Map<string, number>
+  /** Map from districtId → total org count (for computing opacity ratio). */
+  totalByDistrict: Map<string, number>
+}
+
 export interface MaplibreDotsController {
   setPoints(points: OrganizationPoint[]): void
   setVisibleOrgTypes(orgTypes: string[]): void
   setDotFilters(filters: DotFilters): void
+  setAggregateFilteredCounts(counts: AggregateFilteredCounts | null): void
   setClustering(enabled: boolean): void
   setStale(stale: boolean): void
   /**
@@ -173,6 +183,7 @@ export interface MaplibreDotsController {
   setVisible(visible: boolean): void
   bringToFront(): void
   countRenderedFeatures(): number
+  queryViewportStats(): ViewportTileStats
   remove(): void
 }
 
@@ -196,6 +207,8 @@ export function createMaplibreDotsLayer(
     naeringskodeSections: [],
     employeeBands: [],
     entityKinds: [],
+    excludeKonkurs: true,
+    excludeUnderAvvikling: true,
   }
   let currentPoints: OrganizationPoint[] = []
   let pendingPoints: OrganizationPoint[] | null = null
@@ -208,9 +221,7 @@ export function createMaplibreDotsLayer(
     })
   }
 
-  let clickLayers = vectorMode
-    ? [...lodClickLayerIds(), POINT_LAYER_ID]
-    : [POINT_LAYER_ID]
+  let clickLayers = vectorMode ? [...lodClickLayerIds(), POINT_LAYER_ID] : [POINT_LAYER_ID]
 
   if (vectorMode) ensurePmtilesProtocol()
 
@@ -258,15 +269,49 @@ export function createMaplibreDotsLayer(
     return ['in', ['get', property], ['literal', values]]
   }
 
+  /**
+   * Build a MapLibre filter expression from DotFilters using the compact tile
+   * properties: t (org_type), s (NACE section), b (employee band),
+   * k (entity kind, absent = enhet), f (bit flags: 1=konkurs, 2=under_avvikling).
+   */
   function addressFilter(): maplibregl.FilterSpecification {
     const parts: maplibregl.FilterSpecification[] = []
-    const typeFilter = propertyInFilter('orgType', dotFilters.orgTypes)
-    if (typeFilter) {
-      const typeListMatches = dotFilters.orgTypes.map(
-        (orgType) => ['in', `,${orgType},`, ['get', 'typeList']] as maplibregl.FilterSpecification,
-      )
-      parts.push(['any', typeFilter, ...typeListMatches] as maplibregl.FilterSpecification)
+
+    const typeFilter = propertyInFilter('t', dotFilters.orgTypes)
+    if (typeFilter) parts.push(typeFilter)
+
+    if (dotFilters.naeringskodeSections.length > 0) {
+      const sFilter = propertyInFilter('s', dotFilters.naeringskodeSections)
+      if (sFilter) parts.push(sFilter)
     }
+
+    if (dotFilters.employeeBands.length > 0) {
+      const bFilter = propertyInFilter('b', dotFilters.employeeBands as string[])
+      if (bFilter) parts.push(bFilter)
+    }
+
+    if (dotFilters.entityKinds.length > 0) {
+      if (dotFilters.entityKinds.length === 1 && dotFilters.entityKinds[0] === 'enhet') {
+        parts.push(['!', ['has', 'k']] as unknown as maplibregl.FilterSpecification)
+      } else if (
+        dotFilters.entityKinds.length === 1 &&
+        dotFilters.entityKinds[0] === 'underenhet'
+      ) {
+        parts.push(['==', ['get', 'k'], 'u'] as maplibregl.FilterSpecification)
+      }
+    }
+
+    if (dotFilters.excludeKonkurs) {
+      parts.push(['==', ['%', ['get', 'f'], 2], 0] as maplibregl.FilterSpecification)
+    }
+    if (dotFilters.excludeUnderAvvikling) {
+      parts.push([
+        '==',
+        ['%', ['floor', ['/', ['get', 'f'], 2]], 2],
+        0,
+      ] as maplibregl.FilterSpecification)
+    }
+
     return parts.length > 0 ? (['all', ...parts] as maplibregl.FilterSpecification) : true
   }
 
@@ -342,7 +387,12 @@ export function createMaplibreDotsLayer(
           filter: aggregateLayerFilter(),
           paint: {
             'fill-color': bakedColorExpression(),
-            'fill-opacity': 0.42,
+            'fill-opacity': [
+              'case',
+              ['!=', ['feature-state', 'filteredRatio'], null],
+              ['*', 0.42, ['feature-state', 'filteredRatio']],
+              0.42,
+            ] as unknown as maplibregl.ExpressionSpecification,
             'fill-outline-color': '#0f172a',
           },
         })
@@ -382,15 +432,9 @@ export function createMaplibreDotsLayer(
       maxzoom: 24,
       filter: addressFilter(),
       paint: {
-        'circle-color':
-          currentTypes.length > 0 ? orgTypeColorExpression(currentTypes) : '#64748b',
+        'circle-color': currentTypes.length > 0 ? orgTypeColorExpression(currentTypes) : '#64748b',
         'circle-radius': pointRadiusExpression(options.dotsDetailMinZoom),
-        'circle-stroke-width': [
-          'case',
-          ['>', ['coalesce', ['get', 'orgCount'], 1], 1],
-          1.5,
-          0.75,
-        ],
+        'circle-stroke-width': ['case', ['>', ['coalesce', ['get', 'orgCount'], 1], 1], 1.5, 0.75],
         'circle-stroke-color': '#0f172a',
         'circle-opacity': POINT_OPACITY_DEFAULT,
       },
@@ -401,14 +445,14 @@ export function createMaplibreDotsLayer(
     if (!styleReady) return
 
     removeDataLayers()
-    clickLayers = vectorMode
-      ? [...lodClickLayerIds(), POINT_LAYER_ID]
-      : [POINT_LAYER_ID]
+    clickLayers = vectorMode ? [...lodClickLayerIds(), POINT_LAYER_ID] : [POINT_LAYER_ID]
 
     if (vectorMode && options.vectorTilesUrl) {
       mlMap.addSource(SOURCE_ID, {
         type: 'vector',
         url: options.vectorTilesUrl,
+        maxzoom: 15,
+        promoteId: 'districtId',
       })
       addAggregateLayers()
       addAddressLayers()
@@ -453,21 +497,38 @@ export function createMaplibreDotsLayer(
     }
   }
 
+  const ERROR_THRESHOLD = 5
+  const ERROR_WINDOW_MS = 10_000
+  const errorTimestamps: number[] = []
+
   mlMap.on('error', (event) => {
     if (!vectorMode) return
-    options.onVectorTilesError?.(event.error?.message ?? 'Vector tile source failed')
+    const now = Date.now()
+    errorTimestamps.push(now)
+    while (errorTimestamps.length > 0 && now - errorTimestamps[0]! > ERROR_WINDOW_MS) {
+      errorTimestamps.shift()
+    }
+    if (errorTimestamps.length >= ERROR_THRESHOLD) {
+      options.onVectorTilesError?.(event.error?.message ?? 'Vector tile source failed')
+    }
   })
 
   mlMap.on('load', initStyle)
   mlMap.once('styledata', initStyle)
 
   function orgnrsFromFeature(feature: maplibregl.MapGeoJSONFeature): string[] {
-    const orgCount = feature.properties?.orgCount as number | undefined
-    const orgnrsProp = feature.properties?.orgnrs as string | undefined
+    const props = feature.properties
+    if (!props) return []
+    // New compact format: `o` is the orgnr as integer
+    const o = props.o as number | undefined
+    if (o != null) return [String(o)]
+    // Legacy format fallback
+    const orgCount = props.orgCount as number | undefined
+    const orgnrsProp = props.orgnrs as string | undefined
     if (orgCount != null && orgCount > 1 && orgnrsProp) {
       return orgnrsProp.split(',').filter(Boolean)
     }
-    const orgnr = feature.properties?.orgnr as string | undefined
+    const orgnr = props.orgnr as string | undefined
     return orgnr ? [orgnr] : []
   }
 
@@ -476,6 +537,15 @@ export function createMaplibreDotsLayer(
   ): Partial<OrganizationPoint> | null {
     const props = feature.properties
     if (!props) return null
+    // New compact format
+    const o = props.o as number | undefined
+    if (o != null) {
+      return {
+        orgnr: String(o),
+        orgType: (props.t as string | undefined) ?? '',
+      }
+    }
+    // Legacy format fallback
     const orgnr = props.orgnr as string | undefined
     if (!orgnr) return null
     return {
@@ -546,12 +616,27 @@ export function createMaplibreDotsLayer(
     options.onMarkerClick(orgnrs, L.latLng(lat, lng), hintFromFeature(pointFeature))
   }
 
-  function handleLeafletMouseMove(event: L.LeafletMouseEvent) {
+  let pendingMouseEvent: L.LeafletMouseEvent | null = null
+  let rafScheduled = false
+
+  function processMouseMove() {
+    rafScheduled = false
+    const event = pendingMouseEvent
+    if (!event) return
+    pendingMouseEvent = null
     if (!ready) {
       map.getContainer().style.cursor = ''
       return
     }
     map.getContainer().style.cursor = featuresAtClick(event.latlng).length > 0 ? 'pointer' : ''
+  }
+
+  function handleLeafletMouseMove(event: L.LeafletMouseEvent) {
+    pendingMouseEvent = event
+    if (!rafScheduled) {
+      rafScheduled = true
+      requestAnimationFrame(processMouseMove)
+    }
   }
 
   map.on('click', handleLeafletClick)
@@ -580,8 +665,27 @@ export function createMaplibreDotsLayer(
         naeringskodeSections: [...filters.naeringskodeSections],
         employeeBands: [...filters.employeeBands],
         entityKinds: [...filters.entityKinds],
+        excludeKonkurs: filters.excludeKonkurs,
+        excludeUnderAvvikling: filters.excludeUnderAvvikling,
       }
       if (ready) applyTypeVisibility()
+    },
+    setAggregateFilteredCounts(counts: AggregateFilteredCounts | null) {
+      if (!ready || !vectorMode) return
+      for (const spec of lodLayers) {
+        if (!isPolygonLodLayer(spec.name)) continue
+        const sourceLayer = spec.name
+        if (!mlMap.getSource(SOURCE_ID)) continue
+        if (!counts) continue
+        for (const [districtId, filtered] of counts.byDistrict) {
+          const total = counts.totalByDistrict.get(districtId) ?? 1
+          const ratio = total > 0 ? filtered / total : 0
+          mlMap.setFeatureState(
+            { source: SOURCE_ID, sourceLayer, id: districtId },
+            { filteredRatio: ratio },
+          )
+        }
+      }
     },
     setStale(nextStale) {
       stale = nextStale
@@ -607,13 +711,28 @@ export function createMaplibreDotsLayer(
       if (pane) pane.appendChild(container)
     },
     countRenderedFeatures() {
-      if (!ready) return 0
+      return this.queryViewportStats().featureCount
+    },
+    queryViewportStats(): ViewportTileStats {
+      if (!ready) return { featureCount: 0, byOrgType: {} }
       const layers = clickLayers.filter((id) => mlMap.getLayer(id))
-      if (layers.length === 0) return 0
+      if (layers.length === 0) return { featureCount: 0, byOrgType: {} }
       const bounds = map.getBounds()
       const sw = mlMap.project([bounds.getWest(), bounds.getSouth()])
       const ne = mlMap.project([bounds.getEast(), bounds.getNorth()])
-      return mlMap.queryRenderedFeatures([sw, ne], { layers }).length
+      const features = mlMap.queryRenderedFeatures([sw, ne], { layers })
+      const byOrgType: Record<string, number> = {}
+      const seen = new Set<number>()
+      let count = 0
+      for (const f of features) {
+        const o = f.properties?.o as number | undefined
+        if (o != null && seen.has(o)) continue
+        if (o != null) seen.add(o)
+        count++
+        const t = (f.properties?.t ?? f.properties?.orgType ?? '') as string
+        if (t) byOrgType[t] = (byOrgType[t] ?? 0) + 1
+      }
+      return { featureCount: count, byOrgType }
     },
     remove() {
       map.off('click', handleLeafletClick)

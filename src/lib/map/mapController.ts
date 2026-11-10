@@ -26,10 +26,11 @@ import {
   lookupOrganizationLocal,
   fetchOrganizationPoints,
   fetchDistrictStats,
+  computeAggregateFilteredCounts,
   limitForZoom,
 } from '../services/api'
 import { dotsCache, dotsCacheKey, expandBbox } from './dotsCache'
-import { canUseStaticTiles, filterPointsByMapFilters } from './points'
+import { filterPointsByMapFilters } from './points'
 import { snapBboxToTileGrid } from '../../../shared/tiles'
 import type { DotFilters } from './maplibreDotsLayer'
 import {
@@ -37,7 +38,6 @@ import {
   lodTilesAvailable,
   orgDetailTilesCoverLeafletZoom,
   pointsLayerFromManifest,
-  prefetchOrganizationTiles,
   probeVectorTiles,
   vectorTilesSourceUrl,
   type VectorTilesManifest,
@@ -50,7 +50,7 @@ import {
 } from './districtColors'
 import { createDotsLayer, type DotsLayerController } from './dotsLayer'
 import { forEachPathLayer } from './pathLayers'
-import { formatOrgTypeBreakdownFromRecord } from './organizationPopups'
+import { escapeHtml, formatOrgTypeBreakdownFromRecord } from './organizationPopups'
 import {
   showOrganizationDetails as showOrganizationDetailsImpl,
   handleMarkerClick as handleMarkerClickImpl,
@@ -103,7 +103,6 @@ export class MapController {
   private kommuneBoundsByNummer = new Map<string, GeoBounds>()
   private dotsControllerUsesVector = false
   private dotsControllerUsesLod = false
-  private lastPrefetchAt = 0
 
   private points: OrganizationPoint[] = []
   private allPoints: OrganizationPoint[] = []
@@ -150,13 +149,8 @@ export class MapController {
     return this.districtColorsManifest !== null
   }
 
-  private vectorTilesReady(settings: MapSettings): boolean {
-    return (
-      this.vectorTilesManifest !== null &&
-      !this.vectorTilesDisabled &&
-      !this.webglUnavailable &&
-      canUseStaticTiles(settings)
-    )
+  private vectorTilesReady(_settings: MapSettings): boolean {
+    return this.vectorTilesManifest !== null && !this.vectorTilesDisabled && !this.webglUnavailable
   }
 
   private detailOrgTilesReady(settings: MapSettings): boolean {
@@ -289,7 +283,9 @@ export class MapController {
     } catch (err) {
       L.popup({ maxWidth: 320 })
         .setLatLng(this.map.getCenter())
-        .setContent(err instanceof Error ? err.message : 'Kunne ikke finne organisasjon')
+        .setContent(
+          escapeHtml(err instanceof Error ? err.message : 'Kunne ikke finne organisasjon'),
+        )
         .openOn(this.map)
     }
   }
@@ -346,6 +342,11 @@ export class MapController {
 
   private disableVectorTiles(message: string, settings: MapSettings): void {
     this.vectorTilesDisabled = true
+    try {
+      sessionStorage.setItem('vectorTilesDisabled', '1')
+    } catch {
+      // sessionStorage may be unavailable
+    }
     this.cb.onVectorTilesDisabledChange(true)
     this.removeDotsController()
     this.scheduleDotsReload(settings, 0)
@@ -354,6 +355,17 @@ export class MapController {
       phase: 'idle',
       message: `Vektorfliser utilgjengelige (${message}) – bruker database`,
     })
+  }
+
+  retryVectorTiles(settings: MapSettings): void {
+    this.vectorTilesDisabled = false
+    try {
+      sessionStorage.removeItem('vectorTilesDisabled')
+    } catch {
+      // sessionStorage may be unavailable
+    }
+    this.cb.onVectorTilesDisabledChange(false)
+    void this.probeAssets(settings)
   }
 
   private removeDistrictColorLayer(): void {
@@ -378,19 +390,6 @@ export class MapController {
     this.geoLayer = L.geoJSON(geojson, {
       style: (feature) => this.styleKommuneFeature(feature as KommuneFeature, settings, counts),
     }).addTo(this.map)
-  }
-
-  private prefetchDetailTiles(settings: MapSettings): void {
-    if (!this.detailOrgTilesReady(settings)) return
-    const zoom = this.map.getZoom()
-    if (zoom < settings.dotsDetailMinZoom - 2) return
-    const bakedMin =
-      this.vectorTilesManifest?.layers?.find((l) => l.name === 'organizations')?.minZoom ??
-      settings.dotsDetailMinZoom - 2
-    void prefetchOrganizationTiles(this.map.getBounds(), {
-      leafletZoom: Math.max(zoom, settings.dotsDetailMinZoom),
-      bakedMinZoom: bakedMin,
-    })
   }
 
   private kommunerInBounds(geojson: FeatureCollection | null): string[] {
@@ -469,11 +468,21 @@ export class MapController {
       naeringskodeSections: settings.naeringskodeSections,
       employeeBands: settings.employeeBands,
       entityKinds: settings.entityKinds,
+      excludeKonkurs: settings.excludeKonkurs,
+      excludeUnderAvvikling: settings.excludeUnderAvvikling,
     }
   }
 
   private applyDotFilters(settings: MapSettings): void {
     this.dotsController?.setDotFilters(this.dotFiltersFromSettings(settings))
+    this.updateAggregateFilteredCounts(settings)
+  }
+
+  private updateAggregateFilteredCounts(settings: MapSettings): void {
+    if (!this.dotsController) return
+    void computeAggregateFilteredCounts(settings).then((counts) => {
+      this.dotsController?.setAggregateFilteredCounts(counts)
+    })
   }
 
   private ensureDotsController(settings: MapSettings, orgForms: Organisasjonsform[]): void {
@@ -547,8 +556,22 @@ export class MapController {
     return true
   }
 
+  private kommuneCountMap = new Map<string, number>()
+  private kommuneCountMapSource: MunicipalityCount[] | null = null
+
+  private ensureKommuneCountMap(counts: MunicipalityCount[]): Map<string, number> {
+    if (this.kommuneCountMapSource !== counts) {
+      this.kommuneCountMap.clear()
+      for (const { kommunenummer, count } of counts) {
+        this.kommuneCountMap.set(kommunenummer, count)
+      }
+      this.kommuneCountMapSource = counts
+    }
+    return this.kommuneCountMap
+  }
+
   private kommuneCount(kommunenummer: string, counts: MunicipalityCount[]): number {
-    return counts.find((c) => c.kommunenummer === kommunenummer)?.count ?? 0
+    return this.ensureKommuneCountMap(counts).get(kommunenummer) ?? 0
   }
 
   private fylkeCount(fylkesnummer: string, counts: MunicipalityCount[]): number {
@@ -618,9 +641,10 @@ export class MapController {
     orgForms: Organisasjonsform[],
   ): Promise<void> {
     const levelLabel = options.level === 'fylke' ? 'Fylke' : 'Kommune'
+    const safeLabel = escapeHtml(options.label)
     const popup = L.popup({ maxWidth: 320 })
       .setLatLng(options.latlng)
-      .setContent(`<strong>${options.label}</strong><br>Laster…`)
+      .setContent(`<strong>${safeLabel}</strong><br>Laster…`)
       .openOn(this.map)
 
     try {
@@ -628,14 +652,14 @@ export class MapController {
       const total = stats.total > 0 ? stats.total : options.fallbackTotal
       const breakdown = formatOrgTypeBreakdownFromRecord(stats.byOrgType, orgForms)
       popup.setContent(
-        `<strong>${options.label}</strong><br>
-         ${levelLabel} ${options.districtId}<br>
+        `<strong>${safeLabel}</strong><br>
+         ${levelLabel} ${escapeHtml(options.districtId)}<br>
          <strong>${total.toLocaleString('nb-NO')}</strong> organisasjoner${breakdown}`,
       )
     } catch {
       popup.setContent(
-        `<strong>${options.label}</strong><br>
-         ${levelLabel} ${options.districtId}<br>
+        `<strong>${safeLabel}</strong><br>
+         ${levelLabel} ${escapeHtml(options.districtId)}<br>
          <strong>${options.fallbackTotal.toLocaleString('nb-NO')}</strong> organisasjoner`,
       )
     }
@@ -755,8 +779,19 @@ export class MapController {
       this.updateDotsState({ renderedFeatureCount: 0 })
       return
     }
-    const count = this.dotsController?.countRenderedFeatures?.() ?? 0
-    this.updateDotsState({ renderedFeatureCount: count })
+    const stats = this.dotsController?.queryViewportStats?.() ?? { featureCount: 0, byOrgType: {} }
+    this.updateDotsState({
+      renderedFeatureCount: stats.featureCount,
+      viewportSummary: {
+        totalInViewport: stats.featureCount,
+        geocodedInBbox: stats.featureCount,
+        addressesInBbox: 0,
+        ungeocodedInViewport: 0,
+        byOrgType: stats.byOrgType,
+        renderMode: 'individual',
+        kommunerInViewport: 0,
+      },
+    })
   }
 
   private async loadViewportSummary(
@@ -900,7 +935,6 @@ export class MapController {
     this.applyDotFilters(settings)
     this.dotsController?.setStale(false)
     this.dotsController?.bringToFront()
-    this.prefetchDetailTiles(settings)
     this.updateDotsState({
       loading: false,
       phase: 'idle',
@@ -975,7 +1009,6 @@ export class MapController {
       if (this.detailOrgTilesReady(settings)) {
         this.ensureDotsController(settings, orgForms)
         this.dotsController?.setVisible(true)
-        this.prefetchDetailTiles(settings)
       } else if (!this.useVectorDotsController(settings)) {
         this.removeDotsController()
       }
@@ -1157,26 +1190,10 @@ export class MapController {
   }
 
   scheduleDotsReloadOnMove(settings: MapSettings): void {
-    if (this.detailOrgTilesReady(settings)) {
-      this.prefetchDetailTiles(settings)
-    }
     this.scheduleDotsReload(settings, DOTS_MOVE_RELOAD_DELAY_MS)
   }
 
-  schedulePrefetchDuringMove(settings: MapSettings): void {
-    if (!this.detailOrgTilesReady(settings)) return
-    const zoom = this.map.getZoom()
-    if (zoom < settings.dotsDetailMinZoom - 2) return
-    const now = performance.now()
-    if (now - this.lastPrefetchAt < 120) return
-    this.lastPrefetchAt = now
-    this.prefetchDetailTiles(settings)
-  }
-
   scheduleDotsReloadOnZoom(settings: MapSettings): void {
-    if (this.detailOrgTilesReady(settings)) {
-      this.prefetchDetailTiles(settings)
-    }
     this.scheduleDotsReload(settings, 0)
   }
 

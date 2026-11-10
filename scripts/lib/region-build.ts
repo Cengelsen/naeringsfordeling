@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import type Database from 'better-sqlite3'
 import { importBrregForKommuner } from './brreg-local-import.js'
 import {
   DEFAULT_REFERENCE_CACHE_DIR,
@@ -17,7 +16,13 @@ import {
   backfillMetadataFromKartverketBulk,
   geocodeAllFromKartverketBulk,
 } from './local-geocode.js'
-import { getStats, openDatabase, rebuildOrgsRtree, removeDatabaseFiles, setSyncState } from './db.js'
+import {
+  getStats,
+  openDatabase,
+  rebuildOrgsRtree,
+  removeDatabaseFiles,
+  setSyncState,
+} from './db.js'
 import {
   importRegionFromNationalDb,
   listKommunerFromNationalDb,
@@ -63,13 +68,7 @@ export interface RegionBuildOptions {
 }
 
 export type RegionBuildPhase =
-  | 'starting'
-  | 'kartverket-download'
-  | 'kartverket-import'
-  | 'brreg'
-  | 'geocode'
-  | 'index'
-  | 'done'
+  'starting' | 'kartverket-download' | 'kartverket-import' | 'brreg' | 'geocode' | 'index' | 'done'
 
 export interface RegionBuildProgress {
   phase: RegionBuildPhase
@@ -116,7 +115,10 @@ export function slugifyRegionName(name: string): string {
     .replace(/^-+|-+$/g, '')
 }
 
-export function defaultRegionOutputPath(descriptor: RegionDescriptor, baseDir = DEFAULT_REGIONS_DIR): string {
+export function defaultRegionOutputPath(
+  descriptor: RegionDescriptor,
+  baseDir = DEFAULT_REGIONS_DIR,
+): string {
   const subdir = descriptor.kind === 'fylke' ? 'fylker' : 'kommuner'
   return join(baseDir, subdir, `${descriptor.code}-${descriptor.slug}.db`)
 }
@@ -168,14 +170,18 @@ function resolveRegionDataSourceMode(options: RegionBuildOptions): {
 
   if (options.sourceMode === 'cache') {
     if (!cacheAvailable) {
-      throw new Error(`Mangler BRREG referansecache i ${referenceCacheDir}. Kjør yarn build-national-db først.`)
+      throw new Error(
+        `Mangler BRREG referansecache i ${referenceCacheDir}. Kjør yarn build-national-db først.`,
+      )
     }
     return { source: 'cache', nationalDbPath }
   }
 
   if (options.sourceMode === 'national') {
     if (!nationalAvailable) {
-      throw new Error(`Mangler nasjonal database: ${nationalDbPath}. Kjør yarn build-national-db først.`)
+      throw new Error(
+        `Mangler nasjonal database: ${nationalDbPath}. Kjør yarn build-national-db først.`,
+      )
     }
     return { source: 'national', nationalDbPath }
   }
@@ -253,31 +259,13 @@ export const CURRENT_FYLKE_CODES = [
   '56',
 ] as const
 
-const FYLKE_NAMES: Record<string, string> = {
-  '03': 'Oslo',
-  '11': 'Rogaland',
-  '15': 'Møre og Romsdal',
-  '18': 'Nordland',
-  '21': 'Svalbard',
-  '22': 'Jan Mayen',
-  '31': 'Østfold',
-  '32': 'Akershus',
-  '33': 'Buskerud',
-  '34': 'Innlandet',
-  '39': 'Vestfold',
-  '40': 'Telemark',
-  '42': 'Agder',
-  '46': 'Vestland',
-  '50': 'Trøndelag',
-  '55': 'Troms',
-  '56': 'Finnmark',
-}
+import { fylkeName } from '../../shared/fylke-names.js'
 
 function fylkeNameFromKommuner(
   fylkeCode: string,
-  kommuner: Array<{ nummer: string; navn: string }>,
+  _kommuner: Array<{ nummer: string; navn: string }>,
 ): string {
-  return FYLKE_NAMES[fylkeCode] ?? `Fylke ${fylkeCode}`
+  return fylkeName(fylkeCode)
 }
 
 export async function listAllFylker(
@@ -294,8 +282,7 @@ export async function listAllFylker(
     nationalDbPath: options.nationalDbPath,
   })
   const codes = [...new Set(kommuner.map((k) => k.nummer.slice(0, 2)))].sort()
-  const allowed =
-    options.currentOnly === true ? new Set<string>(CURRENT_FYLKE_CODES) : null
+  const allowed = options.currentOnly === true ? new Set<string>(CURRENT_FYLKE_CODES) : null
 
   return codes
     .filter((code) => allowed == null || allowed.has(code))
@@ -304,7 +291,10 @@ export async function listAllFylker(
       code,
       name: fylkeNameFromKommuner(code, kommuner),
       slug: slugifyRegionName(fylkeNameFromKommuner(code, kommuner)),
-      kommuner: kommuner.filter((k) => k.nummer.slice(0, 2) === code).map((k) => k.nummer).sort(),
+      kommuner: kommuner
+        .filter((k) => k.nummer.slice(0, 2) === code)
+        .map((k) => k.nummer)
+        .sort(),
     }))
 }
 
@@ -381,9 +371,7 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
     if (!options.skipKartverket) {
       regionLog(options, '\nSteg 1/4: Kartverket Adresse (regional CSV)…')
       const scope =
-        descriptor.kind === 'kommune'
-          ? { kommune: descriptor.code }
-          : { fylke: descriptor.code }
+        descriptor.kind === 'kommune' ? { kommune: descriptor.code } : { fylke: descriptor.code }
       await downloadAndImportRegionKartverket(db, scope, {
         cacheDir: kartverketCacheDir,
         reuseDownload: reuseDownloads,
@@ -424,8 +412,7 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
         nationalUnderenheterRows: options.nationalBrregUnderenheterRows,
         onBrregProgress: (event) => {
           const hasUnderenheter =
-            !(options.skipUnderenheter ?? false) &&
-            (options.nationalBrregUnderenheterRows ?? 0) > 0
+            !(options.skipUnderenheter ?? false) && (options.nationalBrregUnderenheterRows ?? 0) > 0
           const brregSteps = hasUnderenheter ? 2 : 1
           const stepIndex = event.phase === 'enheter' ? 1 : 2
           const rowGoal =
@@ -443,9 +430,7 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
 
           const fileLabel = event.phase === 'enheter' ? 'enheter' : 'underenheter'
           const displayPhase =
-            brregSteps === 1
-              ? 'BRREG enheter'
-              : `BRREG ${fileLabel} (${stepIndex}/${brregSteps})`
+            brregSteps === 1 ? 'BRREG enheter' : `BRREG ${fileLabel} (${stepIndex}/${brregSteps})`
 
           const rowDetail =
             rowGoal != null && rowGoal > 0
@@ -492,7 +477,10 @@ export async function buildRegionDatabase(options: RegionBuildOptions) {
   }
 
   regionProgress(options, { phase: 'index' })
-  regionLog(options, `\nSteg ${source === 'national' ? '2/2' : '4/4'}: Bygger spatialt indeks (R-tree)…`)
+  regionLog(
+    options,
+    `\nSteg ${source === 'national' ? '2/2' : '4/4'}: Bygger spatialt indeks (R-tree)…`,
+  )
   rebuildOrgsRtree(db)
   setSyncState(db, 'last_sync_at', new Date().toISOString())
 

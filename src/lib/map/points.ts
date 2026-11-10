@@ -1,8 +1,6 @@
 import type { MapFilters, Organization, OrganizationPoint } from '../types'
 import { bandMatchesFilter } from '../utils/employeeBands'
 import { sectionMatchesFilter } from '../utils/naeringskode'
-import { assetUrl } from '../utils/assets'
-
 export type { CompactPoint } from '../../../shared/points'
 export { filterPointsInBbox, filterPointsByOrgTypes } from '../../../shared/points'
 
@@ -100,36 +98,4 @@ export function parsePointsResponse(data: {
     return fromCompactPoints(data.points as CompactPoint[])
   }
   return data.points as OrganizationPoint[]
-}
-
-export async function fetchKommunePointTile(
-  kommunenummer: string,
-  bbox?: [number, number, number, number],
-): Promise<OrganizationPoint[] | null> {
-  if (bbox) {
-    const { fetchKommunePointsForViewport } = await import('./pointTiles')
-    return fetchKommunePointsForViewport(kommunenummer, bbox)
-  }
-
-  try {
-    const response = await fetch(assetUrl(`data/points/${kommunenummer}.json`))
-    if (!response.ok) return null
-    const data = (await response.json()) as { points: CompactPoint[] }
-    return fromCompactPoints(data.points)
-  } catch {
-    return null
-  }
-}
-
-export function canUseStaticTiles(filters: MapFilters): boolean {
-  return (
-    filters.excludeKonkurs &&
-    filters.excludeUnderAvvikling &&
-    !filters.vatRegisteredOnly &&
-    filters.naeringskodeSections.length === 0 &&
-    filters.employeeBands.length === 0 &&
-    filters.entityKinds.length <= 1 &&
-    filters.entityKinds.every((kind) => kind === 'enhet') &&
-    !filters.konsernMembersOnly
-  )
 }

@@ -15,21 +15,20 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # 11d5960a326750d5838078e36cf38b85af677262
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4 # 49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
           cache: yarn
 
       - name: Restore reference cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4 # 0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: data/cache/reference
-          key: reference-cache-${{ hashFiles('yarn.lock') }}-${{ github.run_id }}
+          key: reference-cache-${{ hashFiles('yarn.lock') }}
           restore-keys: |
-            reference-cache-${{ hashFiles('yarn.lock') }}-
             reference-cache-
 
       - name: Install dependencies
@@ -41,30 +40,43 @@ jobs:
         run: yarn build-national-from-fylker --fresh --jobs=$(nproc)
 
       - name: Save reference cache
-        uses: actions/cache@v4
+        uses: actions/cache/save@v4 # 0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always()
         with:
           path: data/cache/reference
-          key: reference-cache-${{ hashFiles('yarn.lock') }}-${{ github.run_id }}
+          key: reference-cache-${{ hashFiles('yarn.lock') }}-${{ hashFiles('data/cache/reference/manifest.json') }}
+
+      - name: Slim database for publishing
+        run: |
+          cp data/organizations.db data/organizations-publish.db
+          sqlite3 data/organizations-publish.db "
+            DROP TABLE IF EXISTS kartverket_addresses;
+            DROP TABLE IF EXISTS address_cache;
+            VACUUM;
+          "
+          echo "Original: $(stat -c%s data/organizations.db) bytes"
+          echo "Slimmed:  $(stat -c%s data/organizations-publish.db) bytes"
 
       - name: Upload database artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4 # ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: organizations-db
-          path: data/organizations.db
+          path: data/organizations-publish.db
           retention-days: 7
 
       - name: Publish database release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2 # 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: database
           name: Organization database
           body: |
             Full national database built from parallel fylke builds (BRREG + Kartverket bulk),
             merged into one SQLite file. All geocoding done locally against Kartverket CSV (no API).
+            Kartverket address tables stripped to reduce size (only needed during geocoding).
 
             Run: ${{ github.run_id }}
             Time: ${{ github.run_started_at }}
-          files: data/organizations.db
+          files: data/organizations-publish.db
           make_latest: true
           overwrite_files: true
 
@@ -75,29 +87,29 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # 11d5960a326750d5838078e36cf38b85af677262
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4 # 49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
           cache: yarn
 
       - name: Restore tippecanoe cache
         id: tippecanoe-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v4 # 0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             /usr/local/bin/tippecanoe
             /usr/local/bin/tile-join
-          key: tippecanoe-${{ runner.os }}-v1
+          key: tippecanoe-${{ runner.os }}-2.79.0
 
       - name: Install tippecanoe
         if: steps.tippecanoe-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libsqlite3-dev zlib1g-dev
-          git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+          git clone --branch 2.79.0 --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
           make -C /tmp/tippecanoe -j"$(nproc)"
           sudo make -C /tmp/tippecanoe install
 
@@ -105,15 +117,21 @@ jobs:
         run: yarn install --frozen-lockfile
 
       - name: Download database artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4 # d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: organizations-db
           path: data
 
+      - name: Rename database artifact
+        run: mv data/organizations-publish.db data/organizations.db
+
       - name: Install PMTiles CLI
         run: |
-          curl -L https://github.com/protomaps/go-pmtiles/releases/download/v1.31.1/go-pmtiles_1.31.1_Linux_x86_64.tar.gz \
-            | sudo tar xz -C /usr/local/bin pmtiles
+          PMTILES_URL="https://github.com/protomaps/go-pmtiles/releases/download/v1.31.1/go-pmtiles_1.31.1_Linux_x86_64.tar.gz"
+          PMTILES_SHA256="71b2212d6796e172b8ba27c21e662c25ec93cacdb88adc35e508617e720f6292"
+          curl -fsSL "$PMTILES_URL" -o /tmp/pmtiles.tar.gz
+          echo "${PMTILES_SHA256}  /tmp/pmtiles.tar.gz" | sha256sum -c -
+          sudo tar xzf /tmp/pmtiles.tar.gz -C /usr/local/bin pmtiles
 
       - name: Export map tiles (LOD pyramid)
         env:
@@ -124,21 +142,24 @@ jobs:
           yarn export-map-tiles
           tar -C public/data -czf public/data/districts.tar.gz districts
 
-      - name: Export geocoded points (static fallback)
+      - name: Export full static API
         env:
           DATABASE_PATH: data/organizations.db
           STATIC_API_DIR: public/data/api
           NODE_OPTIONS: --max-old-space-size=6144
-        run: yarn tsx scripts/export-static-api.ts geocoded-points
+        run: yarn export-static-api
+
+      - name: Package static API assets
+        run: tar -C public/data/api -czf public/data/static-api.tar.gz .
 
       - name: Publish vector tiles release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2 # 3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: points
           name: Organization point tiles
           body: |
             Pre-built PMTiles vector tiles for default map filters,
-            plus district/grunnkrets colour GeoJSON (`districts.tar.gz`).
+            district/grunnkrets colour GeoJSON, and full static API assets.
 
             Run: ${{ github.run_id }}
             Time: ${{ github.run_started_at }}
@@ -146,6 +167,6 @@ jobs:
             public/data/points.pmtiles
             public/data/points/manifest.json
             public/data/districts.tar.gz
-            public/data/api/geocoded-points.json.gz
+            public/data/static-api.tar.gz
           make_latest: true
           overwrite_files: true

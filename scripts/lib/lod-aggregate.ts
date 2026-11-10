@@ -1,37 +1,35 @@
 import type { WriteStream } from 'node:fs'
 import type Database from 'better-sqlite3'
+import { employeeBand } from './employeeBands.js'
 
 /** Match client `addressGroups.locationKey` precision. */
 const LOCATION_PRECISION = 5
 
-function locationKey(lat: number, lng: number): string {
-  return `${lat.toFixed(LOCATION_PRECISION)}:${lng.toFixed(LOCATION_PRECISION)}`
-}
-
-/** Prefer Kartverket adresse_id; fall back to rounded lat/lng. */
-function addressGroupKey(lat: number, lng: number, adresseId: string | null): string {
-  const id = adresseId?.trim()
-  if (id) return `id:${id}`
-  return `ll:${locationKey(lat, lng)}`
-}
-
-interface AddressBucket {
-  lat: number
-  lng: number
-  adresseId: string | null
-  orgnrs: string[]
-  typeCounts: Map<string, number>
-  /** Primary org fields for instant single-org / address-header popups. */
-  navn: string
-  orgTypeLabel: string
-  addressText: string
-  postnummer: string
+/**
+ * Bit flags packed into the `f` property:
+ *   bit 0 (1) = konkurs
+ *   bit 1 (2) = under_avvikling
+ *   bit 2 (4) = vat_registered
+ *   bit 3 (8) = er_i_konsern
+ */
+function packFlags(row: {
+  konkurs: number
+  under_avvikling: number
+  vat_registered: number
+  er_i_konsern: number
+}): number {
+  return (
+    (row.konkurs ? 1 : 0) |
+    (row.under_avvikling ? 2 : 0) |
+    (row.vat_registered ? 4 : 0) |
+    (row.er_i_konsern ? 8 : 0)
+  )
 }
 
 /**
- * Export one GeoJSON point per unique address (`adresse_id`, else rounded lat/lng).
- * Multi-org addresses get orgCount + orgnrs (circle markers; no split-square icons).
- * Primary org identity fields are baked for fast popup without an API round-trip.
+ * Export one GeoJSON point per organisation with compact attributes.
+ * Properties: o (orgnr int), t (org_type), s (NACE section), b (employee band),
+ * k (entity kind e/u), f (bit flags).
  */
 export function exportPointsNdjson(
   db: Database.Database,
@@ -40,80 +38,55 @@ export function exportPointsNdjson(
 ): number {
   const rows = db
     .prepare(
-      `SELECT orgnr, org_type, org_type_label, navn, address_text, postnummer, lat, lng, adresse_id
+      `SELECT orgnr, org_type, lat, lng,
+              substr(naeringskode, 1, 2) AS nace_section,
+              antall_ansatte, har_registrert_antall_ansatte,
+              entity_kind, konkurs, under_avvikling, vat_registered, er_i_konsern
        FROM organizations
        WHERE deleted = 0
-         AND konkurs = 0
-         AND under_avvikling = 0
          AND lat IS NOT NULL
-         AND lng IS NOT NULL
-         AND entity_kind = 'enhet'`,
+         AND lng IS NOT NULL`,
     )
     .iterate() as Iterable<{
     orgnr: string
     org_type: string
-    org_type_label: string
-    navn: string
-    address_text: string
-    postnummer: string
     lat: number
     lng: number
-    adresse_id: string | null
+    nace_section: string | null
+    antall_ansatte: number | null
+    har_registrert_antall_ansatte: number
+    entity_kind: string
+    konkurs: number
+    under_avvikling: number
+    vat_registered: number
+    er_i_konsern: number
   }>
 
-  const buckets = new Map<string, AddressBucket>()
+  let features = 0
 
   for (const row of rows) {
-    const adresseId = row.adresse_id?.trim() || null
-    const key = addressGroupKey(row.lat, row.lng, adresseId)
-    let bucket = buckets.get(key)
-    if (!bucket) {
-      bucket = {
-        lat: Number(row.lat.toFixed(LOCATION_PRECISION)),
-        lng: Number(row.lng.toFixed(LOCATION_PRECISION)),
-        adresseId,
-        orgnrs: [],
-        typeCounts: new Map(),
-        navn: row.navn,
-        orgTypeLabel: row.org_type_label,
-        addressText: row.address_text,
-        postnummer: row.postnummer,
-      }
-      buckets.set(key, bucket)
-    }
-    bucket.orgnrs.push(row.orgnr)
-    bucket.typeCounts.set(row.org_type, (bucket.typeCounts.get(row.org_type) ?? 0) + 1)
-    onRow?.()
-  }
-
-  let features = 0
-  for (const bucket of buckets.values()) {
-    const orgCount = bucket.orgnrs.length
-    const types = [...bucket.typeCounts.keys()]
-    const orgType = types.length === 1 ? types[0]! : 'MIXED'
+    const lat = Number(row.lat.toFixed(LOCATION_PRECISION))
+    const lng = Number(row.lng.toFixed(LOCATION_PRECISION))
     const properties: Record<string, string | number> = {
-      orgnr: bucket.orgnrs[0]!,
-      orgType,
-      orgCount,
-      orgnrs: bucket.orgnrs.join(','),
-      typeList: `,${[...bucket.typeCounts.keys()].sort().join(',')},`,
-      navn: bucket.navn,
-      orgTypeLabel: bucket.orgTypeLabel,
-      addressText: bucket.addressText,
-      postnummer: bucket.postnummer,
+      o: Number(row.orgnr),
+      t: row.org_type,
+      f: packFlags(row),
     }
-    if (bucket.adresseId) {
-      properties.adresseId = bucket.adresseId
-    }
+    if (row.nace_section) properties.s = row.nace_section
+    const band = employeeBand(row.antall_ansatte, row.har_registrert_antall_ansatte === 1)
+    if (band !== 'unknown') properties.b = band
+    if (row.entity_kind !== 'enhet')
+      properties.k = row.entity_kind === 'underenhet' ? 'u' : row.entity_kind
 
     stream.write(
       `${JSON.stringify({
         type: 'Feature',
-        geometry: { type: 'Point', coordinates: [bucket.lng, bucket.lat] },
+        geometry: { type: 'Point', coordinates: [lng, lat] },
         properties,
       })}\n`,
     )
     features += 1
+    onRow?.()
   }
 
   return features
@@ -125,11 +98,8 @@ export function collectOrgTypes(db: Database.Database): string[] {
       `SELECT DISTINCT org_type AS org_type
        FROM organizations
        WHERE deleted = 0
-         AND konkurs = 0
-         AND under_avvikling = 0
          AND lat IS NOT NULL
          AND lng IS NOT NULL
-         AND entity_kind = 'enhet'
        ORDER BY org_type`,
     )
     .all() as Array<{ org_type: string }>
@@ -143,11 +113,8 @@ export function countGeocodedPoints(db: Database.Database): number {
       `SELECT COUNT(*) AS count
        FROM organizations
        WHERE deleted = 0
-         AND konkurs = 0
-         AND under_avvikling = 0
          AND lat IS NOT NULL
-         AND lng IS NOT NULL
-         AND entity_kind = 'enhet'`,
+         AND lng IS NOT NULL`,
     )
     .get() as { count: number }
 

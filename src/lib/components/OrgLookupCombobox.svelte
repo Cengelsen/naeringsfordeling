@@ -143,6 +143,13 @@
     {#if orgLookupLoading}
       <span class="lookup-status" aria-hidden="true">Søker…</span>
     {/if}
+    <div class="sr-only" aria-live="polite" aria-atomic="true">
+      {#if orgLookupResults.length > 0 && orgLookupOpen}
+        {orgLookupResults.length} {orgLookupResults.length === 1 ? 'resultat' : 'resultater'} funnet
+      {:else if orgLookupQuery.length >= 2 && !orgLookupLoading && orgLookupResults.length === 0}
+        Ingen resultater
+      {/if}
+    </div>
     {#if orgLookupOpen && orgLookupResults.length > 0}
       <ul id="org-lookup-list" class="lookup-dropdown" role="listbox">
         {#each orgLookupResults as hit, index (hit.orgnr)}
@@ -268,5 +275,17 @@
     margin-top: 0.15rem;
     font-size: 0.75rem;
     color: #94a3b8;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 </style>

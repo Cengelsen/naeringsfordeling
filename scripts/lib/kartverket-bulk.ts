@@ -4,7 +4,12 @@ import { basename, dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type Database from 'better-sqlite3'
 import { fetchWithRetry } from './rate-limit.js'
-import { DEFAULT_REFERENCE_CACHE_DIR } from './reference-cache.js'
+import {
+  DEFAULT_REFERENCE_CACHE_DIR,
+  readReferenceManifest,
+  writeReferenceManifest,
+  KARTVERKET_MAX_AGE_MS,
+} from './reference-cache.js'
 import { beginBulkLoad, endBulkLoad } from './db.js'
 
 const ATOM_FEED_CSV =
@@ -370,7 +375,11 @@ export async function downloadNationalKartverketCsv(
   mkdirSync(cacheDir, { recursive: true })
 
   const destination = join(cacheDir, 'Basisdata_0000_Norge_4258_MatrikkelenAdresse_CSV.zip')
-  if (reuseDownload && existsSync(destination)) {
+  const manifest = readReferenceManifest(cacheDir)
+  const isStale =
+    manifest.kartverket_downloaded_at != null &&
+    Date.now() - manifest.kartverket_downloaded_at > KARTVERKET_MAX_AGE_MS
+  if (reuseDownload && existsSync(destination) && !isStale) {
     console.log(`Gjenbruker cached Kartverket-fil: ${destination}`)
     return destination
   }
@@ -379,6 +388,7 @@ export async function downloadNationalKartverketCsv(
   console.log(`Laster ned Kartverket Adresse (hele landet, EPSG:4258)…`)
   console.log(`  URL: ${url}`)
   await downloadFile(url, destination, options)
+  writeReferenceManifest(cacheDir, { kartverket_downloaded_at: Date.now() })
   return destination
 }
 

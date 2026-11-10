@@ -18,13 +18,15 @@ All data synkroniseres nattlig fra BRREG til en **SQLite-database** via GitHub A
 
 ## Nettleserstøtte
 
-| Nettleser | Minimumversjon | Merknader |
-|-----------|---------------|-----------|
-| Chrome | 100+ | Full støtte |
-| Firefox | 117+ | Full støtte |
-| Safari | 16.4+ | Service Worker (modul) fungerer ikke — appen fungerer likevel, men uten SW-caching |
-| Edge | 100+ | Full støtte (Chromium-basert) |
-| Brave | 100+ | Full støtte (Chromium-basert) |
+| Nettleser | Minimumversjon | CI-testet | Merknader |
+|-----------|---------------|-----------|-----------|
+| Chrome | 100+ | ✅ Playwright | Full støtte |
+| Firefox | 117+ | ✅ Playwright | Full støtte |
+| Safari / WebKit | 16.4+ | ✅ Playwright | Full støtte |
+| Edge | 100+ | — | Full støtte (Chromium-basert) |
+| Brave | 100+ | — | Full støtte (Chromium-basert) |
+
+Cross-browser smoke tests kjøres automatisk i GitHub Actions CI (`quality.yml`) med Playwright på Chromium, Firefox og WebKit.
 
 **Fallback-atferd:**
 
@@ -562,9 +564,8 @@ MapLibre org-overlay holdes montert under aggregat (tom LOD) og prefetcher flise
 
 Vektormodus krever i tillegg:
 - WebGL/MapLibre fungerer
-- For enkeltadresser (z15+): UI-filtrene matcher bake-in-filtrene (`excludeKonkurs` + `excludeUnderAvvikling`, ikke `vatRegisteredOnly`) — se `canUseStaticTiles()`
 
-Hvis brukeren skrur av konkurs-/avviklingsfilter eller krever kun MVA-registrerte, vises aggregat-fliser (fylke/kommune/grunnkretser) fortsatt fra distrikts-GeoJSON ved lav zoom; enkeltadresser (z15+) faller tilbake til API/JSON.
+Vektorflis-laget inneholder alle organisasjoner med kompakte attributter (`o`, `t`, `s`, `b`, `k`, `f`). Alle filtreringer (organisasjonstype, NACE-seksjon, ansattbånd, enhetstype, konkurs/avvikling) utføres som MapLibre `setFilter`-uttrykk direkte på flislaget — ingen JSON-fallback er nødvendig.
 
 **MapLibre i vektormodus:**
 

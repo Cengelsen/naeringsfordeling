@@ -9,7 +9,6 @@
     fetchKommuner,
     fetchMunicipalityCounts,
     fetchOrganisasjonsformer,
-    prefetchLocalSearchIndex,
   } from './lib/services/api'
   import type {
     Kommune,
@@ -112,7 +111,6 @@
         fetchOrganisasjonsformer(),
         fetchKommuner(),
         fetchMunicipalityCounts(mapSettings),
-        prefetchLocalSearchIndex(),
       ])
 
       geojson = geoResponse

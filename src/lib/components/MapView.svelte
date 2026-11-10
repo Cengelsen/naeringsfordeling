@@ -12,7 +12,6 @@
   import { fylkeFromKommune } from '../utils/geo'
   import { colorForOrgType } from '../utils/orgTypeColors'
   import type { FeatureCollection } from 'geojson'
-  import { canUseStaticTiles } from '../map/points'
   import {
     lodTilesAvailable,
     orgDetailTilesCoverLeafletZoom,
@@ -22,6 +21,7 @@
   import { MapController, type LocateRequest } from '../map/mapController'
   import Legend from './Legend.svelte'
   import OrgTypeLegend from './OrgTypeLegend.svelte'
+  import ViewportDataTable from './ViewportDataTable.svelte'
   import MapStatusOverlay from './MapStatusOverlay.svelte'
 
   interface Props {
@@ -57,6 +57,8 @@
     message: null,
   })
 
+  let dataTableVisible = $state(false)
+
   let vectorTilesManifest = $state<VectorTilesManifest | null>(null)
   let districtColorsManifest = $state<DistrictColorsManifest | null>(null)
   let vectorTilesDisabled = $state(false)
@@ -67,10 +69,7 @@
   const districtColorsReady = $derived(districtColorsManifest !== null)
 
   const vectorTilesReady = $derived(
-    vectorTilesManifest !== null &&
-      !vectorTilesDisabled &&
-      !webglUnavailable &&
-      canUseStaticTiles(settings),
+    vectorTilesManifest !== null && !vectorTilesDisabled && !webglUnavailable,
   )
 
   const detailOrgTilesReady = $derived(
@@ -215,13 +214,11 @@
     const ctrl = controller
 
     const onMoveEnd = () => ctrl.scheduleDotsReloadOnMove(settings)
-    const onMove = () => ctrl.schedulePrefetchDuringMove(settings)
     const onZoomEnd = () => {
       mapZoom = ctrl.handleMapZoomEnd(settings)
     }
 
     map.on('moveend', onMoveEnd)
-    map.on('move', onMove)
     map.on('zoomend', onZoomEnd)
 
     const resizeObserver = new ResizeObserver(() => {
@@ -234,7 +231,6 @@
     return () => {
       resizeObserver.disconnect()
       map?.off('moveend', onMoveEnd)
-      map?.off('move', onMove)
       map?.off('zoomend', onZoomEnd)
       ctrl.destroy()
       map?.remove()
@@ -330,6 +326,14 @@
     </div>
   {/if}
 
+  <div class="data-table-wrap">
+    <ViewportDataTable
+      summary={dotsState.viewportSummary ?? null}
+      visible={dataTableVisible}
+      onToggle={() => (dataTableVisible = !dataTableVisible)}
+    />
+  </div>
+
   <MapStatusOverlay
     {orgFocusActive}
     visualization={settings.visualization}
@@ -366,6 +370,14 @@
     bottom: 2.5rem;
     z-index: 1000;
     pointer-events: auto;
+  }
+
+  .data-table-wrap {
+    position: absolute;
+    right: 1rem;
+    bottom: 2.5rem;
+    z-index: 1000;
+    pointer-events: none;
   }
 
   :global(.konsern-tree) {

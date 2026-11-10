@@ -10,9 +10,15 @@ import {
 } from '../services/api'
 import { normalizeOrgnr, organizationFromPoint } from './points'
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (ch) => {
-    const entities: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+    const entities: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }
     return entities[ch] ?? ch
   })
 }
@@ -33,9 +39,7 @@ export function orgPopupHtml(org: Organization, konsernHtml = ''): string {
         ? 'Underenhet<br/>'
         : ''
   const geocode =
-    org.geocodeQuality === 'mismatch'
-      ? '<br/><em>Adressekommune avviker fra BRREG</em>'
-      : ''
+    org.geocodeQuality === 'mismatch' ? '<br/><em>Adressekommune avviker fra BRREG</em>' : ''
 
   return `<strong>${escapeHtml(org.navn)}</strong><br/>
        ${escapeHtml(org.orgTypeLabel ?? '')} (${escapeHtml(org.orgType)})<br/>
@@ -62,10 +66,7 @@ export function konsernTreeHtml(node: KonsernNode, depth = 0): string {
   return `${line}${children}`
 }
 
-export function addressPopupHtml(
-  orgs: Organization[],
-  orgTypesForColors: string[],
-): string {
+export function addressPopupHtml(orgs: Organization[], orgTypesForColors: string[]): string {
   const addressLine =
     orgs[0]?.addressText && orgs[0]?.postnummer
       ? `<p class="address-popup-header"><strong>${escapeHtml(orgs[0].addressText)}, ${escapeHtml(orgs[0].postnummer)}</strong></p>`
@@ -125,10 +126,7 @@ export function formatOrgTypeBreakdownFromRecord(
   return `<br><br>${lines.join('<br>')}`
 }
 
-export function wireKonsernPopupLinks(
-  popup: L.Popup,
-  onNavigate: (orgnr: string) => void,
-) {
+export function wireKonsernPopupLinks(popup: L.Popup, onNavigate: (orgnr: string) => void) {
   const element = popup.getElement()
   if (!element) return
 
@@ -141,11 +139,26 @@ export function wireKonsernPopupLinks(
   })
 }
 
+let pointsIndexMap: Map<string, OrganizationPoint> | null = null
+let pointsIndexSource: OrganizationPoint[] | null = null
+
+function getPointsIndex(allPoints: OrganizationPoint[]): Map<string, OrganizationPoint> {
+  if (pointsIndexSource !== allPoints || !pointsIndexMap) {
+    pointsIndexMap = new Map()
+    for (const p of allPoints) {
+      pointsIndexMap.set(normalizeOrgnr(p.orgnr), p)
+    }
+    pointsIndexSource = allPoints
+  }
+  return pointsIndexMap
+}
+
 export function resolveOrganizationFromPoints(
   orgnr: string,
   allPoints: OrganizationPoint[],
 ): Organization | null {
-  const point = allPoints.find((entry) => normalizeOrgnr(entry.orgnr) === normalizeOrgnr(orgnr))
+  const index = getPointsIndex(allPoints)
+  const point = index.get(normalizeOrgnr(orgnr))
   return point ? organizationFromPoint(point) : null
 }
 

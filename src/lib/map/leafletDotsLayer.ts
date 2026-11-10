@@ -1,12 +1,14 @@
 import L from 'leaflet'
 import type { OrganizationPoint } from '../types'
 import { colorForOrgType } from '../utils/orgTypeColors'
-import {
-  groupPointsByLocation,
-  isPreGroupedAddressPoint,
-  orgnrsFromGroup,
-} from './addressGroups'
-import type { MaplibreDotsController, MaplibreDotsLayerOptions, DotFilters } from './maplibreDotsLayer'
+import { groupPointsByLocation, isPreGroupedAddressPoint, orgnrsFromGroup } from './addressGroups'
+import type {
+  MaplibreDotsController,
+  MaplibreDotsLayerOptions,
+  DotFilters,
+  ViewportTileStats,
+  AggregateFilteredCounts,
+} from './maplibreDotsLayer'
 import { filterPointsByMapFilters } from './points'
 
 const MAX_LEAFLET_DOTS = 4000
@@ -28,6 +30,8 @@ export function createLeafletDotsLayer(
     naeringskodeSections: [],
     employeeBands: [],
     entityKinds: [],
+    excludeKonkurs: true,
+    excludeUnderAvvikling: true,
   }
   let colorTypes = options.orgTypesForColors ?? []
   let stale = false
@@ -115,8 +119,13 @@ export function createLeafletDotsLayer(
         naeringskodeSections: [...filters.naeringskodeSections],
         employeeBands: [...filters.employeeBands],
         entityKinds: [...filters.entityKinds],
+        excludeKonkurs: filters.excludeKonkurs,
+        excludeUnderAvvikling: filters.excludeUnderAvvikling,
       }
       rebuild()
+    },
+    setAggregateFilteredCounts(_counts: AggregateFilteredCounts | null) {
+      // No-op in Leaflet fallback mode
     },
     setClustering() {},
     setStale(nextStale) {
@@ -145,6 +154,9 @@ export function createLeafletDotsLayer(
     },
     countRenderedFeatures() {
       return layer.getLayers().length
+    },
+    queryViewportStats(): ViewportTileStats {
+      return { featureCount: layer.getLayers().length, byOrgType: {} }
     },
   }
 }

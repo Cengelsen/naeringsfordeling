@@ -4,6 +4,7 @@ import type { FeatureCollection, Geometry, MultiPolygon, Polygon } from 'geojson
 import { union } from 'polyclip-ts'
 import type Database from 'better-sqlite3'
 import { effectiveKommunenummerExpr } from './db.js'
+import { ringBounds, type GeoBounds } from '../../shared/geo-bounds.js'
 
 export type DistrictLevel = 'fylke' | 'kommune'
 export type DistrictGeometry = Polygon | MultiPolygon
@@ -13,31 +14,10 @@ export interface DistrictFeature {
   districtId: string
   label: string
   geometry: DistrictGeometry
-  bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number }
+  bounds: GeoBounds
 }
 
-const FYLKE_NAMES: Record<string, string> = {
-  '03': 'Oslo',
-  '11': 'Rogaland',
-  '15': 'Møre og Romsdal',
-  '18': 'Nordland',
-  '21': 'Svalbard',
-  '22': 'Jan Mayen',
-  '30': 'Viken',
-  '31': 'Østfold',
-  '32': 'Akershus',
-  '33': 'Buskerud',
-  '34': 'Innlandet',
-  '38': 'Vestfold og Telemark',
-  '39': 'Vestfold',
-  '40': 'Telemark',
-  '42': 'Agder',
-  '46': 'Vestland',
-  '50': 'Trøndelag',
-  '54': 'Troms og Finnmark',
-  '55': 'Troms',
-  '56': 'Finnmark',
-}
+import { FYLKE_NAMES } from '../../shared/fylke-names.js'
 
 function fylkeFromKommune(kommunenummer: string): string {
   return kommunenummer.slice(0, 2)
@@ -49,28 +29,11 @@ function geometryToMultiPolygonCoords(geometry: Geometry): Polygon['coordinates'
   return []
 }
 
-function ringBounds(ring: number[][]): DistrictFeature['bounds'] | null {
-  if (ring.length === 0) return null
-  const bounds = {
-    minLat: ring[0]![1]!,
-    maxLat: ring[0]![1]!,
-    minLng: ring[0]![0]!,
-    maxLng: ring[0]![0]!,
-  }
-  for (const [lng, lat] of ring) {
-    bounds.minLat = Math.min(bounds.minLat, lat!)
-    bounds.maxLat = Math.max(bounds.maxLat, lat!)
-    bounds.minLng = Math.min(bounds.minLng, lng!)
-    bounds.maxLng = Math.max(bounds.maxLng, lng!)
-  }
-  return bounds
-}
-
-function featureBounds(geometry: DistrictGeometry): DistrictFeature['bounds'] | null {
+function featureBounds(geometry: DistrictGeometry): GeoBounds | null {
   if (geometry.type === 'Polygon') {
     return ringBounds(geometry.coordinates[0]!)
   }
-  let merged: DistrictFeature['bounds'] | null = null
+  let merged: GeoBounds | null = null
   for (const polygon of geometry.coordinates) {
     const part = ringBounds(polygon[0]!)
     if (!part) continue
@@ -146,7 +109,10 @@ export function buildDistrictFeatures(level: DistrictLevel): DistrictFeature[] {
   return districts.sort((a, b) => a.districtId.localeCompare(b.districtId))
 }
 
-export function loadOrgCountsByDistrict(db: Database.Database, level: DistrictLevel): Map<string, OrgTypeCounts> {
+export function loadOrgCountsByDistrict(
+  db: Database.Database,
+  level: DistrictLevel,
+): Map<string, OrgTypeCounts> {
   const kommuneExpr = effectiveKommunenummerExpr()
   const districtExpr = level === 'fylke' ? `substr(${kommuneExpr}, 1, 2)` : kommuneExpr
 

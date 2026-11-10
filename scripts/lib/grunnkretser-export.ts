@@ -23,14 +23,16 @@ export interface GrunnkretsFeature {
 }
 
 function loadGrunnkretserGeojson(): FeatureCollection {
-  const geojsonPath = join(process.cwd(), 'public/data/grunnkretser.geojson')
+  const cwd = process.cwd()
+  const cachePath = join(cwd, 'data/cache/grunnkretser/grunnkretser.geojson')
+  const legacyPath = join(cwd, 'public/data/grunnkretser.geojson')
+  const geojsonPath = existsSync(cachePath) ? cachePath : legacyPath
   if (!existsSync(geojsonPath)) {
-    throw new Error(`Missing ${geojsonPath}. Run yarn download-grunnkretser first.`)
+    throw new Error(`Missing grunnkretser GeoJSON. Run yarn download-grunnkretser first.`)
   }
 
   const raw = JSON.parse(readFileSync(geojsonPath, 'utf8')) as
-    | FeatureCollection
-    | { Grunnkrets?: FeatureCollection }
+    FeatureCollection | { Grunnkrets?: FeatureCollection }
 
   if ('Grunnkrets' in raw && raw.Grunnkrets?.features) {
     return raw.Grunnkrets

@@ -7,6 +7,7 @@ import {
   flattenKonsernOrgnrs,
   konsernTreeHtml,
   addressPopupHtml,
+  escapeHtml,
   formatOrgTypeBreakdownHtml,
   wireKonsernPopupLinks,
   resolveOrganization,
@@ -94,7 +95,9 @@ export async function showOrganizationPopup(
       }
     }
   } catch (err) {
-    popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjon')
+    popup.setContent(
+      escapeHtml(err instanceof Error ? err.message : 'Kunne ikke vise organisasjon'),
+    )
   }
 }
 
@@ -115,7 +118,7 @@ export async function showAddressPopup(
 
   if (hint?.addressText && hint?.postnummer) {
     popup.setContent(
-      `<p class="address-popup-header"><strong>${hint.addressText}, ${hint.postnummer}</strong></p><p class="address-popup-summary">Laster ${orgnrs.length} organisasjoner…</p>`,
+      `<p class="address-popup-header"><strong>${escapeHtml(hint.addressText)}, ${escapeHtml(hint.postnummer)}</strong></p><p class="address-popup-summary">Laster ${orgnrs.length} organisasjoner…</p>`,
     )
   }
 
@@ -125,7 +128,9 @@ export async function showAddressPopup(
     orgs.sort((a, b) => a.navn.localeCompare(b.navn, 'nb'))
     popup.setContent(addressPopupHtml(orgs, [...new Set(allPoints.map((p) => p.orgType))].sort()))
   } catch (err) {
-    popup.setContent(err instanceof Error ? err.message : 'Kunne ikke vise organisasjoner')
+    popup.setContent(
+      escapeHtml(err instanceof Error ? err.message : 'Kunne ikke vise organisasjoner'),
+    )
   }
 }
 
@@ -156,13 +161,14 @@ export function handleAggregateClick(
   },
 ) {
   if (!map) return
-  const place =
+  const rawPlace =
     info.label ??
     (info.districtLevel === 'fylke'
       ? 'Fylke'
       : info.districtLevel === 'grunnkrets'
         ? 'Grunnkrets'
         : 'Kommune')
+  const place = escapeHtml(rawPlace)
   const totalLine =
     info.total != null
       ? `<br>${info.total.toLocaleString('nb-NO')} organisasjoner totalt i ${place}`

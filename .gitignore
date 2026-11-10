@@ -20,6 +20,7 @@ public/data/kommuner.geojson
 public/data/kommuner.geojson.gz
 public/data/grunnkretser.geojson
 public/data/grunnkretser.geojson.gz
+data/cache/grunnkretser/
 public/data/districts.tar.gz
 *.local
 

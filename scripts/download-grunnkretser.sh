@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p public/data
+CACHE_DIR="data/cache/grunnkretser"
+mkdir -p "$CACHE_DIR"
 
 ZIP="/tmp/grunnkretser-norge.zip"
 URL="https://testnedlasting.geonorge.no/geonorge/Basisdata/Grunnkretser/GeoJSON/Basisdata_0000_Norge_4258_Grunnkretser_GeoJSON.zip"
+
+# Reuse cached file if it exists and is less than 7 days old
+if [ -f "$CACHE_DIR/grunnkretser.geojson" ]; then
+  AGE=$(( $(date +%s) - $(stat -c %Y "$CACHE_DIR/grunnkretser.geojson") ))
+  if [ $AGE -lt 604800 ]; then
+    echo "Reusing cached grunnkretser.geojson (age: $((AGE / 3600))h)"
+    exit 0
+  fi
+fi
 
 echo "Downloading grunnkretser from Geonorge (~100 MB)…"
 curl -fsSL -o "$ZIP" "$URL"
 
 echo "Extracting grunnkrets polygons (EPSG:4258)…"
-python3 - "$ZIP" public/data/grunnkretser.geojson <<'PY'
+python3 - "$ZIP" "$CACHE_DIR/grunnkretser.geojson" <<'PY'
 import json
 import sys
 import zipfile
@@ -54,7 +64,5 @@ with open(output_path, 'w', encoding='utf-8') as handle:
 print(f"Wrote {len(features)} grunnkretser to {output_path}")
 PY
 
-gzip -9 -f -k public/data/grunnkretser.geojson
-
-echo "Downloaded grunnkrets boundaries to public/data/grunnkretser.geojson"
-ls -lh public/data/grunnkretser.geojson public/data/grunnkretser.geojson.gz
+echo "Downloaded grunnkrets boundaries to $CACHE_DIR/grunnkretser.geojson"
+ls -lh "$CACHE_DIR/grunnkretser.geojson"
